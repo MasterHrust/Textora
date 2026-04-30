@@ -1,0 +1,386 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		026AE038C3CC7104C457F4BC /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */; };
+		16A1AD437ED20C62601BBBC8 /* InlineRewritePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4186B001A370380D5EF520C /* InlineRewritePanelController.swift */; };
+		1BC6850DC9195C1BBBE7E7E4 /* TextAccessService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */; };
+		324FFF56680CC61A53601BB0 /* AIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDFA3B38183BC8A18BB52F2B /* AIClient.swift */; };
+		3E96EA5EF2C443A1913099E7 /* DraggableFloatingPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F46C7329329CAE8DEDC7379E /* DraggableFloatingPanel.swift */; };
+		486DE7B0517C7538FBEE17E8 /* FloatingButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2DC8AC988823AE36D048CC7 /* FloatingButtonView.swift */; };
+		5EF3BA86E25159A81F13DEE1 /* TextoraApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F030F939F54B222E69D978F1 /* TextoraApp.swift */; };
+		695BAC4B6A71A3E4F464661C /* AppCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD53487A6560FD81FE7DE9E1 /* AppCoordinator.swift */; };
+		6B10DC809A0563BD2748674E /* AccessibilityWizardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27E3069E20EC43A2400E2C1B /* AccessibilityWizardView.swift */; };
+		7930D07C9F44DFD7933A96DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 72CDDF25FD6A0084CE6C9149 /* Assets.xcassets */; };
+		82F55A9228CEA2D272E11F47 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */; };
+		A8EAFF5A91AD75479D3AD02D /* InlineRewriteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118D4E1534298FDDBD25D49B /* InlineRewriteView.swift */; };
+		AA8B0863398E255BDCF66DDE /* FloatingHelperController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43A2D871EF7E4395D8B177B /* FloatingHelperController.swift */; };
+		B02CA1580F2921A0DE9922FE /* TextoraAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA26F43766BBD1782FD4AE0B /* TextoraAppDelegate.swift */; };
+		C196E96AD4B703765CB5CA65 /* MarkerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7EF71A9570085EEB3690569 /* MarkerViews.swift */; };
+		C2A6A78088D1B9765015F188 /* InlineRewriteViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */; };
+		E4A982EDDD503D59E3BA4E90 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 416D4536F89F3B7892ECC7D6 /* ContentView.swift */; };
+		F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */; };
+		F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 691BD7E2D55CD14AA7B983F8 /* helper-icon.png */; };
+		FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8F80F4CABD08C9775382E58 /* Models.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
+		0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		118D4E1534298FDDBD25D49B /* InlineRewriteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteView.swift; sourceTree = "<group>"; };
+		224A6BBADE1A3E03044D29EE /* Textora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Textora.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		27E3069E20EC43A2400E2C1B /* AccessibilityWizardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityWizardView.swift; sourceTree = "<group>"; };
+		416D4536F89F3B7892ECC7D6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteViewModel.swift; sourceTree = "<group>"; };
+		691BD7E2D55CD14AA7B983F8 /* helper-icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "helper-icon.png"; sourceTree = "<group>"; };
+		72CDDF25FD6A0084CE6C9149 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextAccessService.swift; sourceTree = "<group>"; };
+		AA26F43766BBD1782FD4AE0B /* TextoraAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextoraAppDelegate.swift; sourceTree = "<group>"; };
+		B2DC8AC988823AE36D048CC7 /* FloatingButtonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingButtonView.swift; sourceTree = "<group>"; };
+		B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConsentPromptController.swift; sourceTree = "<group>"; };
+		B7EF71A9570085EEB3690569 /* MarkerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkerViews.swift; sourceTree = "<group>"; };
+		DD53487A6560FD81FE7DE9E1 /* AppCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCoordinator.swift; sourceTree = "<group>"; };
+		E43A2D871EF7E4395D8B177B /* FloatingHelperController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingHelperController.swift; sourceTree = "<group>"; };
+		F030F939F54B222E69D978F1 /* TextoraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextoraApp.swift; sourceTree = "<group>"; };
+		F4186B001A370380D5EF520C /* InlineRewritePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewritePanelController.swift; sourceTree = "<group>"; };
+		F46C7329329CAE8DEDC7379E /* DraggableFloatingPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraggableFloatingPanel.swift; sourceTree = "<group>"; };
+		F889CFF6CF88B62CE4585E1D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		F8F80F4CABD08C9775382E58 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		FDFA3B38183BC8A18BB52F2B /* AIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIClient.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		5EC32467F6544FA5FC0B8C1D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				72CDDF25FD6A0084CE6C9149 /* Assets.xcassets */,
+				691BD7E2D55CD14AA7B983F8 /* helper-icon.png */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		C380DCB33F1C3218585E9CC8 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				27E3069E20EC43A2400E2C1B /* AccessibilityWizardView.swift */,
+				FDFA3B38183BC8A18BB52F2B /* AIClient.swift */,
+				B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */,
+				DD53487A6560FD81FE7DE9E1 /* AppCoordinator.swift */,
+				0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */,
+				416D4536F89F3B7892ECC7D6 /* ContentView.swift */,
+				F46C7329329CAE8DEDC7379E /* DraggableFloatingPanel.swift */,
+				F030F939F54B222E69D978F1 /* TextoraApp.swift */,
+				AA26F43766BBD1782FD4AE0B /* TextoraAppDelegate.swift */,
+				B2DC8AC988823AE36D048CC7 /* FloatingButtonView.swift */,
+				E43A2D871EF7E4395D8B177B /* FloatingHelperController.swift */,
+				F889CFF6CF88B62CE4585E1D /* Info.plist */,
+				F4186B001A370380D5EF520C /* InlineRewritePanelController.swift */,
+				118D4E1534298FDDBD25D49B /* InlineRewriteView.swift */,
+				5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */,
+				03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */,
+				B7EF71A9570085EEB3690569 /* MarkerViews.swift */,
+				F8F80F4CABD08C9775382E58 /* Models.swift */,
+				9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		E54D2E17A9C3F08C1353B4FB /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				224A6BBADE1A3E03044D29EE /* Textora.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F87EF749618C8AADA767F968 = {
+			isa = PBXGroup;
+			children = (
+				5EC32467F6544FA5FC0B8C1D /* Resources */,
+				C380DCB33F1C3218585E9CC8 /* Sources */,
+				E54D2E17A9C3F08C1353B4FB /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		7D7B2A80B85F61E0B28F613D /* Textora */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 61F07794257571EC08B61FA0 /* Build configuration list for PBXNativeTarget "Textora" */;
+			buildPhases = (
+				6DD3A32B9B828931E3D9E590 /* Sources */,
+				53E2E39D7C41B819F55BFC4C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Textora;
+			packageProductDependencies = (
+			);
+			productName = Textora;
+			productReference = 224A6BBADE1A3E03044D29EE /* Textora.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1AB640D8E4D1299B35CEBF87 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+			};
+			buildConfigurationList = DBAFC8A3F7CAEB860F109480 /* Build configuration list for PBXProject "Textora" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = F87EF749618C8AADA767F968;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E54D2E17A9C3F08C1353B4FB /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7D7B2A80B85F61E0B28F613D /* Textora */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		53E2E39D7C41B819F55BFC4C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7930D07C9F44DFD7933A96DB /* Assets.xcassets in Resources */,
+				F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6DD3A32B9B828931E3D9E590 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				324FFF56680CC61A53601BB0 /* AIClient.swift in Sources */,
+				6B10DC809A0563BD2748674E /* AccessibilityWizardView.swift in Sources */,
+				F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */,
+				695BAC4B6A71A3E4F464661C /* AppCoordinator.swift in Sources */,
+				82F55A9228CEA2D272E11F47 /* AppViewModel.swift in Sources */,
+				E4A982EDDD503D59E3BA4E90 /* ContentView.swift in Sources */,
+				3E96EA5EF2C443A1913099E7 /* DraggableFloatingPanel.swift in Sources */,
+				5EF3BA86E25159A81F13DEE1 /* TextoraApp.swift in Sources */,
+				B02CA1580F2921A0DE9922FE /* TextoraAppDelegate.swift in Sources */,
+				486DE7B0517C7538FBEE17E8 /* FloatingButtonView.swift in Sources */,
+				AA8B0863398E255BDCF66DDE /* FloatingHelperController.swift in Sources */,
+				16A1AD437ED20C62601BBBC8 /* InlineRewritePanelController.swift in Sources */,
+				A8EAFF5A91AD75479D3AD02D /* InlineRewriteView.swift in Sources */,
+				C2A6A78088D1B9765015F188 /* InlineRewriteViewModel.swift in Sources */,
+				026AE038C3CC7104C457F4BC /* KeychainHelper.swift in Sources */,
+				C196E96AD4B703765CB5CA65 /* MarkerViews.swift in Sources */,
+				FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */,
+				1BC6850DC9195C1BBBE7E7E4 /* TextAccessService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		35FBEFE8D4703C239D6EF787 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		73C6AA1559FA0AA4E0289E00 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.textora.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A421157E677ABA74BA4D9E95 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = 35Q2T38T7Q;
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		C86B05F10CD7CC55E9E21525 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.textora.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		61F07794257571EC08B61FA0 /* Build configuration list for PBXNativeTarget "Textora" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35FBEFE8D4703C239D6EF787 /* Debug */,
+				A421157E677ABA74BA4D9E95 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		DBAFC8A3F7CAEB860F109480 /* Build configuration list for PBXProject "Textora" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C86B05F10CD7CC55E9E21525 /* Debug */,
+				73C6AA1559FA0AA4E0289E00 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1AB640D8E4D1299B35CEBF87 /* Project object */;
+}

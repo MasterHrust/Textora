@@ -1,0 +1,398 @@
+import AppKit
+import Combine
+import SwiftUI
+
+@MainActor
+final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
+    static let shared = AppCoordinator()
+    private static let onboardingCompletedKey = "onboarding.byok.completed"
+    private static let onboardingSkippedKey = "onboarding.byok.skipped"
+
+    private var floatingHelper: FloatingHelperController?
+    private let rewritePanel = InlineRewritePanelController()
+    private var settingsWindow: NSWindow?
+    private var settingsViewModel: AppViewModel?
+    private var onboardingWindow: NSWindow?
+    private var onboardingViewModel: AppViewModel?
+    private var accessibilityWizardWindow: NSWindow?
+    private let consentPrompt = AppConsentPromptController()
+    private let textAccess = TextAccessService()
+    private var isHelperHovered = false
+    private var isRewritePopupHovered = false
+    private var isConsentPromptHovered = false
+    private var isHidingFloatingPanels = false
+    private var floatingPanelsHideTask: DispatchWorkItem?
+    @Published private(set) var helperStatus: String = "Initializing"
+    private var didRunLaunchFlow = false
+    private var shouldOpenAccessibilityAfterOnboarding = false
+
+    override private init() {
+        super.init()
+    }
+
+    /// Call only from `NSApplicationDelegate.applicationDidFinishLaunching`.
+    func startAfterApplicationReady() {
+        guard !didRunLaunchFlow else { return }
+        didRunLaunchFlow = true
+        start()
+    }
+
+    func start() {
+        rewritePanel.onHoverChanged = { [weak self] hovering in
+            self?.handleRewritePopupHoverChanged(hovering)
+        }
+        rewritePanel.onActionInvoked = { [weak self] in
+            self?.hideFloatingPanelsIfNeeded()
+        }
+        consentPrompt.onAllow = { [weak self] in
+            self?.handleConsentAllow()
+        }
+        consentPrompt.onDeny = { [weak self] in
+            self?.handleConsentDeny()
+        }
+        consentPrompt.onLater = { [weak self] in
+            self?.handleConsentLater()
+        }
+        consentPrompt.onHoverChanged = { [weak self] hovering in
+            self?.handleConsentPromptHoverChanged(hovering)
+        }
+        if floatingHelper == nil {
+            floatingHelper = FloatingHelperController(
+                onRewriteTap: { [weak self] frame in
+                self?.rewritePanel.show(near: frame)
+                },
+                onFloatingHoverChanged: { [weak self] hovering, frame in
+                    self?.handleFloatingHoverChanged(hovering: hovering, frame: frame)
+                }
+            )
+            floatingHelper?.onStatusChange = { [weak self] status in
+                self?.helperStatus = status
+            }
+        }
+
+        KeychainHelper.migrateIfNeeded()
+        KeychainHelper.warmUpCache()
+        if !hasAnyConfiguredKey() {
+            shouldOpenAccessibilityAfterOnboarding = true
+            showOnboardingWindow()
+            return
+        }
+        if !textAccess.hasAccessibilityPermission() {
+            showAccessibilityWizardDeferred()
+            return
+        }
+        floatingHelper?.start()
+        showOnboardingIfNeededOnLaunch()
+    }
+
+    /// One run-loop cycle + short delay so MenuBarExtra and LSUIElement finish activation.
+    private func showAccessibilityWizardDeferred() {
+        DispatchQueue.main.async { [weak self] in
+            self?.showAccessibilityWizard()
+        }
+    }
+
+    private func showAccessibilityWizard() {
+        guard accessibilityWizardWindow == nil else { return }
+        let content = AccessibilityWizardView {
+            // Native AX prompt registers the app in Privacy → Accessibility (URL alone does not).
+            self.textAccess.requestAccessibilityPermissionIfNeeded()
+            self.dismissAccessibilityWizard()
+        }
+        let hosting = NSHostingView(rootView: content)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 460),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Textora"
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.contentView = hosting
+        window.center()
+        window.delegate = self
+        accessibilityWizardWindow = window
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func dismissAccessibilityWizard() {
+        accessibilityWizardWindow?.close()
+        accessibilityWizardWindow = nil
+        KeychainHelper.migrateIfNeeded()
+        KeychainHelper.warmUpCache()
+        floatingHelper?.start()
+        showOnboardingIfNeededOnLaunch(afterAccessibility: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSWindow) === accessibilityWizardWindow {
+            accessibilityWizardWindow = nil
+            KeychainHelper.migrateIfNeeded()
+            KeychainHelper.warmUpCache()
+            floatingHelper?.start()
+            showOnboardingIfNeededOnLaunch(afterAccessibility: true)
+            return
+        }
+        if (notification.object as? NSWindow) === onboardingWindow {
+            if onboardingViewModel?.isOnboardingComplete != true {
+                onboardingViewModel?.skipOnboardingForNow()
+            }
+            onboardingWindow = nil
+        }
+    }
+
+    func showDebugBubbleAtMouse() {
+        floatingHelper?.showDebugBubbleAtMouse()
+    }
+
+    private func handleFloatingHoverChanged(hovering: Bool, frame: CGRect) {
+        isHelperHovered = hovering
+        if hovering {
+            cancelScheduledFloatingPanelsHide()
+            let status = textAccess.currentAppConsentStatus()
+            switch status {
+            case .allowed:
+                isConsentPromptHovered = false
+                consentPrompt.hide()
+                // Only reuse cached auto-check for Fix operation; otherwise open popup and run exactly one request for the chosen mode.
+                let savedOpRaw = UserDefaults.standard.string(forKey: "inlineRewrite.lastOperation") ?? RewriteOperation.fixGrammar.rawValue
+                let savedOp = RewriteOperation(rawValue: savedOpRaw) ?? .fixGrammar
+                if savedOp == .fixGrammar, let cached = self.floatingHelper?.cachedFixGrammarResultForCurrentFocus() {
+                    rewritePanel.showWithSuggestion(
+                        near: frame,
+                        context: cached.context,
+                        suggestion: cached.suggestion,
+                        operation: .fixGrammar
+                    )
+                } else {
+                    rewritePanel.show(near: frame, triggerRewrite: true)
+                }
+                // Keep the floating helper below the pop-up to avoid z-order fighting.
+                floatingHelper?.setKeepBelowWindow(rewritePanel.window)
+            case .denied:
+                rewritePanel.hide()
+                isConsentPromptHovered = false
+                consentPrompt.hide()
+                floatingHelper?.setKeepBelowWindow(nil)
+            case .unknown:
+                rewritePanel.hide()
+                floatingHelper?.setKeepBelowWindow(nil)
+                if let app = textAccess.frontmostAppInfo() {
+                    consentPrompt.show(near: frame, appName: app.displayName, targetBundleID: app.bundleID)
+                }
+            }
+            return
+        }
+        scheduleHideFloatingPanelsIfNeeded()
+    }
+
+    private func handleRewritePopupHoverChanged(_ hovering: Bool) {
+        isRewritePopupHovered = hovering
+        if hovering {
+            cancelScheduledFloatingPanelsHide()
+        } else {
+            scheduleHideFloatingPanelsIfNeeded()
+        }
+    }
+
+    private func handleConsentPromptHoverChanged(_ hovering: Bool) {
+        isConsentPromptHovered = hovering
+        if hovering {
+            cancelScheduledFloatingPanelsHide()
+        } else {
+            scheduleHideFloatingPanelsIfNeeded()
+        }
+    }
+
+    private func scheduleHideFloatingPanelsIfNeeded() {
+        cancelScheduledFloatingPanelsHide()
+        let task = DispatchWorkItem { [weak self] in
+            self?.hideFloatingPanelsIfNeeded()
+        }
+        floatingPanelsHideTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: task)
+    }
+
+    private func cancelScheduledFloatingPanelsHide() {
+        floatingPanelsHideTask?.cancel()
+        floatingPanelsHideTask = nil
+    }
+
+    private func hideFloatingPanelsIfNeeded() {
+        guard !isHelperHovered && !isRewritePopupHovered && !isConsentPromptHovered else { return }
+        guard !isHidingFloatingPanels else { return }
+        // If user manually dragged the rewrite pop-up, keep it open until explicitly closed.
+        guard !rewritePanel.isPinnedOpen else { return }
+        // Keep popup open when interacting with native dropdowns (they open in a separate window
+        // and can temporarily end SwiftUI onHover). Use a small “tolerance” area around the popup.
+        if rewritePanel.isVisible, let frame = rewritePanel.currentFrame {
+            let mouse = NSEvent.mouseLocation
+            let safe = frame.insetBy(dx: -90, dy: -90)
+            if safe.contains(mouse) {
+                return
+            }
+        }
+        isHidingFloatingPanels = true
+        cancelScheduledFloatingPanelsHide()
+        rewritePanel.hide()
+        floatingHelper?.setKeepBelowWindow(nil)
+        consentPrompt.hide()
+        isConsentPromptHovered = false
+        isHidingFloatingPanels = false
+    }
+
+    private func handleConsentAllow() {
+        isConsentPromptHovered = false
+        guard let bundleID = consentPrompt.capturedConsentBundleID, !bundleID.isEmpty else {
+            consentPrompt.hide()
+            return
+        }
+        textAccess.setAppConsentStatus(.allowed, for: bundleID)
+        consentPrompt.hide()
+        if let frame = floatingHelper?.currentFrame, !frame.isEmpty {
+            rewritePanel.show(near: frame, triggerRewrite: true)
+        }
+    }
+
+    private func handleConsentDeny() {
+        isConsentPromptHovered = false
+        guard let bundleID = consentPrompt.capturedConsentBundleID, !bundleID.isEmpty else {
+            consentPrompt.hide()
+            return
+        }
+        textAccess.setAppConsentStatus(.denied, for: bundleID)
+        rewritePanel.hide()
+        consentPrompt.hide()
+    }
+
+    private func handleConsentLater() {
+        isConsentPromptHovered = false
+        consentPrompt.hide()
+    }
+
+    func showSettingsWindow() {
+        if settingsWindow == nil {
+            let vm = AppViewModel()
+            settingsViewModel = vm
+            let root = ContentView(viewModel: vm)
+            let hosting = NSHostingView(rootView: root)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Textora Settings"
+            // Default true would release the window when closed → dangling ref / crash on second open.
+            window.isReleasedWhenClosed = false
+            window.center()
+            window.contentView = hosting
+            settingsWindow = window
+        } else {
+            settingsViewModel?.reloadFromUserDefaults()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func showQuickSetupWindow() {
+        UserDefaults.standard.removeObject(forKey: Self.onboardingSkippedKey)
+        showOnboardingWindow()
+    }
+
+    private func showOnboardingIfNeededOnLaunch(afterAccessibility: Bool = false) {
+        let defaults = UserDefaults.standard
+        let completed = defaults.bool(forKey: Self.onboardingCompletedKey)
+        let hasAnyConfiguredKey = hasAnyConfiguredKey()
+
+        // If there are no configured keys, always show quick setup regardless of previous skip/completed flags.
+        // This prevents "silent no-op" state when onboarding was previously dismissed.
+        if !hasAnyConfiguredKey {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.showOnboardingWindow()
+            }
+            return
+        }
+
+        // If keys are present, keep previous onboarding behavior.
+        guard !completed else { return }
+        if afterAccessibility {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.showOnboardingWindow()
+        }
+    }
+
+    private func showOnboardingWindow() {
+        if onboardingViewModel == nil {
+            onboardingViewModel = AppViewModel()
+        }
+        onboardingViewModel?.prepareOnboardingSession()
+        if onboardingWindow == nil {
+            let root = OnboardingView(
+                viewModel: onboardingViewModel!,
+                onClose: { [weak self] in
+                    self?.closeOnboardingWindow()
+                },
+                onOpenSettings: { [weak self] in
+                    self?.showSettingsWindow()
+                },
+                onFinish: { [weak self] in
+                    guard let self else { return }
+                    self.onboardingViewModel?.completeOnboarding()
+                    self.closeOnboardingWindow()
+                    if self.shouldOpenAccessibilityAfterOnboarding || !self.textAccess.hasAccessibilityPermission() {
+                        self.shouldOpenAccessibilityAfterOnboarding = false
+                        self.showAccessibilityWizardDeferred()
+                    } else {
+                        self.floatingHelper?.start()
+                    }
+                }
+            )
+            let hosting = NSHostingView(rootView: root)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 340),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Welcome to Textora"
+            window.isReleasedWhenClosed = false
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.isMovableByWindowBackground = true
+            window.contentView = hosting
+            window.center()
+            window.delegate = self
+            onboardingWindow = window
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
+        onboardingWindow?.orderFrontRegardless()
+    }
+
+    private func closeOnboardingWindow() {
+        onboardingWindow?.orderOut(nil)
+        onboardingWindow = nil
+    }
+
+    private func hasAnyConfiguredKey() -> Bool {
+        (KeychainHelper.read(key: KeychainHelper.openAIKeyAccount)?.isEmpty == false) ||
+        (KeychainHelper.read(key: KeychainHelper.geminiKeyAccount)?.isEmpty == false) ||
+        (KeychainHelper.read(key: KeychainHelper.claudeKeyAccount)?.isEmpty == false) ||
+        (KeychainHelper.read(key: KeychainHelper.customTokenAccount)?.isEmpty == false)
+    }
+}

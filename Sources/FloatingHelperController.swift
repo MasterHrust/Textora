@@ -1,0 +1,4803 @@
+import AppKit
+import SwiftUI
+
+@MainActor
+final class FloatingHelperController {
+    enum MarkerAnchor: String {
+        case caret
+        case field
+    }
+
+    enum SuggestionState {
+        case neutral
+        case needsAttention
+        case looksGood
+    }
+
+    private let textService = TextAccessService()
+    private let aiClient = AIClient()
+    private let spellChecker = NSSpellChecker.shared
+    private var panel: DraggableFloatingPanel?
+    private var issueOverlayPanel: NSPanel?
+    private var extraIssueOverlayPanels: [NSPanel] = []
+    private var markerPanel: NSPanel?
+    private var extraMarkerPanels: [NSPanel] = []
+    private var hoverCardPanel: NSPanel?
+    private var timer: Timer?
+    private var workspaceActivationObserver: NSObjectProtocol?
+    private let onRewriteTap: (CGRect) -> Void
+    private let onFloatingHoverChanged: (Bool, CGRect) -> Void
+    private var lastFrame: CGRect = .zero
+    var onStatusChange: ((String) -> Void)?
+    private var isDragging = false
+    private var manualOffset: CGPoint = CGPoint(x: 8, y: -42)
+    private var lastSignature: String?
+    private var lastActivityAt = Date()
+    private let idleDelay: TimeInterval = 1.0
+    private let sentenceDelay: TimeInterval = 1.0
+    /// Debounces AI auto-check by focused **text** (caret moves change `focusedTextSignature` but not this segment).
+    private var lastCheckedValueSegment: String?
+    /// Avoid `orderFrontRegardless` on every 200ms tick; set true when panel is hidden or z-order policy changes.
+    private var floatingPanelNeedsZOrderPass = true
+    private var lastLayoutStatusPostedAt: Date?
+    private var isEvaluating = false
+    private var suggestionState: SuggestionState = .neutral
+    private var latestSuggestion: String = ""
+    private var latestSuggestionOptions: [OverlaySuggestion] = []
+    private var latestContext: TextAccessService.FocusedTextContext?
+    private var latestSignature: String?
+    private var latestIssueRange: NSRange?
+    /// All localized issues the AI "auditor" reported for the active
+    /// segment. Empty on the legacy `overlaySuggestions` path; non-empty
+    /// when the per-span rendering is active. Each issue yields one
+    /// underline panel + one hover-card entry.
+    private var latestIssues: [OverlayIssue] = []
+    /// When the user hovers a specific underline, remember which issue
+    /// the hover card is showing. `nil` for the floating-icon hover
+    /// (shows the primary issue).
+    private var hoveredIssueID: UUID?
+    /// Maps each rendered underline panel back to the issue it
+    /// represents. Used by the per-issue hover hit-test (mouseEntered
+    /// → look up panel index → look up issue ID → show that issue's
+    /// hover card). Built on every `updateMarker` pass.
+    private struct IssuePanelLayout {
+        let panelIndex: Int
+        let frame: CGRect
+        let issueID: UUID?
+    }
+    private var issuePanelLayouts: [IssuePanelLayout] = []
+    /// Signatures of issues the user explicitly dismissed via "Skip"
+    /// on the hover card. Keyed by segment signature + category + span
+    /// + replacement so a skip is tied to the exact phrasing of the
+    /// current sentence — editing the sentence invalidates the skip
+    /// automatically.
+    private var skippedIssueSignatures: Set<String> = []
+    /// Recent successful rewrites used as a loop guard. If the next
+    /// auto-check suggests reverting a fresh fix back to its previous
+    /// wording, we suppress that suggestion instead of bouncing the
+    /// user between the same two variants.
+    private struct RecentAppliedRewrite {
+        let fromKey: String
+        let toKey: String
+        let recordedAt: Date
+    }
+    private var recentAppliedRewrites: [RecentAppliedRewrite] = []
+    private let recentAppliedRewriteTTL: TimeInterval = 180
+    private let recentAppliedRewriteCap = 24
+    private var localBatchMutationGraceUntil: Date?
+    private var lastMarkerFieldFrame: CGRect?
+    private var lastMarkerCaretFrame: CGRect?
+    private var lastMarkerDebugSignature: String?
+    private var recentOverlayLayoutDebugSignatures: [String] = []
+    private var recentMarkerPipelineDebugSignatures: [String] = []
+    private var markerAnchor: MarkerAnchor = .field
+    private var isMarkerHovered = false
+    private var isHoverCardHovered = false
+    private var hoverHideTask: DispatchWorkItem?
+    /// 34pt × 1.5 — easier to see and drag.
+    private static let floatingPanelSide: CGFloat = 51
+    /// One-time “find me” ring (5s after the floating icon first appears — not at cold launch).
+    private var spotlightHighlightActive = false
+    private static let spotlightShownKey = "floatingHelper.spotlightShown"
+    private var spotlightDismissWorkItem: DispatchWorkItem?
+    private var visibilityDropTask: DispatchWorkItem?
+    private let visibilityDropDelay: TimeInterval = 0.45
+
+    private struct CorrectionScope {
+        let text: String
+        let range: NSRange
+    }
+
+    private struct SegmentEvaluationResult {
+        enum State { case clean, needsAttention, inconclusive }
+        var suggestion: String
+        var suggestionOptions: [OverlaySuggestion]
+        var issueLocalRange: NSRange?
+        var state: State
+        /// Structured list of localized issues inside the segment —
+        /// populated by `AIClient.auditIssues`. When empty the UI falls
+        /// back to the legacy single-marker path driven by
+        /// `issueLocalRange` + `suggestion`.
+        var issues: [OverlayIssue] = []
+    }
+
+    /// Caches per-segment auto-check results so we don't re-run the AI over
+    /// unchanged paragraphs (prevents "infinite suggestion loops" when a
+    /// multi-segment message has one issue and the others are clean).
+    /// Key: `normalized(segment.text)` — same text ⇒ same result.
+    private var segmentEvaluationCache: [String: SegmentEvaluationResult] = [:]
+    private var segmentEvaluationCacheOrder: [String] = []
+    private let segmentEvaluationCacheCap = 64
+
+    private enum AnchorMode: String {
+        case focusedEditable
+        case selection
+    }
+    private var anchorMode: AnchorMode = .focusedEditable
+    private var selectionSignature: String?
+    private var selectionSignatureSince: Date?
+    private let selectionAppearDelay: TimeInterval = 0.22
+    private weak var keepBelowWindow: NSWindow?
+    private var isManuallyPlacedForCurrentFocus = false
+    private var manualFixedFrame: CGRect?
+    private let autoGap: CGFloat = 10
+    /// ~3cm in points (72pt per inch). 3cm ≈ 1.18in ≈ 85pt.
+    private let caretOffsetDistance: CGFloat = 85
+    private let caretAvoidancePadding: CGFloat = 14
+    private var ourBundleID: String { Bundle.main.bundleIdentifier ?? "" }
+    private var consentBootstrapFrame: CGRect?
+    private var consentBootstrapBundleID: String?
+    init(
+        onRewriteTap: @escaping (CGRect) -> Void,
+        onFloatingHoverChanged: @escaping (Bool, CGRect) -> Void
+    ) {
+        self.onRewriteTap = onRewriteTap
+        self.onFloatingHoverChanged = onFloatingHoverChanged
+    }
+
+    deinit {
+        if let workspaceActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
+        }
+    }
+
+    /// Pop-up should anchor to the floating bubble, not the text field / window.
+    private func floatingBubbleFrameForRewritePopup() -> CGRect {
+        panel?.frame ?? lastFrame
+    }
+
+    var currentFrame: CGRect {
+        floatingBubbleFrameForRewritePopup()
+    }
+
+    /// `focusedTextSignature()` is `range|valueText`.
+    private func valueSegment(ofFocusedSignature full: String) -> String {
+        guard let idx = full.firstIndex(of: "|") else { return full }
+        return String(full[full.index(after: idx)...])
+    }
+
+    private func postStatus(_ message: String) {
+        let now = Date()
+        if message.hasPrefix("Showing helper at") {
+            if let t = lastLayoutStatusPostedAt, now.timeIntervalSince(t) < 1.2 {
+                return
+            }
+            lastLayoutStatusPostedAt = now
+        }
+        onStatusChange?(message)
+    }
+
+    private func postOverlayLayoutDebug(
+        stage: String,
+        hasEditableFocus: Bool,
+        appConsent: TextAccessService.AppConsentStatus,
+        fieldFrame: CGRect?,
+        windowFrame: CGRect?,
+        caretFrame: CGRect?,
+        bubbleFrame: CGRect?,
+        valueLength: Int? = nil,
+        fallback: String? = nil,
+        note: String? = nil
+    ) {
+        let front = textService.frontmostAppInfo()
+        let message = "stage=\(stage) "
+            + "front=\(front?.bundleID ?? "nil")(\(front?.displayName ?? "nil")) "
+            + "consent=\(appConsent.rawValue) hasEditable=\(hasEditableFocus) "
+            + "anchorMode=\(anchorMode.rawValue) manual=\(isManuallyPlacedForCurrentFocus) "
+            + "field=\(textoraDiagRect(fieldFrame)) window=\(textoraDiagRect(windowFrame)) "
+            + "caret=\(textoraDiagRect(caretFrame)) bubble=\(textoraDiagRect(bubbleFrame)) "
+            + "windowScreen={\(textoraDiagScreen(windowFrame))} bubbleScreen={\(textoraDiagScreen(bubbleFrame))} "
+            + "fallback=\(fallback ?? "nil") "
+            + "valueLen=\(valueLength.map(String.init) ?? "nil") "
+            + "note=\(note ?? "nil")"
+        guard shouldPostControllerDiagnostic(message, history: &recentOverlayLayoutDebugSignatures) else { return }
+        textoraDiagLog("overlayLayout", message)
+    }
+
+    private func postMarkerPipelineDebug(
+        stage: String,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange?,
+        fallback: CGRect,
+        axFrames: [CGRect],
+        selectedSource: String,
+        selectedFrames: [CGRect],
+        normalizedFrames: [CGRect]
+    ) {
+        let message = "stage=\(stage) bundle=\(context.targetBundleID) "
+            + "textLen=\((context.text as NSString).length) range=\(textoraDiagNSRange(issueRange)) "
+            + "geometry=\(diagnosticGeometryKind(for: context, selectedSource: selectedSource)) "
+            + "anchor=\(context.anchor.debugSummary) contextFrame=\(textoraDiagRect(context.frame)) "
+            + "fallback=\(textoraDiagRect(fallback)) ax=\(textoraDiagRects(axFrames)) "
+            + "source=\(selectedSource) raw=\(textoraDiagRects(selectedFrames)) "
+            + "normalized=\(textoraDiagRects(normalizedFrames))"
+        guard shouldPostControllerDiagnostic(message, history: &recentMarkerPipelineDebugSignatures, cap: 192) else { return }
+        textoraDiagLog("markerPipeline", message)
+    }
+
+    private func shouldPostControllerDiagnostic(_ message: String, history: inout [String], cap: Int = 96) -> Bool {
+        if history.contains(message) {
+            return false
+        }
+        history.append(message)
+        if history.count > cap {
+            history.removeFirst(history.count - cap)
+        }
+        return true
+    }
+
+    private func diagnosticGeometryKind(
+        for context: TextAccessService.FocusedTextContext,
+        selectedSource: String
+    ) -> String {
+        if selectedSource == "axPrecise" {
+            return "ax"
+        }
+        if isSlackBundle(context.targetBundleID) {
+            return "estimated"
+        }
+        if selectedSource == "hostEstimated" || selectedSource == "hostFallbackFrame" {
+            return "estimated"
+        }
+        return "fallback"
+    }
+
+    private func noteFloatingPanelHidden() {
+        floatingPanelNeedsZOrderPass = true
+    }
+
+    /// When a pop-up is visible, keep the floating bubble below it to avoid z-order fighting.
+    func setKeepBelowWindow(_ window: NSWindow?) {
+        let hadBelow = keepBelowWindow != nil
+        keepBelowWindow = window
+        guard let panel else { return }
+        if let window {
+            let wn = window.windowNumber
+            guard wn != 0 else { return }
+            if panel.isVisible {
+                panel.order(.below, relativeTo: wn)
+            }
+        } else if hadBelow {
+            floatingPanelNeedsZOrderPass = true
+        }
+    }
+
+    func start() {
+        if panel == nil {
+            spotlightHighlightActive = !UserDefaults.standard.bool(forKey: Self.spotlightShownKey)
+            createPanel()
+        }
+        if markerPanel == nil {
+            createMarkerPanel()
+        }
+        if issueOverlayPanel == nil {
+            createIssueOverlayPanel()
+        }
+        timer?.invalidate()
+        let newTimer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateVisibilityAndPosition()
+            }
+        }
+        // `.common` includes default + event-tracking so one tick isn’t deferred for whole seconds during
+        // nested tracking (e.g. dragging the bubble) the way a default-only timer can be.
+        RunLoop.main.add(newTimer, forMode: .common)
+        timer = newTimer
+        installWorkspaceActivationObserverIfNeeded()
+        updateVisibilityAndPosition()
+    }
+
+    private func installWorkspaceActivationObserverIfNeeded() {
+        guard workspaceActivationObserver == nil else { return }
+        workspaceActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                self?.handleWorkspaceDidActivate(notification)
+            }
+        }
+    }
+
+    private func handleWorkspaceDidActivate(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        let bundleID = app?.bundleIdentifier ?? ""
+        guard bundleID != ourBundleID else { return }
+
+        textService.invalidateTransientFocusCaches()
+        lastSignature = nil
+        lastCheckedValueSegment = nil
+        latestSignature = nil
+        selectionSignature = nil
+        selectionSignatureSince = nil
+        hoveredIssueID = nil
+        lastActivityAt = Date()
+        cancelScheduledVisibilityDrop()
+        hideFloatingHelperImmediately()
+        resetSuggestionStateAfterAppSwitch()
+        postStatus("App activated; refreshing focused text")
+
+        updateVisibilityAndPosition()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self, !self.isEvaluating, !self.isDragging else { return }
+            self.evaluateCurrentText()
+        }
+    }
+
+    private func createPanel() {
+        let content = NSHostingView(
+            rootView: FloatingButtonView(
+                ringColors: ringColors(for: suggestionState),
+                isLoading: isEvaluating,
+                spotlightPulse: spotlightHighlightActive
+            )
+        )
+        let panel = DraggableFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: Self.floatingPanelSide, height: Self.floatingPanelSide),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .screenSaver
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        panel.ignoresMouseEvents = false
+        panel.contentView = content
+        panel.orderOut(nil)
+
+        panel.onHoverChanged = { [weak self] hovering in
+            guard let self else { return }
+            self.onFloatingHoverChanged(hovering, self.floatingBubbleFrameForRewritePopup())
+        }
+        panel.onClicked = { [weak self] in
+            guard let self else { return }
+            self.onRewriteTap(self.floatingBubbleFrameForRewritePopup())
+        }
+        panel.onDragBegan = { [weak self] in
+            guard let self else { return }
+            self.isDragging = true
+            self.floatingPanelNeedsZOrderPass = true
+            self.bringToFrontOrBelowIfNeeded()
+        }
+        panel.onDragMoved = { [weak self] newFrame in
+            self?.lastFrame = newFrame
+        }
+        panel.onDragEnded = { [weak self] finalFrame in
+            guard let self else { return }
+            // After user drag, freeze at absolute screen position.
+            self.manualFixedFrame = finalFrame
+            self.isManuallyPlacedForCurrentFocus = true
+            self.isDragging = false
+            self.postStatus("Helper moved manually")
+        }
+
+        self.panel = panel
+    }
+
+    private func updateVisibilityAndPosition() {
+        guard textService.hasAccessibilityPermission() else {
+            postStatus("No accessibility permission")
+            cancelScheduledVisibilityDrop()
+            panel?.orderOut(nil)
+            noteFloatingPanelHidden()
+            hideMarkerAndCard()
+            return
+        }
+        if textService.isFrontmostAppSuppressedForHelper() {
+            postStatus("Suppressed in current app")
+            cancelScheduledVisibilityDrop()
+            panel?.orderOut(nil)
+            noteFloatingPanelHidden()
+            hideMarkerAndCard()
+            return
+        }
+        if isFrontmostOurOwnApp() {
+            postStatus("Suppressed in Textora UI")
+            hideFloatingHelperImmediately()
+            return
+        }
+        // While the panel runs its modal `nextEvent` loop, skip layout/AX (z-order is fixed once in
+        // `onDragBegan` — avoid `orderFrontRegardless` every 200ms fighting `setFrame`).
+        if panel?.isPointerTrackingInPanel == true {
+            return
+        }
+
+        textService.withCoalescedFocusQueries {
+            if self.textService.isCurrentFocusOwnedBy(bundleID: self.ourBundleID) {
+                self.postStatus("Suppressed in Textora UI")
+                self.hideFloatingHelperImmediately()
+                return
+            }
+            if self.textService.selectedTextSignalAnyFocus()?.hasSelection == true {
+                self.applyFloatingHelperLayoutForCurrentFocus()
+                return
+            }
+            if self.textService.isCurrentFocusInTransientPopupOrMenu() {
+                self.postStatus("Ignoring transient popup/menu focus")
+                self.hideFloatingHelperImmediately()
+                return
+            }
+            if self.textService.shouldHardIgnoreCurrentFocusedInput() {
+                self.postStatus("Ignored focused field/app")
+                self.cancelScheduledVisibilityDrop()
+                self.panel?.orderOut(nil)
+                self.noteFloatingPanelHidden()
+                self.hideMarkerAndCard()
+                return
+            }
+            self.applyFloatingHelperLayoutForCurrentFocus()
+        }
+    }
+
+    /// One timer tick worth of AX reads (coalesced in `TextAccessService`) and bubble/marker layout.
+    private func applyFloatingHelperLayoutForCurrentFocus() {
+        let hasEditableFocus = textService.hasFocusedEditableElement()
+        let fieldFrame = hasEditableFocus ? textService.focusedEditableFrame() : nil
+        let fallbackAnchorFrame = textService.focusedWindowFrame()
+        let appConsent = textService.currentAppConsentStatus()
+        postOverlayLayoutDebug(
+            stage: "tick",
+            hasEditableFocus: hasEditableFocus,
+            appConsent: appConsent,
+            fieldFrame: fieldFrame,
+            windowFrame: fallbackAnchorFrame,
+            caretFrame: nil,
+            bubbleFrame: panel?.frame,
+            fallback: "initial-read",
+            note: "initial"
+        )
+
+        if !hasEditableFocus {
+            // Selection mode: show helper near selected text when there's a non-empty selection
+            // outside of an editable input (keeps current behaviour intact).
+            guard let signal = textService.selectedTextSignalAnyFocus(), signal.hasSelection else {
+                resetSuggestionStateForEmptyInput()
+                selectionSignature = nil
+                selectionSignatureSince = nil
+                // Any host (Electron, WebView, future apps) may omit standard editable AX; if the user
+                // did not deny this app, still show the bubble near the focused window or mouse so they
+                // can grant consent or open the rewrite flow.
+                if appConsent != .denied,
+                   !isFrontmostOurOwnApp(),
+                   showConsentBootstrap(windowFrame: fallbackAnchorFrame) {
+                    postOverlayLayoutDebug(
+                        stage: "noEditable.bootstrap",
+                        hasEditableFocus: hasEditableFocus,
+                        appConsent: appConsent,
+                        fieldFrame: nil,
+                        windowFrame: fallbackAnchorFrame,
+                        caretFrame: nil,
+                        bubbleFrame: panel?.frame,
+                        fallback: fallbackAnchorFrame == nil ? "mouse" : "focusedWindow",
+                        note: "no AX field/selection"
+                    )
+                    postStatus("Showing helper (no AX field/selection; window or mouse anchor)")
+                    return
+                }
+                postOverlayLayoutDebug(
+                    stage: "noEditable.hidden",
+                    hasEditableFocus: hasEditableFocus,
+                    appConsent: appConsent,
+                    fieldFrame: nil,
+                    windowFrame: fallbackAnchorFrame,
+                    caretFrame: nil,
+                    bubbleFrame: nil,
+                    fallback: "none",
+                    note: "no focused editable field and no selection"
+                )
+                postStatus("No focused editable field and no selection")
+                scheduleVisibilityDrop()
+                return
+            }
+            let boundsPart: String = {
+                guard let b = signal.bounds else { return "no-bounds" }
+                // Rounded signature to avoid jitter due to sub-pixel rect changes.
+                return "\(Int(b.minX)):\(Int(b.minY)):\(Int(b.width)):\(Int(b.height))"
+            }()
+            let rangePart: String = {
+                guard let r = signal.selectedRange else { return "no-range" }
+                return "\(r.location):\(r.length)"
+            }()
+            let sig = "\(signal.targetBundleID)|\(rangePart)|\(boundsPart)"
+            if sig != selectionSignature {
+                selectionSignature = sig
+                selectionSignatureSince = Date()
+                scheduleVisibilityDrop()
+                postStatus("Selection changed; waiting to stabilize")
+                return
+            }
+            if let since = selectionSignatureSince,
+               Date().timeIntervalSince(since) < selectionAppearDelay {
+                scheduleVisibilityDrop()
+                return
+            }
+            if anchorMode != .selection {
+                anchorMode = .selection
+                clearConsentBootstrapAnchor()
+                suggestionState = .neutral
+                latestSuggestion = ""
+                latestSuggestionOptions = []
+                latestContext = nil
+                latestSignature = nil
+                latestIssueRange = nil
+                latestIssues = []
+                hoveredIssueID = nil
+                lastCheckedValueSegment = nil
+                lastSignature = nil
+                updateRingColor()
+                hideMarkerAndCard()
+            }
+            if isDragging {
+                bringToFrontOrBelowIfNeeded()
+                return
+            }
+            let nextFrame: CGRect = {
+                if isManuallyPlacedForCurrentFocus, let fixed = manualFixedFrame {
+                    let clamped = clampedToVisibleScreens(fixed)
+                    if clamped != fixed { manualFixedFrame = clamped }
+                    return clamped
+                }
+                let anchorRect = textService.focusedWindowFrame() ?? signal.bounds ?? lastFrame
+                return clampedToVisibleScreens(
+                    CGRect(
+                        x: anchorRect.maxX - Self.floatingPanelSide - autoGap,
+                        y: anchorRect.minY + autoGap,
+                        width: Self.floatingPanelSide,
+                        height: Self.floatingPanelSide
+                    )
+                )
+            }()
+            applyMainBubbleFrameIfChanged(nextFrame)
+            cancelScheduledVisibilityDrop()
+            postOverlayLayoutDebug(
+                stage: "selection",
+                hasEditableFocus: hasEditableFocus,
+                appConsent: appConsent,
+                fieldFrame: signal.bounds,
+                windowFrame: fallbackAnchorFrame,
+                caretFrame: nil,
+                bubbleFrame: nextFrame,
+                valueLength: signal.selectedRange?.length,
+                fallback: isManuallyPlacedForCurrentFocus ? "manualFixedFrame" : (fallbackAnchorFrame == nil ? "selectionBounds" : "focusedWindow"),
+                note: "selection bounds=\(textoraDiagRect(signal.bounds))"
+            )
+            postStatus("Showing helper (selection) x:\(Int(nextFrame.minX)) y:\(Int(nextFrame.minY))")
+            bringToFrontOrBelowIfNeeded()
+            scheduleSpotlightDismissIfNeeded()
+            return
+        }
+
+        // Focused editable mode (original behaviour).
+        guard let fieldFrameUnwrapped = fieldFrame ?? fallbackAnchorFrame else {
+            if appConsent != .denied,
+               !isFrontmostOurOwnApp(),
+               showConsentBootstrap(windowFrame: nil) {
+                postOverlayLayoutDebug(
+                    stage: "editable.bootstrap",
+                    hasEditableFocus: hasEditableFocus,
+                    appConsent: appConsent,
+                    fieldFrame: fieldFrame,
+                    windowFrame: fallbackAnchorFrame,
+                    caretFrame: nil,
+                    bubbleFrame: panel?.frame,
+                    fallback: "mouse",
+                    note: "editable signal but no frame"
+                )
+                postStatus("Showing helper (editable signal but no frame; mouse anchor)")
+                return
+            }
+            postOverlayLayoutDebug(
+                stage: "editable.hidden",
+                hasEditableFocus: hasEditableFocus,
+                appConsent: appConsent,
+                fieldFrame: fieldFrame,
+                windowFrame: fallbackAnchorFrame,
+                caretFrame: nil,
+                bubbleFrame: nil,
+                fallback: "none",
+                note: "focused editable reported but frame and window are missing"
+            )
+            postStatus("Focused editable reported but frame and window are missing")
+            scheduleVisibilityDrop()
+            return
+        }
+        if fieldFrame == nil {
+            postStatus("Focused editable frame missing; using window fallback")
+        }
+        if anchorMode != .focusedEditable {
+            anchorMode = .focusedEditable
+            clearConsentBootstrapAnchor()
+            // Reset manual offset base to align with editable anchors.
+            let baseAnchor = textService.focusedWindowFrame() ?? fieldFrameUnwrapped
+            manualOffset = CGPoint(x: lastFrame.minX - baseAnchor.minX, y: lastFrame.minY - baseAnchor.maxY)
+        }
+        if isDragging {
+            bringToFrontOrBelowIfNeeded()
+            return
+        }
+        let signature = textService.focusedTextSignature() ?? ""
+        if signature != lastSignature {
+            let newValue = valueSegment(ofFocusedSignature: signature)
+            let oldValue = lastSignature.map { valueSegment(ofFocusedSignature: $0) } ?? ""
+            lastSignature = signature
+            if newValue != oldValue {
+                let preservingLocalBatch = !latestIssues.isEmpty
+                    && (localBatchMutationGraceUntil.map { Date() <= $0 } ?? false)
+                lastActivityAt = Date()
+                latestSignature = nil
+                if preservingLocalBatch {
+                    lastCheckedValueSegment = newValue
+                    postStatus("Keeping local suggestion batch after apply")
+                } else {
+                    localBatchMutationGraceUntil = nil
+                    lastCheckedValueSegment = nil
+                    latestIssueRange = nil
+                    latestIssues = []
+                    hoveredIssueID = nil
+                    latestSuggestion = ""
+                    latestSuggestionOptions = []
+                    latestContext = nil
+                    suggestionState = .neutral
+                    // Value changed: loading / red / green must not stick for new text.
+                    updateRingColor()
+                }
+            }
+        }
+
+        let caretFrame = textService.focusedCaretFrame()
+        let nextFrame: CGRect = {
+            if isManuallyPlacedForCurrentFocus, let fixed = manualFixedFrame {
+                let clamped = clampedToVisibleScreens(fixed)
+                if clamped != fixed { manualFixedFrame = clamped }
+                return clamped
+            }
+            return computeAutoBubbleFrame(
+                fieldFrame: fieldFrameUnwrapped,
+                windowFrame: fallbackAnchorFrame,
+                caretFrame: caretFrame
+            )
+        }()
+        let valueSeg = valueSegment(ofFocusedSignature: signature)
+        let valueRaw = valueSeg.trimmingCharacters(in: .whitespacesAndNewlines)
+        if valueRaw.isEmpty {
+            resetSuggestionStateForEmptyInput()
+            // Mark empty value as already handled to prevent re-triggering evaluation every timer tick.
+            lastCheckedValueSegment = valueSegment(ofFocusedSignature: signature)
+            latestSignature = nil
+        }
+        let bubbleMoveThreshold: CGFloat = valueRaw.isEmpty ? 10 : 2
+        applyMainBubbleFrameIfChanged(nextFrame, threshold: bubbleMoveThreshold)
+        cancelScheduledVisibilityDrop()
+        markerAnchor = caretFrame == nil ? .field : .caret
+        updateMarker(caretFrame: caretFrame, fieldFrame: fieldFrameUnwrapped, anchor: markerAnchor)
+        postOverlayLayoutDebug(
+            stage: "editable",
+            hasEditableFocus: hasEditableFocus,
+            appConsent: appConsent,
+            fieldFrame: fieldFrameUnwrapped,
+            windowFrame: fallbackAnchorFrame,
+            caretFrame: caretFrame,
+            bubbleFrame: nextFrame,
+            valueLength: (valueSeg as NSString).length,
+            fallback: isManuallyPlacedForCurrentFocus
+                ? "manualFixedFrame"
+                : (fallbackAnchorFrame == nil ? "fieldFrame" : "focusedWindow"),
+            note: "markerAnchor=\(markerAnchor.rawValue) valueEmpty=\(valueRaw.isEmpty)"
+        )
+
+        let elapsed = Date().timeIntervalSince(lastActivityAt)
+        let sentenceEnd = hasSentenceEnding()
+        if !valueRaw.isEmpty,
+           (elapsed >= idleDelay || (elapsed >= sentenceDelay && sentenceEnd)),
+           lastCheckedValueSegment != valueSeg,
+           !isEvaluating,
+           !isDragging {
+            lastCheckedValueSegment = valueSeg
+            evaluateCurrentText()
+        }
+        postStatus(
+            "Showing helper at x:\(Int(nextFrame.minX)) y:\(Int(nextFrame.minY)) marker-anchor=\(markerAnchor.rawValue)"
+        )
+        bringToFrontOrBelowIfNeeded()
+        scheduleSpotlightDismissIfNeeded()
+    }
+
+    private func computeAutoBubbleFrame(fieldFrame: CGRect, windowFrame: CGRect?, caretFrame: CGRect?) -> CGRect {
+        let bubbleW = Self.floatingPanelSide
+        let bubbleH = Self.floatingPanelSide
+        _ = caretFrame
+        let anchor = windowFrame ?? fieldFrame
+        // Stable auto-mode: bottom-right corner of active window, falling back to field bounds.
+        let target = CGRect(
+            x: anchor.maxX - bubbleW - autoGap,
+            y: anchor.minY + autoGap,
+            width: bubbleW,
+            height: bubbleH
+        )
+        return clampedToVisibleScreens(target)
+    }
+
+    private func bringToFrontOrBelowIfNeeded() {
+        guard let panel else { return }
+        if let below = keepBelowWindow {
+            let wn = below.windowNumber
+            if wn != 0 {
+                panel.order(.below, relativeTo: wn)
+                return
+            }
+            // If the pop-up isn't numbered yet, avoid fighting for front.
+            return
+        }
+        guard floatingPanelNeedsZOrderPass else { return }
+        floatingPanelNeedsZOrderPass = false
+        panel.orderFrontRegardless()
+    }
+
+    @discardableResult
+    private func showConsentBootstrap(windowFrame: CGRect?) -> Bool {
+        let frontBundle = textService.frontmostAppInfo()?.bundleID
+        if consentBootstrapBundleID != frontBundle {
+            clearConsentBootstrapAnchor()
+            consentBootstrapBundleID = frontBundle
+        }
+        let frame: CGRect = {
+            if let fixed = consentBootstrapFrame {
+                return clampedToVisibleScreens(fixed)
+            }
+            let initial: CGRect
+            if let windowFrame {
+                initial = CGRect(
+                    x: windowFrame.maxX - Self.floatingPanelSide - autoGap,
+                    y: windowFrame.minY + autoGap,
+                    width: Self.floatingPanelSide,
+                    height: Self.floatingPanelSide
+                )
+            } else {
+                let mouse = NSEvent.mouseLocation
+                initial = CGRect(
+                    x: mouse.x + 12,
+                    y: mouse.y - Self.floatingPanelSide - 12,
+                    width: Self.floatingPanelSide,
+                    height: Self.floatingPanelSide
+                )
+            }
+            let clamped = clampedToVisibleScreens(initial)
+            consentBootstrapFrame = clamped
+            return clamped
+        }()
+        applyMainBubbleFrameIfChanged(frame)
+        cancelScheduledVisibilityDrop()
+        postOverlayLayoutDebug(
+            stage: "consentBootstrap",
+            hasEditableFocus: false,
+            appConsent: textService.currentAppConsentStatus(),
+            fieldFrame: nil,
+            windowFrame: windowFrame,
+            caretFrame: nil,
+            bubbleFrame: frame,
+            fallback: windowFrame == nil ? "mouse" : "focusedWindow",
+            note: windowFrame == nil ? "mouse anchor" : "focused window anchor"
+        )
+        postStatus(
+            windowFrame == nil
+                ? "Showing helper (anchor: mouse — no focused window frame from AX)"
+                : "Showing helper (anchor: focused window)"
+        )
+        bringToFrontOrBelowIfNeeded()
+        scheduleSpotlightDismissIfNeeded()
+        return true
+    }
+
+    private func isFrontmostOurOwnApp() -> Bool {
+        guard let info = textService.frontmostAppInfo() else { return false }
+        return !ourBundleID.isEmpty && info.bundleID == ourBundleID
+    }
+
+    private func scheduleVisibilityDrop() {
+        guard panel?.isVisible == true else { return }
+        guard visibilityDropTask == nil else { return }
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.panel?.orderOut(nil)
+            self.noteFloatingPanelHidden()
+            self.hideMarkerAndCard()
+            self.clearConsentBootstrapAnchor()
+            self.visibilityDropTask = nil
+        }
+        visibilityDropTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + visibilityDropDelay, execute: task)
+    }
+
+    private func cancelScheduledVisibilityDrop() {
+        visibilityDropTask?.cancel()
+        visibilityDropTask = nil
+    }
+
+    private func resetSuggestionStateAfterAppSwitch() {
+        suggestionState = .neutral
+        latestSuggestion = ""
+        latestSuggestionOptions = []
+        latestContext = nil
+        latestSignature = nil
+        latestIssueRange = nil
+        latestIssues = []
+        hoveredIssueID = nil
+        lastMarkerFieldFrame = nil
+        lastMarkerCaretFrame = nil
+        issuePanelLayouts = []
+        updateRingColor()
+    }
+
+    private func hideFloatingHelperImmediately() {
+        cancelScheduledVisibilityDrop()
+        panel?.orderOut(nil)
+        noteFloatingPanelHidden()
+        hideMarkerAndCard()
+        clearConsentBootstrapAnchor()
+    }
+
+    private func clearConsentBootstrapAnchor() {
+        consentBootstrapFrame = nil
+        consentBootstrapBundleID = nil
+    }
+
+    /// Empty input should never inherit prior red/green result state.
+    private func resetSuggestionStateForEmptyInput() {
+        guard suggestionState != .neutral || !latestSuggestion.isEmpty || !latestSuggestionOptions.isEmpty || latestContext != nil || latestSignature != nil || !latestIssues.isEmpty else {
+            return
+        }
+        suggestionState = .neutral
+        latestSuggestion = ""
+        latestSuggestionOptions = []
+        latestContext = nil
+        latestSignature = nil
+        latestIssueRange = nil
+        latestIssues = []
+        hoveredIssueID = nil
+        updateRingColor()
+        hideMarkerAndCard()
+    }
+
+    private func scheduleSpotlightDismissIfNeeded() {
+        guard spotlightHighlightActive else { return }
+        guard spotlightDismissWorkItem == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.spotlightHighlightActive = false
+            UserDefaults.standard.set(true, forKey: Self.spotlightShownKey)
+            self.spotlightDismissWorkItem = nil
+            self.updateRingColor()
+        }
+        spotlightDismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    func showDebugBubbleAtMouse() {
+        if panel == nil {
+            createPanel()
+        }
+        let mouse = NSEvent.mouseLocation
+        let frame = clampedToVisibleScreens(CGRect(x: mouse.x + 8, y: mouse.y - 8, width: Self.floatingPanelSide, height: Self.floatingPanelSide))
+        panel?.setFrame(frame, display: true)
+        panel?.orderFrontRegardless()
+        floatingPanelNeedsZOrderPass = false
+        postStatus("Debug bubble shown at mouse")
+    }
+
+
+    private func hasSentenceEnding() -> Bool {
+        guard let context = textService.focusedTextContext(minLength: 1) else { return false }
+        let text = context.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.hasSuffix(".") || text.hasSuffix("!") || text.hasSuffix("?")
+    }
+
+    private func evaluateCurrentText() {
+        isEvaluating = true
+        updateRingColor()
+        Task { @MainActor in
+            defer {
+                isEvaluating = false
+                updateRingColor()
+            }
+            guard let context = textService.focusedTextContext(minLength: 1) else {
+                suggestionState = .neutral
+                latestContext = nil
+                latestIssueRange = nil
+                latestIssues = []
+                hoveredIssueID = nil
+                return
+            }
+            // Break the full focused text into every meaningful segment
+            // (paragraphs / list items / sentences around protected tokens),
+            // so the overlay considers every logical piece of the message
+            // independently — not just the single best-scoring one.
+            let segments = correctionSegments(in: context.text)
+            guard !segments.isEmpty else {
+                suggestionState = .neutral
+                latestContext = nil
+                latestSuggestion = ""
+                latestSuggestionOptions = []
+                latestSignature = nil
+                latestIssueRange = nil
+                latestIssues = []
+                hoveredIssueID = nil
+                updateRingColor()
+                return
+            }
+
+            guard let credentials = resolveAutoCheckCredentials() else { return }
+
+            // Evaluate each segment concurrently, honouring the cache so we
+            // don't hit the AI for paragraphs whose text hasn't changed.
+            let capturedCredentials = credentials
+            var results = [SegmentEvaluationResult?](repeating: nil, count: segments.count)
+            await withTaskGroup(of: (Int, SegmentEvaluationResult).self) { group in
+                for (i, scope) in segments.enumerated() {
+                    let key = segmentCacheKey(scope.text)
+                    if let cached = segmentEvaluationCache[key] {
+                        results[i] = cached
+                        continue
+                    }
+                    group.addTask { @MainActor [weak self] in
+                        guard let self else {
+                            return (i, SegmentEvaluationResult(
+                                suggestion: "",
+                                suggestionOptions: [],
+                                issueLocalRange: nil,
+                                state: .inconclusive,
+                                issues: []
+                            ))
+                        }
+                        let r = await self.evaluateSegment(
+                            scope: scope,
+                            credentials: capturedCredentials
+                        )
+                        return (i, r)
+                    }
+                }
+                for await (i, result) in group {
+                    results[i] = result
+                    cacheSegmentResult(result, for: segmentCacheKey(segments[i].text))
+                }
+            }
+
+            // First render every localized issue we can safely anchor in the
+            // full focused text. This is the multi-overlay path: a sentence
+            // can show several independent underlines, and several segments
+            // can be visible at the same time.
+            var aggregatedIssues: [OverlayIssue] = []
+            for (i, result) in results.enumerated() {
+                guard let result, result.state == .needsAttention else { continue }
+                let scope = segments[i]
+                let sourceIssues: [OverlayIssue]
+                if !result.issues.isEmpty {
+                    sourceIssues = result.issues
+                } else {
+                    let sourceSuggestions = result.suggestionOptions.isEmpty
+                        ? [OverlaySuggestion(operation: .fixGrammar, text: result.suggestion)]
+                        : result.suggestionOptions
+                    sourceIssues = deriveIssues(fromSegment: scope.text, suggestions: sourceSuggestions)
+                }
+                aggregatedIssues.append(contentsOf: sourceIssues.map {
+                    shiftedIssue($0, by: scope.range.location, sourceRange: scope.range)
+                })
+            }
+
+            if !aggregatedIssues.isEmpty, let primary = primaryIssue(in: aggregatedIssues) {
+                suggestionState = .needsAttention
+                latestContext = context
+                latestSuggestion = applyIssueToSegment(context.text, issue: primary)
+                latestSuggestionOptions = overlaySuggestions(for: aggregatedIssues, in: context.text)
+                latestIssueRange = primary.localRange
+                latestIssues = aggregatedIssues
+                hoveredIssueID = nil
+                latestSignature = self.lastSignature
+                updateRingColor()
+                return
+            }
+
+            // Fallback: if a segment has only a wholesale rewrite (no stable
+            // localized issue), keep the old single-card behavior for the
+            // segment closest to the caret.
+            let caret = context.selectedRange?.location ?? 0
+            var activeIndex: Int?
+            var bestDistance = Int.max
+            for (i, result) in results.enumerated() {
+                guard let result, result.state == .needsAttention else { continue }
+                guard !result.suggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || !result.suggestionOptions.isEmpty else { continue }
+                let segRange = segments[i].range
+                let distance: Int
+                if caret < segRange.location {
+                    distance = segRange.location - caret
+                } else if caret > segRange.location + segRange.length {
+                    distance = caret - (segRange.location + segRange.length)
+                } else {
+                    distance = 0
+                }
+                if distance < bestDistance {
+                    bestDistance = distance
+                    activeIndex = i
+                }
+            }
+
+            if let activeIndex, let activeResult = results[activeIndex] {
+                let scope = segments[activeIndex]
+                let scopedContext = scopedFocusedContext(context, scope: scope)
+                suggestionState = .needsAttention
+                latestContext = scopedContext
+                latestSuggestion = activeResult.suggestion
+                latestSuggestionOptions = activeResult.suggestionOptions
+                latestIssueRange = activeResult.issueLocalRange
+                latestIssues = activeResult.issues
+                hoveredIssueID = nil
+                latestSignature = self.lastSignature
+                updateRingColor()
+                return
+            }
+
+            // No actionable segment. If at least one meaningful segment was
+            // fully evaluated and came back clean, the composer is "looks
+            // good"; otherwise we stay neutral (e.g. all segments too short
+            // or AI inconclusive).
+            let evaluatedResults = results.compactMap { $0 }
+            let hasClean = evaluatedResults.contains { $0.state == .clean }
+            let hasAttention = evaluatedResults.contains { $0.state == .needsAttention }
+            suggestionState = hasClean && !hasAttention ? .looksGood : .neutral
+            latestContext = nil
+            latestSuggestion = ""
+            latestSuggestionOptions = []
+            latestSignature = nil
+            latestIssueRange = nil
+            latestIssues = []
+            hoveredIssueID = nil
+            updateRingColor()
+        }
+    }
+
+    private struct AutoCheckCredentials {
+        let provider: AIProvider
+        let model: String
+        let apiKey: String
+    }
+
+    private func resolveAutoCheckCredentials() -> AutoCheckCredentials? {
+        let provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
+        let fallbackModel: String
+        switch provider {
+        case .openai:
+            fallbackModel = AIClient.Defaults.openAIModel
+        case .gemini:
+            fallbackModel = AIClient.Defaults.geminiModel
+        case .claude:
+            fallbackModel = AIClient.Defaults.claudeModel
+        case .other:
+            fallbackModel = AIClient.Defaults.customModel
+        }
+        let model = UserDefaults.standard.string(forKey: "model") ?? fallbackModel
+        let key: String
+        switch provider {
+        case .openai:
+            key = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
+        case .gemini:
+            key = KeychainHelper.read(key: KeychainHelper.geminiKeyAccount) ?? ""
+        case .claude:
+            key = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
+        case .other:
+            key = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
+        }
+        guard !key.isEmpty else {
+            suggestionState = .neutral
+            latestContext = nil
+            postStatus("API key missing")
+            return nil
+        }
+        if provider == .other {
+            let base = UserDefaults.standard
+                .string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !base.isEmpty else {
+                suggestionState = .neutral
+                latestContext = nil
+                postStatus("API base URL missing")
+                return nil
+            }
+        }
+        return AutoCheckCredentials(provider: provider, model: model, apiKey: key)
+    }
+
+    /// Evaluates a single segment: local spelling, mixed-script fix, then AI.
+    /// Mirrors the original `evaluateCurrentText` decision tree but scoped
+    /// to one segment so multiple segments can be processed independently
+    /// (and cached).
+    private func evaluateSegment(
+        scope: CorrectionScope,
+        credentials: AutoCheckCredentials
+    ) async -> SegmentEvaluationResult {
+        let text = scope.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .inconclusive
+            )
+        }
+
+        if !isMeaningfulForAutoCheck(text) {
+            if text.count >= 3, let localIssue = firstMisspelledRange(in: text) {
+                if let localFix = bestLocalSpellingReplacement(in: text).flatMap({
+                    validatedSafeFixSuggestion(original: text, candidate: $0)
+                }) {
+                    return SegmentEvaluationResult(
+                        suggestion: localFix,
+                        suggestionOptions: [OverlaySuggestion(operation: .fixGrammar, text: localFix)],
+                        issueLocalRange: localIssue.0,
+                        state: .needsAttention
+                    )
+                }
+            }
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .inconclusive
+            )
+        }
+
+        let localMixedScriptFix = fixMixedLatinCyrillicWords(in: text)
+        if let validatedMixedScriptFix = validatedSafeFixSuggestion(
+            original: text,
+            candidate: localMixedScriptFix
+        ) {
+            return SegmentEvaluationResult(
+                suggestion: validatedMixedScriptFix,
+                suggestionOptions: [OverlaySuggestion(operation: .fixGrammar, text: validatedMixedScriptFix)],
+                issueLocalRange: firstMixedLatinCyrillicRange(in: text),
+                state: .needsAttention
+            )
+        }
+
+        let localListIssues = malformedNumberedListIssues(in: text)
+
+        do {
+            let auditedIssues = try await aiClient.auditIssues(
+                provider: credentials.provider,
+                model: credentials.model,
+                apiKey: credentials.apiKey,
+                text: text
+            )
+            let sanitizedAuditedIssues = sanitizeAuditIssues(auditedIssues, in: text)
+            let auditedStyleIssues = sanitizedAuditedIssues.filter { $0.category != .fixGrammar }
+
+            let fallbackFix = try await aiClient.checkAndSuggestIfNeeded(
+                provider: credentials.provider,
+                model: credentials.model,
+                apiKey: credentials.apiKey,
+                text: text
+            )
+            let trimmedFallback = validatedSafeFixSuggestion(original: text, candidate: fallbackFix)
+            if let trimmedFallback {
+                let fallbackSuggestions = [OverlaySuggestion(operation: .fixGrammar, text: trimmedFallback)]
+                let fallbackIssues = deriveIssues(fromSegment: text, suggestions: fallbackSuggestions)
+                let styleSuggestions = try await aiClient.overlaySuggestions(
+                    provider: credentials.provider,
+                    model: credentials.model,
+                    apiKey: credentials.apiKey,
+                    text: text
+                ).filter { $0.operation != .fixGrammar }
+                let styleIssues = deriveIssues(fromSegment: text, suggestions: styleSuggestions)
+                let semanticIssues = semanticStyleIssues(
+                    fromSegment: text,
+                    suggestions: styleSuggestions,
+                    excludingOperations: Set(styleIssues.map(\.category))
+                )
+                let mergedIssues = mergedIssues(
+                    localListIssues
+                        + fallbackIssues
+                        + auditedStyleIssues
+                        + styleIssues
+                        + semanticIssues
+                )
+                if let primary = primaryIssue(in: mergedIssues) {
+                    let suggestions = overlaySuggestions(for: mergedIssues, in: text)
+                    return SegmentEvaluationResult(
+                        suggestion: applyIssueToSegment(text, issue: primary),
+                        suggestionOptions: suggestions,
+                        issueLocalRange: primary.localRange,
+                        state: .needsAttention,
+                        issues: mergedIssues
+                    )
+                }
+                return SegmentEvaluationResult(
+                    suggestion: trimmedFallback,
+                    suggestionOptions: fallbackSuggestions,
+                    issueLocalRange: estimatedChangedRange(original: text, suggestion: trimmedFallback),
+                    state: .needsAttention
+                )
+            }
+
+            let styleSuggestions = try await aiClient.overlaySuggestions(
+                provider: credentials.provider,
+                model: credentials.model,
+                apiKey: credentials.apiKey,
+                text: text
+            ).filter { $0.operation != .fixGrammar }
+            let auditedOnlyIssues = mergedIssues(localListIssues + auditedStyleIssues)
+            if !auditedOnlyIssues.isEmpty {
+                if let primary = primaryIssue(in: auditedOnlyIssues) {
+                    let suggestions = overlaySuggestions(for: auditedOnlyIssues, in: text)
+                    return SegmentEvaluationResult(
+                        suggestion: applyIssueToSegment(text, issue: primary),
+                        suggestionOptions: suggestions,
+                        issueLocalRange: primary.localRange,
+                        state: .needsAttention,
+                        issues: auditedOnlyIssues
+                    )
+                }
+            }
+            if !styleSuggestions.isEmpty {
+                let styleIssues = deriveIssues(fromSegment: text, suggestions: styleSuggestions)
+                let semanticIssues = semanticStyleIssues(
+                    fromSegment: text,
+                    suggestions: styleSuggestions,
+                    excludingOperations: Set(styleIssues.map(\.category))
+                )
+                let mergedStyleIssues = mergedIssues(localListIssues + styleIssues + semanticIssues)
+                if let primary = primaryIssue(in: mergedStyleIssues) {
+                    let suggestions = overlaySuggestions(for: mergedStyleIssues, in: text)
+                    return SegmentEvaluationResult(
+                        suggestion: applyIssueToSegment(text, issue: primary),
+                        suggestionOptions: suggestions,
+                        issueLocalRange: primary.localRange,
+                        state: .needsAttention,
+                        issues: mergedStyleIssues
+                    )
+                }
+                if let primary = styleSuggestions.first {
+                    return SegmentEvaluationResult(
+                        suggestion: primary.text,
+                        suggestionOptions: styleSuggestions,
+                        issueLocalRange: estimatedChangedRange(original: text, suggestion: primary.text),
+                        state: .needsAttention
+                    )
+                }
+            }
+            if let primary = primaryIssue(in: localListIssues) {
+                let suggestions = overlaySuggestions(for: localListIssues, in: text)
+                return SegmentEvaluationResult(
+                    suggestion: applyIssueToSegment(text, issue: primary),
+                    suggestionOptions: suggestions,
+                    issueLocalRange: primary.localRange,
+                    state: .needsAttention,
+                    issues: localListIssues
+                )
+            }
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .clean
+            )
+        } catch {
+            postStatus("Auto-check failed: \(error.localizedDescription)")
+            if let primary = primaryIssue(in: localListIssues) {
+                let suggestions = overlaySuggestions(for: localListIssues, in: text)
+                return SegmentEvaluationResult(
+                    suggestion: applyIssueToSegment(text, issue: primary),
+                    suggestionOptions: suggestions,
+                    issueLocalRange: primary.localRange,
+                    state: .needsAttention,
+                    issues: localListIssues
+                )
+            }
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .inconclusive
+            )
+        }
+    }
+
+    struct CachedSuggestionResult {
+        let context: TextAccessService.FocusedTextContext
+        let suggestion: String
+        let signature: String
+        let operation: RewriteOperation
+        let isNoIssues: Bool
+    }
+
+    func cachedSuggestionResultForCurrentFocus(operation: RewriteOperation) -> CachedSuggestionResult? {
+        guard let signature = textService.focusedTextSignature(), !signature.isEmpty else { return nil }
+        guard let currentContext = textService.focusedTextContext(minLength: 1) else { return nil }
+        guard let latestContext, let latestSignature, latestSignature == signature else { return nil }
+        let currentText = currentContext.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentText.isEmpty else { return nil }
+        // Prevent showing stale cached text when current element isn't readable or changed.
+        guard normalized(currentText) == normalized(latestContext.text) else { return nil }
+        let cachedSuggestion: String = {
+            if let exact = latestSuggestionOptions.first(where: { $0.operation == operation })?.text {
+                return exact
+            }
+            if operation == .fixGrammar {
+                return latestSuggestion
+            }
+            return ""
+        }()
+        guard !cachedSuggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let isNoIssues = suggestionState == .looksGood
+        return CachedSuggestionResult(
+            context: currentContext,
+            suggestion: cachedSuggestion,
+            signature: signature,
+            operation: operation,
+            isNoIssues: isNoIssues
+        )
+    }
+
+    func cachedFixGrammarResultForCurrentFocus() -> CachedSuggestionResult? {
+        cachedSuggestionResultForCurrentFocus(operation: .fixGrammar)
+    }
+
+    /// Spell-check languages to try (`nil` = system default). Fixes cases like "Helo" when default dictionary does not flag.
+    private func spellingLanguageCandidates(for text: String) -> [String?] {
+        var result: [String?] = [nil]
+        var seen = Set<String>(["__nil__"])
+        func push(_ lang: String?) {
+            let key = lang ?? "__nil__"
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            result.append(lang)
+        }
+        let system = spellChecker.language().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !system.isEmpty { push(system) }
+        let lettersOnly = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        let hasCyrillic = lettersOnly.contains { scalar in
+            let v = scalar.value
+            return (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v)
+        }
+        let isMostlyLatin = !lettersOnly.isEmpty && lettersOnly.allSatisfy { s in
+            let v = s.value
+            return (0x0041...0x024F).contains(v) || (0x1E00...0x1EFF).contains(v)
+        }
+        if hasCyrillic {
+            push("ru")
+            push("uk")
+        } else if isMostlyLatin {
+            push("en")
+        }
+        for pref in Locale.preferredLanguages.prefix(3) {
+            let code = pref.split(separator: "-").first.map(String.init) ?? ""
+            if !code.isEmpty { push(code) }
+        }
+        return result
+    }
+
+    private func firstMisspelledRange(in text: String) -> (NSRange, String?)? {
+        let nsText = text as NSString
+        if nsText.length < 3 { return nil }
+        let protectedRanges = protectedTokenRanges(in: text)
+        for lang in spellingLanguageCandidates(for: text) {
+            var start = 0
+            while start < nsText.length {
+                let misspelled = spellChecker.checkSpelling(
+                    of: text,
+                    startingAt: start,
+                    language: lang,
+                    wrap: false,
+                    inSpellDocumentWithTag: 0,
+                    wordCount: nil
+                )
+                guard misspelled.location != NSNotFound else { break }
+                if protectedRanges.contains(where: { NSIntersectionRange($0, misspelled).length > 0 }) {
+                    start = misspelled.location + max(1, misspelled.length)
+                    continue
+                }
+                return (misspelled, lang)
+            }
+        }
+        return nil
+    }
+
+    private func hasLocalSpellingIssues(_ text: String) -> Bool {
+        firstMisspelledRange(in: text) != nil
+    }
+
+    private func firstMixedLatinCyrillicRange(in text: String) -> NSRange? {
+        let ns = text as NSString
+        let protectedRanges = protectedTokenRanges(in: text)
+        var i = 0
+        while i < ns.length {
+            while i < ns.length {
+                let ch = ns.character(at: i)
+                guard let scalar = UnicodeScalar(ch), CharacterSet.letters.contains(scalar) else { break }
+                i += 1
+            }
+            let start = i
+            var hasLatin = false
+            var hasCyrillic = false
+            while i < ns.length {
+                let ch = ns.character(at: i)
+                guard let scalar = UnicodeScalar(ch), CharacterSet.letters.contains(scalar) else { break }
+                let v = scalar.value
+                if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) {
+                    hasLatin = true
+                } else if (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v) {
+                    hasCyrillic = true
+                }
+                i += 1
+            }
+            let range = NSRange(location: start, length: max(0, i - start))
+            if range.length > 0,
+               !protectedRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }),
+               hasLatin && hasCyrillic {
+                return range
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// First NSSpellChecker guess for the first misspelled word in `fullText` (single-word typos, AI unchanged).
+    private func bestLocalSpellingReplacement(in fullText: String) -> String? {
+        let ns = fullText as NSString
+        guard ns.length >= 2 else { return nil }
+        guard let (misspelled, lang) = firstMisspelledRange(in: fullText) else { return nil }
+        let guesses = spellChecker.guesses(
+            forWordRange: misspelled,
+            in: fullText,
+            language: lang,
+            inSpellDocumentWithTag: 0
+        ) ?? []
+        guard let best = guesses.first else { return nil }
+        let mutable = NSMutableString(string: fullText)
+        mutable.replaceCharacters(in: misspelled, with: best)
+        return mutable as String
+    }
+
+    private func sanitizeAuditIssues(_ issues: [OverlayIssue], in text: String) -> [OverlayIssue] {
+        issues.filter { issue in
+            guard !issueBreaksNumberedListMarker(issue, in: text) else {
+                return false
+            }
+            if wouldRevertRecentRewrite(original: issue.patch.originalText, candidate: issue.replacement) {
+                return false
+            }
+            guard issue.category == .fixGrammar else {
+                return isReasonableStyleIssue(
+                    original: issue.patch.originalText,
+                    candidate: issue.replacement
+                )
+            }
+            return !shouldRejectFixSuggestion(
+                original: issue.patch.originalText,
+                candidate: issue.replacement
+            )
+        }
+    }
+
+    private func malformedNumberedListIssues(in text: String) -> [OverlayIssue] {
+        let ns = text as NSString
+        guard ns.length > 0 else { return [] }
+        let segmentSignature = segmentCacheKey(text)
+        var issues: [OverlayIssue] = []
+        var lineStart = 0
+
+        func inspectLine(start: Int, end: Int) {
+            guard start < end else { return }
+            var cursor = start
+            while cursor < end, isASCIIDigit(ns.character(at: cursor)) {
+                cursor += 1
+            }
+            guard cursor > start else { return }
+
+            if cursor < end {
+                let next = ns.character(at: cursor)
+                if isLetter(next) {
+                    let original = ns.substring(with: NSRange(location: start, length: cursor - start))
+                    issues.append(
+                        OverlayIssue(
+                            localRange: NSRange(location: start, length: cursor - start),
+                            originalText: original,
+                            category: .fixGrammar,
+                            replacement: "\(original). ",
+                            reason: "Restore list marker",
+                            segmentSignature: segmentSignature,
+                            sourceSegmentRange: nil
+                        )
+                    )
+                    return
+                }
+            }
+
+            if cursor < end,
+               ns.character(at: cursor) == 46,
+               cursor + 1 < end,
+               isLetter(ns.character(at: cursor + 1)) {
+                let original = ns.substring(with: NSRange(location: start, length: cursor - start + 1))
+                issues.append(
+                    OverlayIssue(
+                        localRange: NSRange(location: start, length: cursor - start + 1),
+                        originalText: original,
+                        category: .fixGrammar,
+                        replacement: "\(original) ",
+                        reason: "Restore list spacing",
+                        segmentSignature: segmentSignature,
+                        sourceSegmentRange: nil
+                    )
+                )
+            }
+        }
+
+        var index = 0
+        while index < ns.length {
+            let ch = ns.character(at: index)
+            if ch == 10 || ch == 13 {
+                inspectLine(start: lineStart, end: index)
+                if ch == 13, index + 1 < ns.length, ns.character(at: index + 1) == 10 {
+                    index += 1
+                }
+                lineStart = index + 1
+            }
+            index += 1
+        }
+        inspectLine(start: lineStart, end: ns.length)
+        return issues
+    }
+
+    private func isLetter(_ unit: UInt16) -> Bool {
+        guard let scalar = UnicodeScalar(UInt32(unit)) else { return false }
+        return CharacterSet.letters.contains(scalar)
+    }
+
+    private func issueBreaksNumberedListMarker(_ issue: OverlayIssue, in text: String?) -> Bool {
+        if let text {
+            return patchBreaksNumberedListMarker(issue.patch, in: text)
+        }
+        let span = issue.patch.originalText
+        return startsWithDigits(span)
+            && !issue.replacement.hasPrefix(leadingDigits(in: span))
+            || span.hasPrefix(". ") && !issue.replacement.hasPrefix(". ")
+    }
+
+    private func patchBreaksNumberedListMarker(_ patch: TextPatch, in text: String) -> Bool {
+        let ns = text as NSString
+        guard patch.start >= 0,
+              patch.start <= ns.length else {
+            return false
+        }
+
+        if isAtLineStart(patch.start, in: ns),
+           let marker = leadingNumberedListMarker(in: patch.originalText),
+           !patch.replacement.hasPrefix(marker) {
+            return true
+        }
+
+        if isAtLineStart(patch.start, in: ns),
+           startsWithDigits(patch.originalText),
+           !patch.replacement.hasPrefix(leadingDigits(in: patch.originalText)) {
+            return true
+        }
+
+        guard patch.start > 0, patch.start < ns.length else {
+            return false
+        }
+        let previous = ns.character(at: patch.start - 1)
+        if isASCIIDigit(previous),
+           isAtLineStartOfDigits(endingAt: patch.start - 1, in: ns),
+           patch.originalText.hasPrefix(". "),
+           !patch.replacement.hasPrefix(". ") {
+            return true
+        }
+        return false
+    }
+
+    private func leadingNumberedListMarker(in text: String) -> String? {
+        let ns = text as NSString
+        guard ns.length >= 3 else { return nil }
+        var cursor = 0
+        while cursor < ns.length, isASCIIDigit(ns.character(at: cursor)) {
+            cursor += 1
+        }
+        guard cursor > 0,
+              cursor + 1 < ns.length,
+              ns.character(at: cursor) == 46,
+              ns.character(at: cursor + 1) == 32 else {
+            return nil
+        }
+        return ns.substring(with: NSRange(location: 0, length: cursor + 2))
+    }
+
+    private func startsWithDigits(_ text: String) -> Bool {
+        guard let first = text.utf16.first else { return false }
+        return isASCIIDigit(first)
+    }
+
+    private func leadingDigits(in text: String) -> String {
+        var scalars: [UInt16] = []
+        for unit in text.utf16 {
+            guard isASCIIDigit(unit) else { break }
+            scalars.append(unit)
+        }
+        return String(decoding: scalars, as: UTF16.self)
+    }
+
+    private func isASCIIDigit(_ unit: UInt16) -> Bool {
+        unit >= 48 && unit <= 57
+    }
+
+    private func isAtLineStart(_ location: Int, in text: NSString) -> Bool {
+        guard location > 0 else { return true }
+        let previous = text.character(at: location - 1)
+        return previous == 10 || previous == 13
+    }
+
+    private func isAtLineStartOfDigits(endingAt digitIndex: Int, in text: NSString) -> Bool {
+        var start = digitIndex
+        while start > 0, isASCIIDigit(text.character(at: start - 1)) {
+            start -= 1
+        }
+        return isAtLineStart(start, in: text)
+    }
+
+    private func validatedSafeFixSuggestion(original: String, candidate: String) -> String? {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              normalized(trimmed) != normalized(original),
+              preservesProtectedTokens(original: original, candidate: trimmed),
+              !shouldRejectFixSuggestion(original: original, candidate: trimmed) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private func mergedIssues(_ issues: [OverlayIssue]) -> [OverlayIssue] {
+        let sorted = issues.sorted { lhs, rhs in
+            if lhs.localRange.location != rhs.localRange.location {
+                return lhs.localRange.location < rhs.localRange.location
+            }
+            return OverlayIssue.priority(of: lhs.category) < OverlayIssue.priority(of: rhs.category)
+        }
+        var accepted: [OverlayIssue] = []
+        for issue in sorted {
+            if let last = accepted.last,
+               NSIntersectionRange(last.localRange, issue.localRange).length > 0 {
+                if OverlayIssue.priority(of: issue.category) < OverlayIssue.priority(of: last.category) {
+                    accepted.removeLast()
+                    accepted.append(issue)
+                }
+                continue
+            }
+            accepted.append(issue)
+        }
+        return accepted
+    }
+
+    private func isSuspiciousFixSuggestion(original: String, candidate: String) -> Bool {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else { return false }
+        if containsMixedLatinCyrillicWord(trimmedCandidate) && !containsMixedLatinCyrillicWord(trimmedOriginal) {
+            return true
+        }
+        return hasLocalSpellingIssues(trimmedCandidate) && !hasLocalSpellingIssues(trimmedOriginal)
+    }
+
+    private func shouldRejectFixSuggestion(original: String, candidate: String) -> Bool {
+        isSuspiciousFixSuggestion(original: original, candidate: candidate)
+            || introducesSuspiciousDuplicatePunctuation(original: original, candidate: candidate)
+            || wouldRevertRecentRewrite(original: original, candidate: candidate)
+    }
+
+    private func isReasonableStyleIssue(original: String, candidate: String) -> Bool {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else { return false }
+        guard normalized(trimmedOriginal) != normalized(trimmedCandidate) else { return false }
+        if stripsToSameAlphanumericCore(trimmedOriginal, trimmedCandidate) {
+            return false
+        }
+        let originalWords = wordCount(in: trimmedOriginal)
+        let candidateWords = wordCount(in: trimmedCandidate)
+        if max(originalWords, candidateWords) < 3 {
+            return false
+        }
+        let originalLetters = letterCount(in: trimmedOriginal)
+        let candidateLetters = letterCount(in: trimmedCandidate)
+        if max(originalLetters, candidateLetters) < 10 {
+            return false
+        }
+        return true
+    }
+
+    private func stripsToSameAlphanumericCore(_ lhs: String, _ rhs: String) -> Bool {
+        normalizeAlphanumericCore(lhs) == normalizeAlphanumericCore(rhs)
+    }
+
+    private func normalizeAlphanumericCore(_ text: String) -> String {
+        let parts = text.unicodeScalars.compactMap { scalar -> String? in
+            if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                return String(scalar).lowercased()
+            }
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                return " "
+            }
+            return nil
+        }
+        return parts.joined()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func wordCount(in text: String) -> Int {
+        text.split { !$0.isLetter && !$0.isNumber }.count
+    }
+
+    private func letterCount(in text: String) -> Int {
+        text.unicodeScalars.reduce(0) { partial, scalar in
+            partial + (CharacterSet.letters.contains(scalar) ? 1 : 0)
+        }
+    }
+
+    private func introducesSuspiciousDuplicatePunctuation(original: String, candidate: String) -> Bool {
+        let pattern = "([,;:!?])\\1+"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let originalSet = Set(regex.matches(in: original, range: NSRange(location: 0, length: (original as NSString).length)).map {
+            (original as NSString).substring(with: $0.range)
+        })
+        let candidateMatches = regex.matches(
+            in: candidate,
+            range: NSRange(location: 0, length: (candidate as NSString).length)
+        )
+        for match in candidateMatches {
+            let duplicated = (candidate as NSString).substring(with: match.range)
+            if !originalSet.contains(duplicated) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func rememberAppliedRewrite(original: String, rewritten: String) {
+        pruneRecentAppliedRewrites()
+        let fromKey = normalized(original)
+        let toKey = normalized(rewritten)
+        guard !fromKey.isEmpty, !toKey.isEmpty, fromKey != toKey else { return }
+        recentAppliedRewrites.removeAll { $0.fromKey == fromKey && $0.toKey == toKey }
+        recentAppliedRewrites.append(
+            RecentAppliedRewrite(fromKey: fromKey, toKey: toKey, recordedAt: Date())
+        )
+        if recentAppliedRewrites.count > recentAppliedRewriteCap {
+            recentAppliedRewrites.removeFirst(recentAppliedRewrites.count - recentAppliedRewriteCap)
+        }
+    }
+
+    private func wouldRevertRecentRewrite(original: String, candidate: String) -> Bool {
+        pruneRecentAppliedRewrites()
+        let currentKey = normalized(original)
+        let candidateKey = normalized(candidate)
+        guard !currentKey.isEmpty, !candidateKey.isEmpty, currentKey != candidateKey else {
+            return false
+        }
+        return recentAppliedRewrites.contains {
+            $0.fromKey == candidateKey && $0.toKey == currentKey
+        }
+    }
+
+    private func pruneRecentAppliedRewrites() {
+        let now = Date()
+        recentAppliedRewrites.removeAll {
+            now.timeIntervalSince($0.recordedAt) > recentAppliedRewriteTTL
+        }
+    }
+
+    private func isMeaningfulForAutoCheck(_ text: String) -> Bool {
+        let visibleText = textWithoutProtectedTokens(text)
+        if containsMixedLatinCyrillicWord(visibleText) {
+            // Common typo class: visually similar Latin/Cyrillic letters in one word.
+            return true
+        }
+        let words = visibleText.split { $0.isWhitespace }.filter { !$0.isEmpty }
+        // Single real word (e.g. "Helo"): still run auto-check — two-word rule was hiding obvious typos.
+        if words.count == 1 {
+            let w = String(words[0])
+            guard w.count >= 4 else { return false }
+            let letterCount = w.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+            guard letterCount >= 3 else { return false }
+            let nonSpace = w.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
+            guard nonSpace > 0 else { return false }
+            return Double(letterCount) / Double(nonSpace) >= 0.75
+        }
+        if words.count < 2 { return false }
+
+        let letterCount = visibleText.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        let nonSpaceCount = visibleText.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
+        guard nonSpaceCount > 0 else { return false }
+        let letterRatio = Double(letterCount) / Double(nonSpaceCount)
+        return letterRatio >= 0.55
+    }
+
+    private func containsMixedLatinCyrillicWord(_ text: String) -> Bool {
+        let ns = text as NSString
+        let protectedRanges = protectedTokenRanges(in: text)
+        var i = 0
+        while i < ns.length {
+            while i < ns.length {
+                let ch = ns.character(at: i)
+                guard let scalar = UnicodeScalar(ch), CharacterSet.letters.contains(scalar) else { break }
+                i += 1
+            }
+            let start = i
+            var hasLatin = false
+            var hasCyrillic = false
+            while i < ns.length {
+                let ch = ns.character(at: i)
+                guard let scalar = UnicodeScalar(ch), CharacterSet.letters.contains(scalar) else { break }
+                let v = scalar.value
+                if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) {
+                    hasLatin = true
+                } else if (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v) {
+                    hasCyrillic = true
+                }
+                i += 1
+            }
+            let range = NSRange(location: start, length: max(0, i - start))
+            if range.length > 0,
+               !protectedRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }),
+               hasLatin && hasCyrillic {
+                return true
+            }
+            i += 1
+        }
+        return false
+    }
+
+    private func protectedTokenRanges(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        guard ns.length > 0 else { return [] }
+        let pattern = #"(?i)(?:https?://|www\.)\S+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[@#][\p{L}\p{N}_]+(?:[._-][\p{L}\p{N}_]+)*|\+?\d[\d\s().-]{2,}\d|\b\d+(?:[.,:/-]\d+)*\b|\b[\w.-]+\.(?:com|net|org|io|dev|app|ai|co|ru|ua|by|de|fr|es|it|pl|nl|uk)\b\S*"#
+        var ranges: [NSRange] = []
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            ranges.append(contentsOf: regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range))
+        }
+        for index in 0..<ns.length where isSlackInvisibleMarker(ns.character(at: index)) {
+            ranges.append(NSRange(location: index, length: 1))
+        }
+        return ranges.sorted { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.length < rhs.length
+            }
+            return lhs.location < rhs.location
+        }
+    }
+
+    private func correctionScope(in text: String) -> CorrectionScope? {
+        let ns = text as NSString
+        guard ns.length > 0 else { return nil }
+        let protectedRanges = protectedTokenRanges(in: text).sorted { $0.location < $1.location }
+        guard !protectedRanges.isEmpty else {
+            let trimmed = trimmedRange(NSRange(location: 0, length: ns.length), in: ns)
+            guard trimmed.length > 0 else { return nil }
+            return CorrectionScope(text: ns.substring(with: trimmed), range: trimmed)
+        }
+
+        var segments: [CorrectionScope] = []
+        var cursor = 0
+        for protectedRange in protectedRanges {
+            if protectedRange.location > cursor {
+                appendCorrectionSegment(
+                    NSRange(location: cursor, length: protectedRange.location - cursor),
+                    in: ns,
+                    to: &segments
+                )
+            }
+            cursor = max(cursor, protectedRange.location + protectedRange.length)
+        }
+        if cursor < ns.length {
+            appendCorrectionSegment(NSRange(location: cursor, length: ns.length - cursor), in: ns, to: &segments)
+        }
+
+        return segments
+            .filter { isMeaningfulForAutoCheck($0.text) || hasLocalSpellingIssues($0.text) }
+            .max { lhs, rhs in
+                correctionScore(lhs.text) < correctionScore(rhs.text)
+            }
+    }
+
+    private func appendCorrectionSegment(_ range: NSRange, in text: NSString, to segments: inout [CorrectionScope]) {
+        let trimmed = trimmedRange(range, in: text)
+        guard trimmed.length > 0 else { return }
+        segments.append(CorrectionScope(text: text.substring(with: trimmed), range: trimmed))
+    }
+
+    /// Split the full focused text into ALL meaningful segments ordered by
+    /// position. Unlike `correctionScope`, this does not pick the single
+    /// "best" scope — the overlay must consider every paragraph/sentence in
+    /// the composer so that a URL (or any protected token) sitting between
+    /// two sentences does not hide the one that comes after it.
+    ///
+    /// Splitting rules:
+    /// 1. Protected tokens (URLs, emails, @mentions, #channels, phones) cut
+    ///    the text into top-level chunks.
+    /// 2. Each chunk is further split on newlines — a multi-line composer
+    ///    usually has one logical sentence per line (e.g. bullet lists in
+    ///    Slack), and each line is rewritten independently.
+    /// 3. Segments that are too short / noisy to auto-check are dropped
+    ///    (same filter as `correctionScope`).
+    private func correctionSegments(in text: String) -> [CorrectionScope] {
+        let ns = text as NSString
+        guard ns.length > 0 else { return [] }
+        let protectedRanges = protectedTokenRanges(in: text).sorted { $0.location < $1.location }
+
+        var rawChunks: [NSRange] = []
+        if protectedRanges.isEmpty {
+            rawChunks.append(NSRange(location: 0, length: ns.length))
+        } else {
+            var cursor = 0
+            for protectedRange in protectedRanges {
+                if protectedRange.location > cursor {
+                    rawChunks.append(NSRange(location: cursor, length: protectedRange.location - cursor))
+                }
+                cursor = max(cursor, protectedRange.location + protectedRange.length)
+            }
+            if cursor < ns.length {
+                rawChunks.append(NSRange(location: cursor, length: ns.length - cursor))
+            }
+        }
+
+        var segments: [CorrectionScope] = []
+        for chunkRange in rawChunks {
+            splitChunkByNewlines(chunkRange, in: ns, into: &segments)
+        }
+
+        return segments
+            .filter { isMeaningfulForAutoCheck($0.text) || hasLocalSpellingIssues($0.text) }
+            .sorted { $0.range.location < $1.range.location }
+    }
+
+    private func splitChunkByNewlines(
+        _ chunkRange: NSRange,
+        in text: NSString,
+        into segments: inout [CorrectionScope]
+    ) {
+        guard chunkRange.length > 0 else { return }
+        var cursor = chunkRange.location
+        let end = chunkRange.location + chunkRange.length
+        while cursor < end {
+            let searchRange = NSRange(location: cursor, length: end - cursor)
+            let newlineRange = text.range(of: "\n", options: [], range: searchRange)
+            let lineEnd = newlineRange.location == NSNotFound ? end : newlineRange.location
+            appendCorrectionSegment(
+                NSRange(location: cursor, length: lineEnd - cursor),
+                in: text,
+                to: &segments
+            )
+            if newlineRange.location == NSNotFound {
+                break
+            }
+            cursor = newlineRange.location + newlineRange.length
+        }
+    }
+
+    private func segmentCacheKey(_ text: String) -> String {
+        normalized(text)
+    }
+
+    private func cacheSegmentResult(_ result: SegmentEvaluationResult, for key: String) {
+        if segmentEvaluationCache[key] == nil {
+            segmentEvaluationCacheOrder.append(key)
+            while segmentEvaluationCacheOrder.count > segmentEvaluationCacheCap {
+                let old = segmentEvaluationCacheOrder.removeFirst()
+                segmentEvaluationCache.removeValue(forKey: old)
+            }
+        }
+        segmentEvaluationCache[key] = result
+    }
+
+    private func invalidateSegmentCache(for text: String) {
+        let key = segmentCacheKey(text)
+        segmentEvaluationCache.removeValue(forKey: key)
+        segmentEvaluationCacheOrder.removeAll { $0 == key }
+    }
+
+    private func trimmedRange(_ range: NSRange, in text: NSString) -> NSRange {
+        var start = max(0, min(range.location, text.length))
+        var end = max(start, min(range.location + range.length, text.length))
+        while start < end, isWhitespace(text.character(at: start)) {
+            start += 1
+        }
+        while end > start, isWhitespace(text.character(at: end - 1)) {
+            end -= 1
+        }
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    private func isWhitespace(_ codeUnit: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(UInt32(codeUnit)) else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
+    private func correctionScore(_ text: String) -> Int {
+        text.unicodeScalars.reduce(0) { score, scalar in
+            CharacterSet.letters.contains(scalar) ? score + 2 : score + 1
+        }
+    }
+
+    private func scopedFocusedContext(
+        _ context: TextAccessService.FocusedTextContext,
+        scope: CorrectionScope
+    ) -> TextAccessService.FocusedTextContext {
+        let anchor = scopedAnchor(for: context, scope: scope)
+        let frame = isSlackBundle(context.targetBundleID) ? anchor.rect : context.frame
+        return TextAccessService.FocusedTextContext(
+            text: scope.text,
+            frame: frame,
+            usesSelection: false,
+            selectedRange: nil,
+            targetElement: context.targetElement,
+            targetAppPID: context.targetAppPID,
+            targetBundleID: context.targetBundleID,
+            anchor: anchor,
+            textFragments: scopedFragments(from: context.textFragments, scope: scope)
+        )
+    }
+
+    private func scopedAnchor(
+        for context: TextAccessService.FocusedTextContext,
+        scope: CorrectionScope
+    ) -> TextAccessService.TextAnchor {
+        guard isSlackBundle(context.targetBundleID) else { return context.anchor }
+        let base = !context.anchor.rect.isEmpty ? context.anchor.rect : context.frame
+        guard !base.isEmpty, base.height > 48 else { return context.anchor }
+
+        let text = context.text as NSString
+        let metrics = slackScopedLineMetrics(in: text, scope: scope, base: base)
+        guard metrics.lineCount > 1 else { return context.anchor }
+
+        let lineHeight = min(max(base.height / CGFloat(metrics.lineCount), 18), 34)
+        let lineY = max(base.minY, base.maxY - CGFloat(metrics.lineIndex + 1) * lineHeight)
+        let lineRect = CGRect(
+            x: base.minX,
+            y: lineY,
+            width: base.width,
+            height: lineHeight
+        )
+        return TextAccessService.TextAnchor(
+            rect: lineRect,
+            source: .axElementFrame,
+            confidence: .approximate,
+            rawRect: context.anchor.rawRect
+        )
+    }
+
+    private func slackScopedLineMetrics(
+        in text: NSString,
+        scope: CorrectionScope,
+        base: CGRect
+    ) -> TextLineMetrics {
+        let metrics = textLineMetrics(in: text, issueLocation: scope.range.location)
+        guard base.height > 60 else { return metrics }
+
+        let fullText = text as String
+        let protectedBefore = protectedTokenRanges(in: fullText)
+            .filter { $0.location < scope.range.location }
+            .map { text.substring(with: $0) }
+            .filter { token in
+                let lower = token.lowercased()
+                return lower.hasPrefix("http://")
+                    || lower.hasPrefix("https://")
+                    || lower.hasPrefix("www.")
+            }
+            .count
+        guard protectedBefore > 0 else { return metrics }
+
+        let shouldTreatProtectedTokensAsRows = protectedBefore >= 2
+            || metrics.lineCount > 1
+            || base.height > 84
+        guard shouldTreatProtectedTokensAsRows else { return metrics }
+
+        let estimatedLineCount = max(metrics.lineCount, protectedBefore + 1)
+        let estimatedLineIndex = max(metrics.lineIndex, min(estimatedLineCount - 1, protectedBefore))
+        return TextLineMetrics(
+            lineIndex: estimatedLineIndex,
+            column: metrics.column,
+            lineLength: metrics.lineLength,
+            lineCount: estimatedLineCount
+        )
+    }
+
+    private func scopedFragments(
+        from fragments: [TextAccessService.TextFragment],
+        scope: CorrectionScope
+    ) -> [TextAccessService.TextFragment] {
+        let scopeNS = scope.text as NSString
+        return fragments.compactMap { fragment -> TextAccessService.TextFragment? in
+            let overlap = NSIntersectionRange(fragment.range, scope.range)
+            guard overlap.length > 0 else { return nil }
+            let localLocation = max(0, overlap.location - scope.range.location)
+            let localLength = max(0, min(overlap.length, scopeNS.length - localLocation))
+            guard localLength > 0 else { return nil }
+            guard let rect = TextoraCharacterGeometry.rect(for: overlap, in: fragment) else {
+                return nil
+            }
+            return TextAccessService.TextFragment(
+                text: scopeNS.substring(with: NSRange(location: localLocation, length: localLength)),
+                range: NSRange(location: localLocation, length: localLength),
+                rect: rect
+            )
+        }
+    }
+
+    private func textWithoutProtectedTokens(_ text: String) -> String {
+        var result = text
+        for range in protectedTokenRanges(in: text).reversed() {
+            result = (result as NSString).replacingCharacters(in: range, with: " ")
+        }
+        return result
+    }
+
+    private func preservesProtectedTokens(original: String, candidate: String) -> Bool {
+        protectedTokens(in: original) == protectedTokens(in: candidate)
+    }
+
+    /// Splices a single audit issue's replacement into the segment text
+    /// at its declared local range. Used to build the "primary
+    /// suggestion" string that legacy apply code still consumes through
+    /// `latestSuggestion` / `latestIssueRange`.
+    private func applyIssueToSegment(_ segmentText: String, issue: OverlayIssue) -> String {
+        let ns = segmentText as NSString
+        let safeStart = max(0, min(issue.localRange.location, ns.length))
+        let safeLen = max(0, min(issue.localRange.length, ns.length - safeStart))
+        let safeRange = NSRange(location: safeStart, length: safeLen)
+        return ns.replacingCharacters(in: safeRange, with: issue.replacement)
+    }
+
+    /// Grows a diff tuple `(range, replacement)` out to whole-word
+    /// boundaries so the rendered underline and the hover card's word-
+    /// level diff agree on what span they are describing. The tiny
+    /// `"n" → "p"` diff inside `"tulin" → "tulip"` becomes a
+    /// `"tulin" → "tulip"` edit with the underline covering the whole
+    /// word instead of a single glyph somewhere inside it.
+    ///
+    /// Keeps `range` and `replacement` in lockstep — because the
+    /// characters we add on each side come from the common prefix /
+    /// suffix shared by segment and candidate, we can read them
+    /// straight off the segment without touching the (possibly long)
+    /// candidate string.
+    private func expandAtomicEditToWordBounds(
+        segment: String,
+        range: NSRange,
+        replacement: String
+    ) -> (range: NSRange, replacement: String) {
+        let ns = segment as NSString
+        let total = ns.length
+        guard range.location >= 0, NSMaxRange(range) <= total else {
+            return (range, replacement)
+        }
+        let isWordLike: (unichar) -> Bool = { cu in
+            guard let s = UnicodeScalar(UInt32(cu)) else { return false }
+            return CharacterSet.letters.contains(s) || CharacterSet.decimalDigits.contains(s)
+        }
+        var start = range.location
+        var end = NSMaxRange(range)
+        // Extend left while the preceding char is word-like — pulls the
+        // edit back to the beginning of the word that contains the
+        // diff point.
+        while start > 0, isWordLike(ns.character(at: start - 1)) {
+            start -= 1
+        }
+        // Extend right while the next char is word-like — pulls the
+        // edit forward to the end of the affected word.
+        while end < total, isWordLike(ns.character(at: end)) {
+            end += 1
+        }
+        let expandedRange = NSRange(location: start, length: max(0, end - start))
+        guard expandedRange != range else { return (range, replacement) }
+        let leftPad = ns.substring(with: NSRange(location: start, length: range.location - start))
+        let rightPad = ns.substring(
+            with: NSRange(location: NSMaxRange(range), length: end - NSMaxRange(range))
+        )
+        let expandedReplacement = leftPad + replacement + rightPad
+        return (expandedRange, expandedReplacement)
+    }
+
+    /// Signature used to remember that the user dismissed an issue via
+    /// Skip. Intentionally tied to the segment's normalized text so
+    /// that once the segment is edited (even slightly) the user sees a
+    /// fresh batch of suggestions — Skip is a "not for this version of
+    /// the sentence" gesture, not a permanent mute.
+    private func skipSignature(
+        segmentSignature: String,
+        issue: OverlayIssue,
+        spanText: String
+    ) -> String {
+        "\(segmentSignature)|\(issue.category.rawValue)|\(normalized(spanText))|\(normalized(issue.replacement))"
+    }
+
+    /// Picks the "primary" issue inside a segment — the one that drives
+    /// the floating-bubble ring color, the legacy `latestSuggestion`,
+    /// and the fallback hover-card when the user hovers the floating
+    /// icon instead of a specific underline. Fix always wins; within the
+    /// same category we prefer the earliest span.
+    private func primaryIssue(in issues: [OverlayIssue]) -> OverlayIssue? {
+        issues.min { lhs, rhs in
+            let lp = OverlayIssue.priority(of: lhs.category)
+            let rp = OverlayIssue.priority(of: rhs.category)
+            if lp != rp { return lp < rp }
+            return lhs.localRange.location < rhs.localRange.location
+        }
+    }
+
+    private func shiftedIssue(
+        _ issue: OverlayIssue,
+        by offset: Int,
+        sourceRange: NSRange
+    ) -> OverlayIssue {
+        OverlayIssue(
+            id: issue.id,
+            patch: TextPatch(
+                id: issue.patch.id,
+                start: max(0, issue.localRange.location + offset),
+                end: max(0, issue.localRange.location + offset) + issue.localRange.length,
+                originalText: issue.patch.originalText,
+                replacement: issue.replacement,
+                reason: issue.reason
+            ),
+            category: issue.category,
+            segmentSignature: issue.segmentSignature,
+            sourceSegmentRange: sourceRange
+        )
+    }
+
+    private func overlaySuggestions(for issues: [OverlayIssue], in text: String) -> [OverlaySuggestion] {
+        var seen = Set<String>()
+        var rebuilt: [OverlaySuggestion] = []
+        for issue in issues.sorted(by: { lhs, rhs in
+            let lp = OverlayIssue.priority(of: lhs.category)
+            let rp = OverlayIssue.priority(of: rhs.category)
+            if lp != rp { return lp < rp }
+            return lhs.localRange.location < rhs.localRange.location
+        }) {
+            guard !seen.contains(issue.category.rawValue) else { continue }
+            seen.insert(issue.category.rawValue)
+            rebuilt.append(
+                OverlaySuggestion(
+                    operation: issue.category,
+                    text: applyIssueToSegment(text, issue: issue)
+                )
+            )
+        }
+        return rebuilt
+    }
+
+    /// Minimal diff envelope between `original` and `candidate`
+    /// expressed as the range inside `original` that must change and
+    /// the substring of `candidate` that replaces it. Uses UTF-16 code
+    /// units so the result plugs straight into `issueBoundsList` and
+    /// the AX range APIs without re-indexing. Returns nil when the two
+    /// strings are identical.
+    private func diffEnvelope(original: String, candidate: String) -> (range: NSRange, replacement: String)? {
+        let orig = original as NSString
+        let cand = candidate as NSString
+        let oLen = orig.length
+        let cLen = cand.length
+        guard oLen > 0 || cLen > 0 else { return nil }
+        var prefix = 0
+        let maxPrefix = min(oLen, cLen)
+        while prefix < maxPrefix
+                && orig.character(at: prefix) == cand.character(at: prefix) {
+            prefix += 1
+        }
+        var suffix = 0
+        let maxSuffix = min(oLen - prefix, cLen - prefix)
+        while suffix < maxSuffix
+                && orig.character(at: oLen - 1 - suffix) == cand.character(at: cLen - 1 - suffix) {
+            suffix += 1
+        }
+        let oRangeLen = max(0, oLen - prefix - suffix)
+        let cRangeLen = max(0, cLen - prefix - suffix)
+        guard oRangeLen > 0 || cRangeLen > 0 else { return nil }
+        let replacement = cand.substring(with: NSRange(location: prefix, length: cRangeLen))
+        return (NSRange(location: prefix, length: oRangeLen), replacement)
+    }
+
+    /// Splits the diff between `original` and `candidate` into one or
+    /// more atomic edits by recursively finding long common
+    /// substrings (≥ `minGap` UTF-16 units) inside the diff envelope
+    /// and cutting at them. A single Formal rewrite that touches both
+    /// `They're → They are` and `figure out → determine` thus emits
+    /// two separate (range, replacement) entries instead of a single
+    /// envelope spanning the whole sentence.
+    ///
+    /// Each returned tuple's `range` is anchored to the original
+    /// string's UTF-16 indexing — safe to feed straight into
+    /// `issueBoundsList` and AX range APIs.
+    private func atomicDiffs(
+        original: String,
+        candidate: String,
+        minGap: Int = 12
+    ) -> [(range: NSRange, replacement: String)] {
+        guard let envelope = diffEnvelope(original: original, candidate: candidate) else {
+            return []
+        }
+        let origNS = original as NSString
+        let origMid = envelope.range.length > 0
+            ? origNS.substring(with: envelope.range)
+            : ""
+        let candMid = envelope.replacement
+        _ = candidate
+        // No room to split — return as-is.
+        guard origMid.count >= minGap, candMid.count >= minGap else {
+            return [envelope]
+        }
+        guard let common = longestCommonSubstring(origMid, candMid),
+              common.length >= minGap else {
+            return [envelope]
+        }
+
+        let leftOrig = (origMid as NSString).substring(to: common.origStart)
+        let rightOrig = (origMid as NSString).substring(from: common.origStart + common.length)
+        let leftCand = (candMid as NSString).substring(to: common.candStart)
+        let rightCand = (candMid as NSString).substring(from: common.candStart + common.length)
+
+        var out: [(range: NSRange, replacement: String)] = []
+        let leftDiffs = atomicDiffs(original: leftOrig, candidate: leftCand, minGap: minGap)
+        for d in leftDiffs {
+            // shift relative ranges to absolute (relative to `original`)
+            let shifted = NSRange(
+                location: d.range.location + envelope.range.location,
+                length: d.range.length
+            )
+            out.append((shifted, d.replacement))
+        }
+        let rightDiffs = atomicDiffs(original: rightOrig, candidate: rightCand, minGap: minGap)
+        let rightOffset = envelope.range.location + common.origStart + common.length
+        for d in rightDiffs {
+            let shifted = NSRange(
+                location: d.range.location + rightOffset,
+                length: d.range.length
+            )
+            out.append((shifted, d.replacement))
+        }
+        return out.isEmpty ? [envelope] : out
+    }
+
+    /// Plain O(n*m) longest-common-substring — fine for our segment
+    /// sizes (≲ 200 chars). Returns the start indices in both strings
+    /// (UTF-16 code units) and the matched length, or nil when the
+    /// inputs share no characters.
+    private func longestCommonSubstring(
+        _ a: String,
+        _ b: String
+    ) -> (origStart: Int, candStart: Int, length: Int)? {
+        let aNS = a as NSString
+        let bNS = b as NSString
+        let aLen = aNS.length
+        let bLen = bNS.length
+        guard aLen > 0, bLen > 0 else { return nil }
+        var prev = [Int](repeating: 0, count: bLen + 1)
+        var curr = [Int](repeating: 0, count: bLen + 1)
+        var bestLen = 0
+        var bestAEnd = 0
+        var bestBEnd = 0
+        for i in 1...aLen {
+            let ca = aNS.character(at: i - 1)
+            for j in 1...bLen {
+                if ca == bNS.character(at: j - 1) {
+                    curr[j] = prev[j - 1] + 1
+                    if curr[j] > bestLen {
+                        bestLen = curr[j]
+                        bestAEnd = i
+                        bestBEnd = j
+                    }
+                } else {
+                    curr[j] = 0
+                }
+            }
+            swap(&prev, &curr)
+            for j in 0...bLen { curr[j] = 0 }
+        }
+        guard bestLen > 0 else { return nil }
+        return (bestAEnd - bestLen, bestBEnd - bestLen, bestLen)
+    }
+
+    /// Converts the list of whole-segment rewrites that
+    /// `overlaySuggestions` returned into per-span `OverlayIssue`
+    /// entries. Each suggestion produces at most one issue whose
+    /// `localRange` is the minimal diff envelope against the segment
+    /// and whose `replacement` is the corresponding substring of the
+    /// rewrite. Overlapping issues collapse to the highest-priority
+    /// category (Fix > Formal > Humanize > Shorten) so the UI never
+    /// paints two different colored underlines on top of each other.
+    private func deriveIssues(
+        fromSegment segment: String,
+        suggestions: [OverlaySuggestion]
+    ) -> [OverlayIssue] {
+        let segmentNS = segment as NSString
+        let segmentSignature = segmentCacheKey(segment)
+        var candidates: [OverlayIssue] = []
+        for suggestion in suggestions {
+            // Final safety net at the suggestion level: variants that
+            // mangle protected tokens (URLs, currencies, units, etc.)
+            // are dropped wholesale before we split them up.
+            if !preservesProtectedTokens(original: segment, candidate: suggestion.text)
+                || wouldRevertRecentRewrite(original: segment, candidate: suggestion.text) {
+                continue
+            }
+            // Split each whole-segment rewrite into one or more
+            // atomic edits so a Formal/Shorten/Humanize variant that
+            // touches two separate spots produces two underlines
+            // instead of one giant envelope across the sentence.
+            let edits = atomicDiffs(original: segment, candidate: suggestion.text)
+            for edit in edits {
+                // Widen each atomic edit out to whole-word boundaries
+                // before we build the issue — keeps the underline,
+                // the hit-test, and the hover card's word-level diff
+                // in visual agreement.
+                let expanded = expandAtomicEditToWordBounds(
+                    segment: segment,
+                    range: edit.range,
+                    replacement: edit.replacement
+                )
+                guard expanded.range.location >= 0,
+                      NSMaxRange(expanded.range) <= segmentNS.length else { continue }
+                let span = expanded.range.length > 0
+                    ? segmentNS.substring(with: expanded.range)
+                    : ""
+                // Skip no-op atomic edits (e.g. whitespace-only).
+                if normalized(span) == normalized(expanded.replacement) {
+                    continue
+                }
+                if wouldRevertRecentRewrite(original: span, candidate: expanded.replacement) {
+                    continue
+                }
+                if suggestion.operation == .fixGrammar,
+                   shouldRejectFixSuggestion(original: span, candidate: expanded.replacement) {
+                    continue
+                }
+                // Per-issue length sanity: an atomic edit should be a
+                // local change. Anything still spanning ≥ 70% of the
+                // segment after splitting is almost certainly a
+                // wholesale rewrite — leave it to the popup, don't
+                // paint a useless line under the entire paragraph.
+                if expanded.range.length > 0,
+                   Double(expanded.range.length) / Double(max(1, segmentNS.length)) >= 0.7 {
+                    continue
+                }
+                let issue = OverlayIssue(
+                    localRange: expanded.range,
+                    originalText: span,
+                    category: suggestion.operation,
+                    replacement: expanded.replacement,
+                    reason: nil,
+                    segmentSignature: segmentSignature,
+                    sourceSegmentRange: nil
+                )
+                if issueBreaksNumberedListMarker(issue, in: segment) {
+                    continue
+                }
+                // Honor previous Skip clicks for this exact span.
+                let sig = skipSignature(
+                    segmentSignature: segmentSignature,
+                    issue: issue,
+                    spanText: span
+                )
+                if skippedIssueSignatures.contains(sig) {
+                    continue
+                }
+                candidates.append(issue)
+            }
+        }
+
+        // Sort by start, then priority, and drop overlapping
+        // lower-priority entries. This mirrors the dedupe we do for
+        // `auditIssues` and guarantees each visible underline maps to
+        // exactly one category.
+        candidates.sort { lhs, rhs in
+            if lhs.localRange.location != rhs.localRange.location {
+                return lhs.localRange.location < rhs.localRange.location
+            }
+            return OverlayIssue.priority(of: lhs.category) < OverlayIssue.priority(of: rhs.category)
+        }
+        var accepted: [OverlayIssue] = []
+        for issue in candidates {
+            if let last = accepted.last,
+               NSIntersectionRange(last.localRange, issue.localRange).length > 0 {
+                if OverlayIssue.priority(of: issue.category) < OverlayIssue.priority(of: last.category) {
+                    accepted.removeLast()
+                    accepted.append(issue)
+                }
+                continue
+            }
+            accepted.append(issue)
+        }
+        return accepted
+    }
+
+    private func semanticStyleIssues(
+        fromSegment segment: String,
+        suggestions: [OverlaySuggestion],
+        excludingOperations: Set<RewriteOperation>
+    ) -> [OverlayIssue] {
+        let segmentNS = segment as NSString
+        guard segmentNS.length > 0 else { return [] }
+        let segmentSignature = segmentCacheKey(segment)
+        var issues: [OverlayIssue] = []
+        for suggestion in suggestions {
+            guard suggestion.operation != .fixGrammar,
+                  !excludingOperations.contains(suggestion.operation) else {
+                continue
+            }
+            let candidate = suggestion.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty,
+                  normalized(candidate) != normalized(segment),
+                  preservesProtectedTokens(original: segment, candidate: candidate),
+                  !wouldRevertRecentRewrite(original: segment, candidate: candidate),
+                  isReasonableStyleIssue(original: segment, candidate: candidate) else {
+                continue
+            }
+            let issue = OverlayIssue(
+                localRange: NSRange(location: 0, length: segmentNS.length),
+                originalText: segment,
+                category: suggestion.operation,
+                replacement: candidate,
+                reason: "Sentence-level rewrite",
+                segmentSignature: segmentSignature,
+                sourceSegmentRange: nil
+            )
+            if issueBreaksNumberedListMarker(issue, in: segment) {
+                continue
+            }
+            let sig = skipSignature(
+                segmentSignature: segmentSignature,
+                issue: issue,
+                spanText: segment
+            )
+            if skippedIssueSignatures.contains(sig) {
+                continue
+            }
+            issues.append(issue)
+        }
+        return issues
+    }
+
+    private func protectedTokens(in text: String) -> [String] {
+        let ns = text as NSString
+        return protectedTokenRanges(in: text).map { ns.substring(with: $0) }
+    }
+
+    private func fixMixedLatinCyrillicWords(in text: String) -> String {
+        let protectedRanges = protectedTokenRanges(in: text)
+        if !protectedRanges.isEmpty {
+            let ns = text as NSString
+            var result = ""
+            var cursor = 0
+            for range in protectedRanges.sorted(by: { $0.location < $1.location }) {
+                if range.location > cursor {
+                    let chunkRange = NSRange(location: cursor, length: range.location - cursor)
+                    result += fixMixedLatinCyrillicWords(in: ns.substring(with: chunkRange))
+                }
+                result += ns.substring(with: range)
+                cursor = range.location + range.length
+            }
+            if cursor < ns.length {
+                result += fixMixedLatinCyrillicWords(in: ns.substring(from: cursor))
+            }
+            return result
+        }
+
+        let map: [Character: Character] = [
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X", "У": "Y",
+            "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "к": "k", "м": "m", "т": "t", "в": "b", "н": "h"
+        ]
+        var result = ""
+        var token = ""
+        for ch in text {
+            if ch.isLetter {
+                token.append(ch)
+                continue
+            }
+            result.append(normalizeToken(token, map: map))
+            token.removeAll(keepingCapacity: true)
+            result.append(ch)
+        }
+        result.append(normalizeToken(token, map: map))
+        return result
+    }
+
+    private func normalizeToken(_ token: String, map: [Character: Character]) -> String {
+        guard !token.isEmpty else { return token }
+        let hasLatin = token.unicodeScalars.contains {
+            let v = $0.value
+            return (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v)
+        }
+        let hasCyrillic = token.unicodeScalars.contains {
+            let v = $0.value
+            return (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v)
+        }
+        guard hasLatin && hasCyrillic else { return token }
+        return String(token.map { map[$0] ?? $0 })
+    }
+
+    private func normalized(_ text: String) -> String {
+        stripSlackInvisibleMarkers(from: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private func stripSlackInvisibleMarkers(from text: String) -> String {
+        String(text.unicodeScalars.filter { !isSlackInvisibleMarker($0) })
+    }
+
+    private func isSlackInvisibleMarker(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0xFFFC, 0x200B, 0x200C, 0x200D, 0x2060:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isSlackInvisibleMarker(_ codeUnit: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(UInt32(codeUnit)) else { return false }
+        return isSlackInvisibleMarker(scalar)
+    }
+
+    private func estimatedChangedRange(original: String, suggestion: String) -> NSRange? {
+        let lhs = original as NSString
+        let rhs = suggestion as NSString
+        guard lhs.length > 0, rhs.length > 0 else { return nil }
+        let limit = min(lhs.length, rhs.length)
+        var prefix = 0
+        while prefix < limit, lhs.character(at: prefix) == rhs.character(at: prefix) {
+            prefix += 1
+        }
+        if prefix == lhs.length, prefix == rhs.length {
+            return nil
+        }
+
+        var suffix = 0
+        while suffix < lhs.length - prefix,
+              suffix < rhs.length - prefix,
+              lhs.character(at: lhs.length - 1 - suffix) == rhs.character(at: rhs.length - 1 - suffix) {
+            suffix += 1
+        }
+
+        let changedLength = max(1, lhs.length - prefix - suffix)
+        let rawStart = min(prefix, lhs.length - 1)
+        let rawEnd = min(lhs.length, prefix + changedLength)
+        let expanded = expandedToWordBoundaries(start: rawStart, end: rawEnd, in: lhs)
+        return NSRange(location: expanded.start, length: max(1, expanded.end - expanded.start))
+    }
+
+    private func expandedToWordBoundaries(start: Int, end: Int, in text: NSString) -> (start: Int, end: Int) {
+        var expandedStart = max(0, min(start, text.length))
+        var expandedEnd = max(expandedStart, min(end, text.length))
+
+        while expandedStart > 0, isWordLike(text.character(at: expandedStart - 1)) {
+            expandedStart -= 1
+        }
+        while expandedEnd < text.length, isWordLike(text.character(at: expandedEnd)) {
+            expandedEnd += 1
+        }
+
+        return (expandedStart, max(expandedStart + 1, expandedEnd))
+    }
+
+    private func isWordLike(_ codeUnit: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(UInt32(codeUnit)) else { return false }
+        return CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar)
+    }
+
+    private func updateRingColor() {
+        guard let panel else { return }
+        let root = FloatingButtonView(
+            ringColors: ringColors(for: suggestionState),
+            isLoading: isEvaluating,
+            spotlightPulse: spotlightHighlightActive
+        )
+        guard let hosting = panel.contentView as? NSHostingView<FloatingButtonView> else { return }
+        hosting.rootView = root
+        hosting.needsLayout = true
+        hosting.layoutSubtreeIfNeeded()
+    }
+
+    /// AX caret/field rects often jitter sub‑pixel when idle; avoid hammering `setFrame` every 200ms.
+    private func applyMainBubbleFrameIfChanged(_ nextFrame: CGRect, threshold: CGFloat = 2) {
+        let t = threshold
+        if abs(nextFrame.origin.x - lastFrame.origin.x) < t,
+           abs(nextFrame.origin.y - lastFrame.origin.y) < t,
+           abs(nextFrame.width - lastFrame.width) < 0.5,
+           abs(nextFrame.height - lastFrame.height) < 0.5 {
+            return
+        }
+        panel?.setFrame(nextFrame, display: true)
+        lastFrame = nextFrame
+    }
+
+    private func createIssueOverlayPanel() {
+        let host = NSHostingView(rootView: FloatingIssueUnderlineView(colors: issueOverlayColors()))
+        issueOverlayPanel = makeIssueOverlayPanel(host: host)
+    }
+
+    private func makeIssueOverlayPanel(host: NSHostingView<FloatingIssueUnderlineView>) -> NSPanel {
+        host.frame = NSRect(x: 0, y: 0, width: 40, height: 8)
+        host.autoresizingMask = [.width, .height]
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 40, height: 8),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .statusBar
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        panel.ignoresMouseEvents = true
+        panel.contentView = host
+        panel.orderOut(nil)
+        return panel
+    }
+
+    private func issueOverlayPanel(at index: Int) -> NSPanel {
+        if index == 0 {
+            if issueOverlayPanel == nil {
+                createIssueOverlayPanel()
+            }
+            return issueOverlayPanel!
+        }
+        let extraIndex = index - 1
+        while extraIssueOverlayPanels.count <= extraIndex {
+            let host = NSHostingView(rootView: FloatingIssueUnderlineView(colors: issueOverlayColors()))
+            extraIssueOverlayPanels.append(makeIssueOverlayPanel(host: host))
+        }
+        return extraIssueOverlayPanels[extraIndex]
+    }
+
+    private func createMarkerPanel() {
+        markerPanel = makeMarkerPanel()
+    }
+
+    private func makeMarkerPanel() -> NSPanel {
+        let host = NSHostingView(
+            rootView: FloatingMarkerView(
+                onOpen: { [weak self] in
+                    guard let self else { return }
+                    self.cancelScheduledHoverHide()
+                    self.showHoverCard()
+                },
+                onHoverChanged: { [weak self] isHovering in
+                    self?.handleMarkerHover(isHovering)
+                },
+                onHoverMoved: { [weak self] in
+                    self?.handleMarkerHoverMoved()
+                }
+            )
+        )
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 40, height: 18),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .screenSaver
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        panel.ignoresMouseEvents = false
+        panel.contentView = host
+        panel.orderOut(nil)
+        return panel
+    }
+
+    private func markerHitPanel(at index: Int) -> NSPanel {
+        if index == 0 {
+            if markerPanel == nil {
+                createMarkerPanel()
+            }
+            return markerPanel!
+        }
+        let extraIndex = index - 1
+        while extraMarkerPanels.count <= extraIndex {
+            extraMarkerPanels.append(makeMarkerPanel())
+        }
+        return extraMarkerPanels[extraIndex]
+    }
+
+    private func updateMarker(caretFrame: CGRect?, fieldFrame: CGRect, anchor: MarkerAnchor) {
+        lastMarkerFieldFrame = fieldFrame
+        lastMarkerCaretFrame = caretFrame
+        guard suggestionState == .needsAttention,
+              let context = latestContext,
+              context.anchor.source != .clipboardFallback,
+              !latestSuggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            hideMarkerAndCard()
+            return
+        }
+        let fallback = fallbackIssueFrame(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: latestIssueRange
+        )
+
+        // Build the list of underline jobs. In the new per-span path
+        // each issue contributes its own (frame, color, issueID)
+        // entries — possibly several frames if the issue wraps across
+        // text-view lines. In the legacy path we render a single
+        // multi-color underline derived from `latestIssueRange`.
+        struct UnderlineJob {
+            let frame: CGRect
+            let colors: [Color]
+            let issueID: UUID?
+            let geometry: String
+            let source: String
+        }
+        var jobs: [UnderlineJob] = []
+        if !latestIssues.isEmpty {
+            let renderableIssues = issuesToRender(in: context)
+            for issue in renderableIssues {
+                let geometryTarget = localizedGeometryTarget(for: issue, in: context)
+                let useScopedGeometry = shouldUseScopedOverlayGeometry(
+                    for: context,
+                    geometryTargetAvailable: geometryTarget != nil
+                )
+                let issueContext = useScopedGeometry ? (geometryTarget?.context ?? context) : context
+                let issueRange = useScopedGeometry ? (geometryTarget?.localRange ?? issue.localRange) : issue.localRange
+                let fallbackContext = useScopedGeometry ? (geometryTarget?.context ?? issueContext) : issueContext
+                let fallbackRange = useScopedGeometry ? (geometryTarget?.localRange ?? issueRange) : issueRange
+                let issueFallback = fallbackIssueFrame(
+                    caretFrame: caretFrame,
+                    fieldFrame: fieldFrame,
+                    context: fallbackContext,
+                    issueRange: fallbackRange
+                )
+                let axFrames = textService.issueBoundsList(
+                    in: issueContext,
+                    localRange: issueRange,
+                    fallbackFrame: issueFallback
+                )
+                let axFramesAreHostFallback = axFrames.count == 1 && approximatelySameRect(axFrames[0], issueFallback)
+                let preciseFrames = axFramesAreHostFallback ? nil : usablePreciseIssueFrames(axFrames, fallback: issueFallback)
+                let estimatedFrames = preciseFrames == nil
+                    ? hostEstimatedIssueFrames(
+                        caretFrame: caretFrame,
+                        fieldFrame: fieldFrame,
+                        context: fallbackContext,
+                        issueRange: fallbackRange
+                    )
+                    : nil
+                let selectedSource: String
+                let rawFrames: [CGRect]
+                if let preciseFrames {
+                    selectedSource = "axPrecise"
+                    rawFrames = preciseFrames
+                } else if let estimatedFrames {
+                    selectedSource = "hostEstimated"
+                    rawFrames = estimatedFrames
+                } else if axFramesAreHostFallback {
+                    selectedSource = "hostFallbackFrame"
+                    rawFrames = axFrames
+                } else {
+                    selectedSource = "axRawOrFallback"
+                    rawFrames = axFrames
+                }
+                let normalized = normalizedIssueOverlayFrames(for: rawFrames, fallback: issueFallback)
+                postMarkerPipelineDebug(
+                    stage: "issue",
+                    context: issueContext,
+                    issueRange: issueRange,
+                    fallback: issueFallback,
+                    axFrames: axFrames,
+                    selectedSource: selectedSource,
+                    selectedFrames: rawFrames,
+                    normalizedFrames: normalized
+                )
+                guard !normalized.isEmpty else { continue }
+                let issueColor = TextoraSuggestionColors.color(for: issue.category)
+                let geometry = diagnosticGeometryKind(for: issueContext, selectedSource: selectedSource)
+                for frame in normalized {
+                    jobs.append(
+                        UnderlineJob(
+                            frame: frame,
+                            colors: [issueColor],
+                            issueID: issue.id,
+                            geometry: geometry,
+                            source: selectedSource
+                        )
+                    )
+                }
+            }
+        }
+        if jobs.isEmpty {
+            // Legacy single-issue rendering. The marker uses the
+            // multi-color brand gradient (or per-operation color when
+            // exactly one operation is suggested) the same way it did
+            // before per-span issues existed.
+            let axFrames = textService.issueBoundsList(
+                in: context,
+                localRange: latestIssueRange,
+                fallbackFrame: fallback
+            )
+            let axFramesAreHostFallback = axFrames.count == 1 && approximatelySameRect(axFrames[0], fallback)
+            let preciseFrames = axFramesAreHostFallback ? nil : usablePreciseIssueFrames(axFrames, fallback: fallback)
+            let estimatedFrames = preciseFrames == nil
+                ? hostEstimatedIssueFrames(
+                    caretFrame: caretFrame,
+                    fieldFrame: fieldFrame,
+                    context: context,
+                    issueRange: latestIssueRange
+                )
+                : nil
+            let selectedSource: String
+            let rawFrames: [CGRect]
+            if let preciseFrames {
+                selectedSource = "axPrecise"
+                rawFrames = preciseFrames
+            } else if let estimatedFrames {
+                selectedSource = "hostEstimated"
+                rawFrames = estimatedFrames
+            } else if axFramesAreHostFallback {
+                selectedSource = "hostFallbackFrame"
+                rawFrames = axFrames
+            } else {
+                selectedSource = "axRawOrFallback"
+                rawFrames = axFrames
+            }
+            let normalized = normalizedIssueOverlayFrames(for: rawFrames, fallback: fallback)
+            postMarkerPipelineDebug(
+                stage: "legacy",
+                context: context,
+                issueRange: latestIssueRange,
+                fallback: fallback,
+                axFrames: axFrames,
+                selectedSource: selectedSource,
+                selectedFrames: rawFrames,
+                normalizedFrames: normalized
+            )
+            guard !normalized.isEmpty else {
+                hideMarkerAndCard()
+                return
+            }
+            let colors = issueOverlayColors()
+            let geometry = diagnosticGeometryKind(for: context, selectedSource: selectedSource)
+            for frame in normalized {
+                jobs.append(
+                    UnderlineJob(
+                        frame: frame,
+                        colors: colors,
+                        issueID: nil,
+                        geometry: geometry,
+                        source: selectedSource
+                    )
+                )
+            }
+        }
+        guard !jobs.isEmpty else {
+            hideMarkerAndCard()
+            return
+        }
+
+        let allFrames = jobs.map(\.frame)
+        let hitFrame = markerHitFrame(for: allFrames)
+        postMarkerGeometryStatus(
+            context: context,
+            issueFrame: hitFrame,
+            fallback: fallback,
+            underlineFrames: allFrames,
+            geometrySources: jobs.map { "\($0.geometry):\($0.source)" },
+            segmentCount: jobs.count
+        )
+        if markerPanel == nil {
+            createMarkerPanel()
+        }
+
+        var newLayouts: [IssuePanelLayout] = []
+        for (index, job) in jobs.enumerated() {
+            let overlayPanel = issueOverlayPanel(at: index)
+            if let host = overlayPanel.contentView as? NSHostingView<FloatingIssueUnderlineView> {
+                host.rootView = FloatingIssueUnderlineView(
+                    colors: job.colors,
+                    isHighlighted: job.issueID != nil && job.issueID == hoveredIssueID
+                )
+            }
+            let overlayWasVisible = overlayPanel.isVisible
+            overlayPanel.setFrame(job.frame, display: true)
+            if !overlayWasVisible {
+                overlayPanel.orderFrontRegardless()
+            }
+
+            let hitPanel = markerHitPanel(at: index)
+            let issueHitFrame = markerHitFrame(forSingleUnderline: job.frame)
+            let hitWasVisible = hitPanel.isVisible
+            hitPanel.setFrame(issueHitFrame, display: true)
+            if !hitWasVisible {
+                hitPanel.orderFrontRegardless()
+            }
+            newLayouts.append(IssuePanelLayout(panelIndex: index, frame: job.frame, issueID: job.issueID))
+        }
+        // Hide any panels left over from a previous render with more
+        // jobs than this one.
+        if jobs.count - 1 < extraIssueOverlayPanels.count {
+            for panel in extraIssueOverlayPanels.dropFirst(max(0, jobs.count - 1)) {
+                panel.orderOut(nil)
+            }
+        }
+        if jobs.count - 1 < extraMarkerPanels.count {
+            for panel in extraMarkerPanels.dropFirst(max(0, jobs.count - 1)) {
+                panel.orderOut(nil)
+            }
+        }
+        issuePanelLayouts = newLayouts
+        refreshIssueUnderlineHighlight()
+        keepMarkerPanelBehindHoverCardIfNeeded()
+        markerAnchor = anchor
+    }
+
+    private func issuesToRender(in _: TextAccessService.FocusedTextContext) -> [OverlayIssue] {
+        latestIssues
+    }
+
+    private func refreshIssueUnderlineHighlight() {
+        for layout in issuePanelLayouts {
+            let overlayPanel = issueOverlayPanel(at: layout.panelIndex)
+            guard let host = overlayPanel.contentView as? NSHostingView<FloatingIssueUnderlineView> else {
+                continue
+            }
+            let issueColor = layout.issueID
+                .flatMap { id in latestIssues.first(where: { $0.id == id })?.category }
+                .map { TextoraSuggestionColors.color(for: $0) }
+            let colors = issueColor.map { [$0] } ?? issueOverlayColors()
+            host.rootView = FloatingIssueUnderlineView(
+                colors: colors,
+                isHighlighted: layout.issueID != nil && layout.issueID == hoveredIssueID
+            )
+        }
+    }
+
+    private func shouldUseScopedOverlayGeometry(
+        for context: TextAccessService.FocusedTextContext,
+        geometryTargetAvailable: Bool
+    ) -> Bool {
+        guard geometryTargetAvailable else { return false }
+        if !context.textFragments.isEmpty || context.anchor.source == .visiblePageText {
+            return false
+        }
+        if isSlackBundle(context.targetBundleID) {
+            return true
+        }
+        if isBrowserBundle(context.targetBundleID) {
+            return true
+        }
+        return false
+    }
+
+    /// Returns the issue (if any) whose underline panel covers `point`
+    /// in screen coordinates. Used by the per-issue hover hit-test —
+    /// when the mouse moves over the marker panel we look up which
+    /// underline it actually sits over and show that issue's card.
+    private func issue(atScreenPoint point: CGPoint) -> OverlayIssue? {
+        for layout in issuePanelLayouts {
+            let hit = markerHitFrame(forSingleUnderline: layout.frame)
+            guard hit.contains(point) else { continue }
+            guard let issueID = layout.issueID else { continue }
+            if let match = latestIssues.first(where: { $0.id == issueID }) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func postMarkerGeometryStatus(
+        context: TextAccessService.FocusedTextContext,
+        issueFrame: CGRect,
+        fallback: CGRect,
+        underlineFrames: [CGRect] = [],
+        geometrySources: [String] = [],
+        segmentCount: Int = 1
+    ) {
+        let issuePart = "\(Int(issueFrame.minX)):\(Int(issueFrame.minY)):\(Int(issueFrame.width)):\(Int(issueFrame.height))"
+        let fallbackPart = "\(Int(fallback.minX)):\(Int(fallback.minY)):\(Int(fallback.width)):\(Int(fallback.height))"
+        let underlinePart = underlineFrames
+            .map { "\(Int($0.minX)):\(Int($0.minY)):\(Int($0.width)):\(Int($0.height))" }
+            .joined(separator: ",")
+        let geometryPart = uniquePreservingOrder(geometrySources).joined(separator: ",")
+        let signature = "\(context.anchor.source.rawValue)|\(context.anchor.confidence.rawValue)|\(geometryPart)|\(issuePart)|\(fallbackPart)|\(underlinePart)|\(segmentCount)"
+        guard signature != lastMarkerDebugSignature else { return }
+        lastMarkerDebugSignature = signature
+        let message = "Marker geometry bundle=\(context.targetBundleID) geometry=[\(geometryPart)] \(context.anchor.debugSummary) hit \(issuePart) fallback \(fallbackPart) underlines [\(underlinePart)] segments \(segmentCount)"
+        textoraDiagLog("markerGeometry", message)
+        postStatus(message)
+    }
+
+    private func uniquePreservingOrder(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for value in values where !value.isEmpty {
+            guard !seen.contains(value) else { continue }
+            seen.insert(value)
+            result.append(value)
+        }
+        return result
+    }
+
+    private func normalizedIssueOverlayFrames(for bounds: [CGRect], fallback: CGRect) -> [CGRect] {
+        let sourceBounds = bounds.isEmpty ? [fallback] : bounds
+        var frames: [CGRect] = []
+        for rect in sourceBounds.prefix(8) {
+            let frame = normalizedIssueOverlayFrame(for: rect, fallback: fallback)
+            guard !frame.isEmpty else { continue }
+            let isDuplicate = frames.contains {
+                abs($0.minX - frame.minX) < 2
+                    && abs($0.minY - frame.minY) < 2
+                    && abs($0.width - frame.width) < 2
+                    && abs($0.height - frame.height) < 2
+            }
+            if !isDuplicate {
+                frames.append(frame)
+            }
+        }
+        return frames
+    }
+
+    private func usablePreciseIssueFrames(_ frames: [CGRect], fallback: CGRect) -> [CGRect]? {
+        let usable = frames.filter { frame in
+            guard !frame.isEmpty else { return false }
+            guard frame.width >= 1, frame.height >= 2, frame.width <= 900, frame.height <= 90 else { return false }
+            guard !fallback.isEmpty else { return true }
+            let area = fallback.insetBy(dx: -220, dy: -180)
+            return area.intersects(frame) || area.contains(CGPoint(x: frame.midX, y: frame.midY))
+        }
+        return usable.isEmpty ? nil : usable
+    }
+
+    private func approximatelySameRect(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 1.0) -> Bool {
+        abs(lhs.minX - rhs.minX) <= tolerance
+            && abs(lhs.minY - rhs.minY) <= tolerance
+            && abs(lhs.width - rhs.width) <= tolerance
+            && abs(lhs.height - rhs.height) <= tolerance
+    }
+
+    private func markerHitFrame(for underlineFrames: [CGRect]) -> CGRect {
+        guard let first = underlineFrames.first else { return .zero }
+        let union = underlineFrames.dropFirst().reduce(first) { $0.union($1) }
+        let hit = CGRect(
+            x: union.minX - 6,
+            y: union.minY - 2,
+            width: union.width + 12,
+            height: max(12, union.height + 8)
+        )
+        return clampedToVisibleScreens(hit)
+    }
+
+    private func markerHitFrame(forSingleUnderline underlineFrame: CGRect) -> CGRect {
+        let hit = CGRect(
+            x: underlineFrame.minX - 5,
+            y: underlineFrame.minY - 4,
+            width: underlineFrame.width + 10,
+            height: max(12, underlineFrame.height + 8)
+        )
+        return clampedToVisibleScreens(hit)
+    }
+
+    private func normalizedIssueOverlayFrame(for bounds: CGRect, fallback: CGRect) -> CGRect {
+        let source = bounds.isEmpty ? fallback : bounds
+        let minWidth: CGFloat = 10
+        let maxWidth: CGFloat = 520
+        let width = min(max(source.width, minWidth), maxWidth)
+        let underlineHeight: CGFloat = 4
+        let underlineOffset: CGFloat = 3
+        let frame = CGRect(
+            x: source.minX,
+            y: source.minY - underlineOffset,
+            width: width,
+            height: underlineHeight
+        )
+        return clampedToVisibleScreens(frame)
+    }
+
+    private func hostEstimatedIssueFrames(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange?
+    ) -> [CGRect]? {
+        guard context.anchor.source != .clipboardFallback else {
+            return nil
+        }
+        guard isSlackBundle(context.targetBundleID) || isBrowserBundle(context.targetBundleID) else {
+            return nil
+        }
+        guard let issueRange else { return nil }
+        if !context.textFragments.isEmpty || context.anchor.source == .visiblePageText {
+            return nil
+        }
+        if let frames = estimatedIssueFramesFromTextAnchor(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: issueRange
+        ), !frames.isEmpty {
+            return frames
+        }
+        if let fallback = estimatedIssueFrameFromVisibleText(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: issueRange
+        ) {
+            return [fallback]
+        }
+        return nil
+    }
+
+    private func fallbackIssueFrame(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange?
+    ) -> CGRect {
+        if let anchoredFrame = estimatedIssueFrameFromTextAnchor(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: issueRange
+        ) {
+            return anchoredFrame
+        }
+
+        if isWebOrMessengerBundle(context.targetBundleID),
+           let textLineFrame = estimatedIssueFrameFromVisibleText(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: issueRange
+           ) {
+            return textLineFrame
+        }
+
+        let stableFieldFrame = stableIssueAnchorFrame(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context
+        )
+        let textLength = max(1, (context.text as NSString).length)
+        let issueLength = max(1, issueRange?.length ?? min(textLength, 42))
+        let issueLocation = max(0, min(issueRange?.location ?? 0, textLength))
+        let estimatedCharWidth: CGFloat = 7.2
+        let width = min(max(CGFloat(issueLength) * estimatedCharWidth, 28), min(stableFieldFrame.width, 360))
+
+        if let caretFrame, caretFrame.width <= 12, stableFieldFrame.insetBy(dx: -24, dy: -24).intersects(caretFrame) {
+            return CGRect(
+                x: caretFrame.minX,
+                y: caretFrame.minY,
+                width: width,
+                height: max(caretFrame.height, 14)
+            )
+        }
+
+        let horizontalInset: CGFloat = 12
+        let availableWidth = max(1, stableFieldFrame.width - horizontalInset * 2)
+        let xOffset = min(
+            max(CGFloat(issueLocation) / CGFloat(textLength) * availableWidth, 0),
+            max(0, availableWidth - width)
+        )
+        let lineHeight: CGFloat = min(max(stableFieldFrame.height, 18), 24)
+        return CGRect(
+            x: stableFieldFrame.minX + horizontalInset + xOffset,
+            y: stableFieldFrame.maxY - lineHeight - 4,
+            width: width,
+            height: lineHeight
+        )
+    }
+
+    private func estimatedIssueFrameFromTextAnchor(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange?
+    ) -> CGRect? {
+        if let issueRange,
+           let frames = estimatedIssueFramesFromTextAnchor(
+            caretFrame: caretFrame,
+            fieldFrame: fieldFrame,
+            context: context,
+            issueRange: issueRange
+           ),
+           let first = frames.first {
+            return first
+        }
+
+        let anchor = context.anchor
+        guard anchor.confidence != .weak, !anchor.rect.isEmpty else { return nil }
+        if isSlackBundle(context.targetBundleID),
+           !isUsableSlackTextFrame(anchor.rect) {
+            return nil
+        }
+
+        let textNS = context.text as NSString
+        guard textNS.length > 0 else { return nil }
+        let issueLocation = max(0, min(issueRange?.location ?? 0, textNS.length))
+        let issueLength = max(1, min(issueRange?.length ?? textNS.length, textNS.length - issueLocation))
+
+        if (anchor.source == .axBoundsForRange || anchor.source == .axLineBounds), issueRange == nil {
+            return anchor.rect
+        }
+
+        if (anchor.source == .axBoundsForRange || anchor.source == .axLineBounds), anchor.rect.width > 0 {
+            let charWidth = min(max(anchor.rect.width / CGFloat(max(1, textNS.length)), 5.2), 14.5)
+            let width = min(max(CGFloat(issueLength) * charWidth, 16), max(16, anchor.rect.width))
+            let x = min(
+                max(anchor.rect.minX + CGFloat(issueLocation) * charWidth, anchor.rect.minX),
+                anchor.rect.maxX - width
+            )
+            return CGRect(
+                x: x,
+                y: anchor.rect.minY,
+                width: width,
+                height: max(anchor.rect.height, 14)
+            )
+        }
+
+        if isSlackBundle(context.targetBundleID),
+           anchor.source == .axElementFrame,
+           let slackFrame = estimatedSlackIssueFrameFromElementAnchor(
+            anchorFrame: anchor.rect,
+            text: textNS,
+            issueLocation: issueLocation,
+            issueLength: issueLength
+           ) {
+            return slackFrame
+        }
+
+        if isBrowserBundle(context.targetBundleID),
+           anchor.source == .axElementFrame,
+           let browserFrame = estimatedBrowserIssueFrameFromElementAnchor(
+            anchorFrame: anchor.rect,
+            text: textNS,
+            issueLocation: issueLocation,
+            issueLength: issueLength
+           ) {
+            return browserFrame
+        }
+
+        let usableCaretFrame: CGRect? = {
+            guard let caretFrame else { return nil }
+            if isSlackBundle(context.targetBundleID) {
+                return isUsableSlackCaretFrame(
+                    caretFrame,
+                    anchorFrame: anchor.rect,
+                    contextFrame: context.frame
+                ) ? caretFrame : nil
+            }
+            if isBrowserBundle(context.targetBundleID) {
+                return isUsableBrowserCaretFrame(
+                    caretFrame,
+                    anchorFrame: anchor.rect,
+                    contextFrame: context.frame
+                ) ? caretFrame : nil
+            }
+            return caretFrame
+        }()
+
+        let lineFrame: CGRect
+        if anchor.source == .axCaret || anchor.source == .axLineBounds {
+            lineFrame = anchor.rect
+        } else if let usableCaretFrame {
+            lineFrame = usableCaretFrame
+        } else {
+            lineFrame = anchor.rect
+        }
+
+        guard lineFrame.width <= max(18, fieldFrame.width), lineFrame.height <= 80 else {
+            return nil
+        }
+
+        let container = textContainerFrame(
+            fieldFrame: fieldFrame,
+            contextFrame: context.frame,
+            lineFrame: lineFrame
+        )
+        let horizontalPadding: CGFloat = min(max(container.width * 0.025, 16), 34)
+        let textStartX = min(
+            max(container.minX + horizontalPadding, container.minX + 4),
+            lineFrame.minX
+        )
+        let measuredWidth = max(1, lineFrame.minX - textStartX)
+        let measuredCharWidth = measuredWidth / CGFloat(max(1, textNS.length))
+        let charWidth = min(max(measuredCharWidth, 5.8), 13.5)
+        let width = min(
+            max(CGFloat(issueLength) * charWidth, 16),
+            max(16, container.maxX - textStartX - 4)
+        )
+        let x = min(
+            max(textStartX + CGFloat(issueLocation) * charWidth, container.minX + 4),
+            container.maxX - width - 4
+        )
+        let lineHeight = min(max(lineFrame.height, 16), 28)
+        return CGRect(
+            x: x,
+            y: lineFrame.minY - 1,
+            width: width,
+            height: lineHeight
+        )
+    }
+
+    private func estimatedIssueFramesFromTextAnchor(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange
+    ) -> [CGRect]? {
+        let textNS = context.text as NSString
+        guard textNS.length > 0 else { return nil }
+        let issueLocation = max(0, min(issueRange.location, textNS.length))
+        let issueLength = max(1, min(issueRange.length, textNS.length - issueLocation))
+
+        if isSlackBundle(context.targetBundleID) {
+            let anchorFrame: CGRect = {
+                let anchor = context.anchor
+                if anchor.source == .axElementFrame, isUsableSlackTextFrame(anchor.rect) {
+                    return anchor.rect
+                }
+                let stable = stableIssueAnchorFrame(
+                    caretFrame: caretFrame,
+                    fieldFrame: fieldFrame,
+                    context: context
+                )
+                if isUsableSlackTextFrame(stable) {
+                    return stable
+                }
+                return anchor.rect
+            }()
+            guard let frames = estimatedSlackIssueFramesFromElementAnchor(
+                anchorFrame: anchorFrame,
+                text: textNS,
+                issueLocation: issueLocation,
+                issueLength: issueLength
+            ), !frames.isEmpty else {
+                return nil
+            }
+            return frames
+        }
+
+        if isBrowserBundle(context.targetBundleID) {
+            let anchor = context.anchor
+            let anchorFrame: CGRect
+            if isUsableBrowserTextFrame(anchor.rect) {
+                anchorFrame = anchor.rect
+            } else if isUsableBrowserTextFrame(fieldFrame) {
+                anchorFrame = fieldFrame
+            } else {
+                return nil
+            }
+            guard let frames = estimatedBrowserIssueFramesFromElementAnchor(
+                anchorFrame: anchorFrame,
+                text: textNS,
+                issueLocation: issueLocation,
+                issueLength: issueLength
+            ), !frames.isEmpty else {
+                return nil
+            }
+            return frames
+        }
+
+        return nil
+    }
+
+    private func estimatedBrowserIssueFrameFromElementAnchor(
+        anchorFrame: CGRect,
+        text: NSString,
+        issueLocation: Int,
+        issueLength: Int
+    ) -> CGRect? {
+        if let first = estimatedBrowserIssueFramesFromElementAnchor(
+            anchorFrame: anchorFrame,
+            text: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength
+        )?.first {
+            return first
+        }
+        return nil
+    }
+
+    private func estimatedBrowserIssueFramesFromElementAnchor(
+        anchorFrame: CGRect,
+        text: NSString,
+        issueLocation: Int,
+        issueLength: Int
+    ) -> [CGRect]? {
+        guard isUsableBrowserTextFrame(anchorFrame), text.length > 0 else { return nil }
+
+        let newlineMetrics = textLineMetrics(in: text, issueLocation: issueLocation)
+        let isMultiline = newlineMetrics.lineCount > 1 || anchorFrame.height > 44
+        let horizontalInset: CGFloat = isMultiline
+            ? min(max(anchorFrame.width * 0.012, 18), 28)
+            : min(max(anchorFrame.height * 0.22, 6), 14)
+        let topInset: CGFloat = isMultiline
+            ? min(max(anchorFrame.height * 0.10, 14), 28)
+            : max(1, anchorFrame.height * 0.16)
+        let textStartX = anchorFrame.minX + horizontalInset
+        let textEndX = anchorFrame.maxX - horizontalInset
+        guard textEndX > textStartX + 12 else { return nil }
+
+        let estimatedCharWidth = browserEstimatedCharWidth(
+            availableWidth: textEndX - textStartX,
+            lineLength: max(newlineMetrics.lineLength, min(text.length, 48))
+        )
+        let metrics = wrappedIssueMetrics(
+            in: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength,
+            maxUnitsPerLine: (textEndX - textStartX) / max(estimatedCharWidth, 1)
+        )
+        let lineHeight: CGFloat = {
+            guard isMultiline else {
+                return min(max(anchorFrame.height * 0.68, 16), 24)
+            }
+            let usableHeight = max(18, anchorFrame.height - topInset - 10)
+            return min(max(usableHeight / CGFloat(max(metrics.lineCount, 1)), 18), 34)
+        }()
+        let lineMetrics = wrappedIssueLineMetrics(
+            in: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength,
+            maxUnitsPerLine: (textEndX - textStartX) / max(estimatedCharWidth, 1)
+        )
+        let topY = anchorFrame.maxY - topInset
+        return lineMetrics.prefix(8).map { metric in
+            let lineWidth = min(
+                max(metric.lineUnits * estimatedCharWidth, 18),
+                max(18, textEndX - textStartX)
+            )
+            let width = min(
+                max(lineWidth * (metric.issueUnits / max(metric.lineUnits, 1)), 18),
+                lineWidth
+            )
+            let x = min(
+                max(textStartX + lineWidth * (metric.startUnits / max(metric.lineUnits, 1)), textStartX),
+                textEndX - width
+            )
+            let y: CGFloat = {
+                guard isMultiline else {
+                    return anchorFrame.minY + max(1, (anchorFrame.height - lineHeight) * 0.5)
+                }
+                let lineBottom = topY - CGFloat(metric.lineIndex + 1) * lineHeight
+                return max(anchorFrame.minY + 2, lineBottom)
+            }()
+            return CGRect(x: x, y: y, width: width, height: lineHeight)
+        }
+    }
+
+    private struct TextLineMetrics {
+        let lineIndex: Int
+        let column: Int
+        let lineLength: Int
+        let lineCount: Int
+    }
+
+    private func textLineMetrics(in text: NSString, issueLocation: Int) -> TextLineMetrics {
+        let safeLocation = max(0, min(issueLocation, text.length))
+        var lineIndex = 0
+        var lineStart = 0
+        var index = 0
+        while index < safeLocation {
+            let ch = text.character(at: index)
+            if ch == 10 || ch == 13 {
+                lineIndex += 1
+                if ch == 13, index + 1 < text.length, text.character(at: index + 1) == 10 {
+                    index += 1
+                }
+                lineStart = index + 1
+            }
+            index += 1
+        }
+
+        var lineEnd = lineStart
+        while lineEnd < text.length {
+            let ch = text.character(at: lineEnd)
+            if ch == 10 || ch == 13 { break }
+            lineEnd += 1
+        }
+
+        var lineCount = 1
+        index = 0
+        while index < text.length {
+            let ch = text.character(at: index)
+            if ch == 10 || ch == 13 {
+                lineCount += 1
+                if ch == 13, index + 1 < text.length, text.character(at: index + 1) == 10 {
+                    index += 1
+                }
+            }
+            index += 1
+        }
+
+        return TextLineMetrics(
+            lineIndex: lineIndex,
+            column: max(0, safeLocation - lineStart),
+            lineLength: max(1, lineEnd - lineStart),
+            lineCount: max(1, lineCount)
+        )
+    }
+
+    private struct WrappedIssueMetrics {
+        let lineIndex: Int
+        let lineCount: Int
+        let startUnits: CGFloat
+        let issueUnits: CGFloat
+        let lineUnits: CGFloat
+    }
+
+    private struct WrappedIssueLineMetrics {
+        let lineIndex: Int
+        let lineCount: Int
+        let startUnits: CGFloat
+        let issueUnits: CGFloat
+        let lineUnits: CGFloat
+    }
+
+    private func wrappedIssueMetrics(
+        in text: NSString,
+        issueLocation: Int,
+        issueLength: Int,
+        maxUnitsPerLine: CGFloat
+    ) -> WrappedIssueMetrics {
+        if let first = wrappedIssueLineMetrics(
+            in: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength,
+            maxUnitsPerLine: maxUnitsPerLine
+        ).first {
+            return WrappedIssueMetrics(
+                lineIndex: first.lineIndex,
+                lineCount: first.lineCount,
+                startUnits: first.startUnits,
+                issueUnits: first.issueUnits,
+                lineUnits: first.lineUnits
+            )
+        }
+        return WrappedIssueMetrics(lineIndex: 0, lineCount: 1, startUnits: 0, issueUnits: 1, lineUnits: 1)
+    }
+
+    private func wrappedIssueLineMetrics(
+        in text: NSString,
+        issueLocation: Int,
+        issueLength: Int,
+        maxUnitsPerLine: CGFloat
+    ) -> [WrappedIssueLineMetrics] {
+        let safeMaxUnits = max(8, maxUnitsPerLine)
+        let safeLocation = max(0, min(issueLocation, text.length))
+        let safeLength = max(1, min(issueLength, max(0, text.length - safeLocation)))
+        let issueRange = NSRange(location: safeLocation, length: safeLength)
+
+        struct Line { let range: NSRange }
+        var lines: [Line] = []
+        var lineStart = 0
+        var lineUnits: CGFloat = 0
+        var lastBreakIndex: Int?
+        var index = 0
+
+        func commitLine(_ end: Int, nextStart: Int) {
+            let safeEnd = max(lineStart, min(end, text.length))
+            lines.append(Line(range: NSRange(location: lineStart, length: max(0, safeEnd - lineStart))))
+            lineStart = max(nextStart, safeEnd)
+            lineUnits = 0
+            lastBreakIndex = nil
+        }
+
+        while index < text.length {
+            let ch = text.character(at: index)
+            if ch == 10 || ch == 13 {
+                commitLine(index, nextStart: index + 1)
+                index += 1
+                if ch == 13, index < text.length, text.character(at: index) == 10 {
+                    lineStart = index + 1
+                    index += 1
+                }
+                continue
+            }
+
+            let charUnits = TextoraCharacterGeometry.widthWeight(for: ch)
+            if lineUnits + charUnits > safeMaxUnits, index > lineStart {
+                if let breakIndex = lastBreakIndex, breakIndex > lineStart {
+                    commitLine(breakIndex, nextStart: breakIndex + 1)
+                } else {
+                    commitLine(index, nextStart: index)
+                }
+                index = lineStart
+                continue
+            }
+
+            lineUnits += charUnits
+            if isWhitespace(ch) {
+                lastBreakIndex = index
+            }
+            index += 1
+        }
+
+        if lineStart <= text.length {
+            lines.append(Line(range: NSRange(location: lineStart, length: max(0, text.length - lineStart))))
+        }
+        if lines.isEmpty {
+            lines = [Line(range: NSRange(location: 0, length: text.length))]
+        }
+
+        var result: [WrappedIssueLineMetrics] = []
+        for (idx, line) in lines.enumerated() {
+            let overlap = NSIntersectionRange(line.range, issueRange)
+            guard overlap.length > 0 else { continue }
+            let localStart = max(0, overlap.location - line.range.location)
+            let localLength = max(1, overlap.length)
+            let lineText = text.substring(with: line.range) as NSString
+            let prefixRange = NSRange(location: 0, length: min(localStart, lineText.length))
+            let issueLocalRange = NSRange(
+                location: min(localStart, lineText.length),
+                length: min(localLength, max(0, lineText.length - min(localStart, lineText.length)))
+            )
+            let startUnits = weightedUnits(in: lineText, range: prefixRange)
+            let issueUnits = max(0.8, weightedUnits(in: lineText, range: issueLocalRange))
+            let lineUnits = max(1, weightedUnits(in: lineText, range: NSRange(location: 0, length: lineText.length)))
+            result.append(
+                WrappedIssueLineMetrics(
+                    lineIndex: idx,
+                    lineCount: max(1, lines.count),
+                    startUnits: startUnits,
+                    issueUnits: issueUnits,
+                    lineUnits: lineUnits
+                )
+            )
+        }
+
+        if !result.isEmpty { return result }
+        let fallbackIndex: Int = {
+            for (idx, line) in lines.enumerated() {
+                if line.range.location <= safeLocation && safeLocation <= NSMaxRange(line.range) {
+                    return idx
+                }
+            }
+            return max(0, lines.count - 1)
+        }()
+        return [
+            WrappedIssueLineMetrics(
+                lineIndex: fallbackIndex,
+                lineCount: max(1, lines.count),
+                startUnits: 0,
+                issueUnits: CGFloat(min(max(safeLength, 1), 12)),
+                lineUnits: CGFloat(max(text.length, 1))
+            )
+        ]
+    }
+
+    private func weightedUnits(in text: NSString, range: NSRange) -> CGFloat {
+        guard text.length > 0, range.length > 0 else { return 0 }
+        let safeLocation = max(0, min(range.location, text.length))
+        let safeLength = max(0, min(range.length, text.length - safeLocation))
+        guard safeLength > 0 else { return 0 }
+        var total: CGFloat = 0
+        for index in safeLocation..<(safeLocation + safeLength) {
+            total += TextoraCharacterGeometry.widthWeight(for: text.character(at: index))
+        }
+        return total
+    }
+
+    private func browserEstimatedCharWidth(availableWidth: CGFloat, lineLength: Int) -> CGFloat {
+        let measured = availableWidth / CGFloat(max(lineLength, 28))
+        return min(max(measured, 6.6), 12.8)
+    }
+
+    private func estimatedSlackIssueFrameFromElementAnchor(
+        anchorFrame: CGRect,
+        text: NSString,
+        issueLocation: Int,
+        issueLength: Int
+    ) -> CGRect? {
+        if let first = estimatedSlackIssueFramesFromElementAnchor(
+            anchorFrame: anchorFrame,
+            text: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength
+        )?.first {
+            return first
+        }
+        return nil
+    }
+
+    private func estimatedSlackIssueFramesFromElementAnchor(
+        anchorFrame: CGRect,
+        text: NSString,
+        issueLocation: Int,
+        issueLength: Int
+    ) -> [CGRect]? {
+        guard isUsableSlackTextFrame(anchorFrame), text.length > 0 else { return nil }
+
+        let newlineMetrics = textLineMetrics(in: text, issueLocation: issueLocation)
+        let textInsetX = min(max(anchorFrame.height * 0.62, 18), 30)
+        let textStartX = anchorFrame.minX + textInsetX
+        let textEndX = anchorFrame.maxX - min(max(anchorFrame.height * 0.42, 12), 24)
+        guard textEndX > textStartX + 16 else { return nil }
+
+        let isSingleLineComposer = newlineMetrics.lineCount == 1 && anchorFrame.height <= 48
+        let estimatedCharWidth: CGFloat = {
+            if isSingleLineComposer {
+                return min(max(anchorFrame.height * 0.18, 6.4), 7.6)
+            }
+            return min(
+                max((textEndX - textStartX) / CGFloat(max(newlineMetrics.lineLength, min(text.length, 42), 24)), 6.2),
+                10.8
+            )
+        }()
+        let topInset = min(max(anchorFrame.height * 0.10, 8), 18)
+        let topY = anchorFrame.maxY - topInset
+        let lineMetrics = wrappedIssueLineMetrics(
+            in: text,
+            issueLocation: issueLocation,
+            issueLength: issueLength,
+            maxUnitsPerLine: (textEndX - textStartX) / max(estimatedCharWidth, 1)
+        )
+        return lineMetrics.prefix(8).map { metric in
+            let lineStep = min(
+                max(anchorFrame.height / CGFloat(max(metric.lineCount, 1)), 20),
+                36
+            )
+            let letterHeight = min(max(lineStep * 0.72, 15), 24)
+            let lineWidth = min(
+                max(metric.lineUnits * estimatedCharWidth, 18),
+                max(18, textEndX - textStartX)
+            )
+            let width = min(
+                max(lineWidth * (metric.issueUnits / max(metric.lineUnits, 1)), 18),
+                lineWidth
+            )
+            let x = min(
+                max(textStartX + lineWidth * (metric.startUnits / max(metric.lineUnits, 1)), textStartX),
+                textEndX - width
+            )
+            let y = max(anchorFrame.minY + 2, topY - CGFloat(metric.lineIndex) * lineStep - letterHeight)
+            return CGRect(x: x, y: y, width: width, height: letterHeight)
+        }
+    }
+
+    private func slackLineAnchorFrame(
+        _ anchorFrame: CGRect,
+        caretFrame: CGRect?,
+        contextFrame: CGRect
+    ) -> CGRect {
+        guard let caretFrame,
+              isUsableSlackCaretFrame(caretFrame, anchorFrame: anchorFrame, contextFrame: contextFrame) else {
+            return anchorFrame
+        }
+        let lineHeight = min(max(caretFrame.height, 18), 28)
+        return CGRect(
+            x: anchorFrame.minX,
+            y: caretFrame.minY,
+            width: anchorFrame.width,
+            height: lineHeight
+        )
+    }
+
+    private func textContainerFrame(
+        fieldFrame: CGRect,
+        contextFrame: CGRect,
+        lineFrame: CGRect
+    ) -> CGRect {
+        let candidates = [fieldFrame, contextFrame]
+            .filter { !$0.isEmpty && $0.insetBy(dx: -36, dy: -36).intersects(lineFrame) }
+            .sorted { ($0.width * $0.height) < ($1.width * $1.height) }
+        if let best = candidates.first {
+            return best
+        }
+        if let windowFrame = textService.focusedWindowFrame(),
+           windowFrame.insetBy(dx: -36, dy: -36).intersects(lineFrame) {
+            return windowFrame
+        }
+        return fieldFrame.isEmpty ? contextFrame : fieldFrame
+    }
+
+    private func isUsableSlackTextFrame(_ rect: CGRect) -> Bool {
+        guard !rect.isEmpty, rect.height >= 3, rect.height <= 220, rect.width >= 1 else {
+            return false
+        }
+        guard let windowFrame = textService.focusedWindowFrame(), !windowFrame.isEmpty else {
+            return true
+        }
+        let windowArea = windowFrame.insetBy(dx: -2, dy: -2)
+        return windowArea.intersects(rect) || windowArea.contains(CGPoint(x: rect.midX, y: rect.midY))
+    }
+
+    private func isUsableSlackCaretFrame(
+        _ caretFrame: CGRect,
+        anchorFrame: CGRect,
+        contextFrame: CGRect
+    ) -> Bool {
+        guard isUsableSlackTextFrame(caretFrame), caretFrame.width <= 24 else {
+            return false
+        }
+        let anchorBand = anchorFrame.insetBy(dx: -48, dy: -80)
+        if anchorBand.intersects(caretFrame) || anchorBand.contains(CGPoint(x: caretFrame.midX, y: caretFrame.midY)) {
+            return true
+        }
+        let contextBand = contextFrame.insetBy(dx: -48, dy: -80)
+        return contextBand.intersects(caretFrame) || contextBand.contains(CGPoint(x: caretFrame.midX, y: caretFrame.midY))
+    }
+
+    private func isUsableBrowserTextFrame(_ rect: CGRect) -> Bool {
+        guard !rect.isEmpty, rect.height >= 3, rect.height <= 140, rect.width >= 1 else {
+            return false
+        }
+        guard let windowFrame = textService.focusedWindowFrame(), !windowFrame.isEmpty else {
+            return true
+        }
+        let windowArea = windowFrame.insetBy(dx: -2, dy: -2)
+        return windowArea.intersects(rect) || windowArea.contains(CGPoint(x: rect.midX, y: rect.midY))
+    }
+
+    private func isUsableBrowserCaretFrame(
+        _ caretFrame: CGRect,
+        anchorFrame: CGRect,
+        contextFrame: CGRect
+    ) -> Bool {
+        guard isUsableBrowserTextFrame(caretFrame), caretFrame.width <= 32 else {
+            return false
+        }
+        let anchorBand = anchorFrame.insetBy(dx: -64, dy: -96)
+        if anchorBand.intersects(caretFrame) || anchorBand.contains(CGPoint(x: caretFrame.midX, y: caretFrame.midY)) {
+            return true
+        }
+        let contextBand = contextFrame.insetBy(dx: -64, dy: -96)
+        return contextBand.intersects(caretFrame) || contextBand.contains(CGPoint(x: caretFrame.midX, y: caretFrame.midY))
+    }
+
+    private func estimatedIssueFrameFromVisibleText(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext,
+        issueRange: NSRange?
+    ) -> CGRect? {
+        guard !fieldFrame.isEmpty,
+              let windowFrame = textService.focusedWindowFrame(),
+              windowFrame.insetBy(dx: -32, dy: -32).intersects(fieldFrame) else {
+            return nil
+        }
+        let textNS = context.text as NSString
+        guard textNS.length > 0 else { return nil }
+
+        let issueLocation = max(0, min(issueRange?.location ?? 0, textNS.length))
+        let issueLength = max(1, min(issueRange?.length ?? textNS.length, textNS.length - issueLocation))
+        let horizontalPadding: CGFloat = min(max(fieldFrame.width * 0.025, 16), 28)
+        let textStartX = fieldFrame.minX + horizontalPadding
+        let textEndX = min(fieldFrame.maxX - horizontalPadding, textStartX + CGFloat(textNS.length) * 9.2)
+        let newlineMetrics = textLineMetrics(in: textNS, issueLocation: issueLocation)
+        let charWidth = browserEstimatedCharWidth(
+            availableWidth: max(1, textEndX - textStartX),
+            lineLength: max(newlineMetrics.lineLength, min(textNS.length, 48))
+        )
+        let metrics = wrappedIssueMetrics(
+            in: textNS,
+            issueLocation: issueLocation,
+            issueLength: issueLength,
+            maxUnitsPerLine: (textEndX - textStartX) / max(charWidth, 1)
+        )
+        let width = min(max(metrics.issueUnits * charWidth, 16), fieldFrame.width - horizontalPadding * 2)
+
+        let fallbackLineHeight: CGFloat = {
+            if let caretFrame, fieldFrame.insetBy(dx: -32, dy: -32).intersects(caretFrame) {
+                return min(max(caretFrame.height, 16), 28)
+            }
+            return min(max(fieldFrame.height * 0.18, 18), 28)
+        }()
+        let textLineHeight: CGFloat = {
+            guard metrics.lineCount > 1 || fieldFrame.height > 44 else {
+                return fallbackLineHeight
+            }
+            let topInset = min(max(fieldFrame.height * 0.10, 14), 28)
+            let usableHeight = max(18, fieldFrame.height - topInset - 10)
+            return min(max(usableHeight / CGFloat(max(metrics.lineCount, 1)), 18), 34)
+        }()
+        let y: CGFloat = {
+            if metrics.lineCount > 1 || fieldFrame.height > 44 {
+                let topInset = min(max(fieldFrame.height * 0.10, 14), 28)
+                let topY = fieldFrame.maxY - topInset
+                let lineBottom = topY - CGFloat(metrics.lineIndex + 1) * textLineHeight
+                return max(fieldFrame.minY + 2, lineBottom)
+            }
+            if let caretFrame, fieldFrame.insetBy(dx: -32, dy: -32).intersects(caretFrame) {
+                return caretFrame.minY - 1
+            }
+            return fieldFrame.maxY - textLineHeight - min(max(fieldFrame.height * 0.08, 10), 20)
+        }()
+
+        let x = min(
+            max(textStartX + metrics.startUnits * charWidth, fieldFrame.minX + 4),
+            fieldFrame.maxX - width - 4
+        )
+        return CGRect(x: x, y: y, width: width, height: textLineHeight)
+    }
+
+    private func stableIssueAnchorFrame(
+        caretFrame: CGRect?,
+        fieldFrame: CGRect,
+        context: TextAccessService.FocusedTextContext
+    ) -> CGRect {
+        guard isWebOrMessengerBundle(context.targetBundleID),
+              let windowFrame = textService.focusedWindowFrame() else {
+            return fieldFrame
+        }
+
+        let lowerComposerBand = CGRect(
+            x: windowFrame.minX,
+            y: windowFrame.minY,
+            width: windowFrame.width,
+            height: min(max(windowFrame.height * 0.18, 110), 220)
+        )
+        if let caretFrame, lowerComposerBand.insetBy(dx: -24, dy: -24).intersects(caretFrame) {
+            return CGRect(
+                x: max(windowFrame.minX + 24, caretFrame.minX - 18),
+                y: max(windowFrame.minY + 36, caretFrame.minY - 12),
+                width: min(max(windowFrame.width - 96, 260), 760),
+                height: max(caretFrame.height + 18, 34)
+            )
+        }
+        if lowerComposerBand.insetBy(dx: -24, dy: -24).intersects(fieldFrame),
+           fieldFrame.width <= windowFrame.width,
+           fieldFrame.height <= windowFrame.height * 0.35 {
+            return fieldFrame
+        }
+
+        // Slack/Electron can expose the message list, pinned header, or whole webview as the editable AX node.
+        // In that case, synthesize the composer zone from the real app window.
+        let bottomInset: CGFloat = windowFrame.height > 900 ? 54 : 42
+        let sideInset: CGFloat = 28
+        let composerHeight = min(max(windowFrame.height * 0.075, 72), 118)
+        return CGRect(
+            x: windowFrame.minX + sideInset,
+            y: windowFrame.minY + bottomInset,
+            width: max(160, windowFrame.width - sideInset * 2 - 36),
+            height: composerHeight
+        )
+    }
+
+    private func isWebOrMessengerBundle(_ bundleID: String) -> Bool {
+        let b = bundleID.lowercased()
+        return b.contains("slack")
+            || b.contains("telegram")
+            || b.contains("discord")
+            || b.contains("teams")
+            || b.contains("mattermost")
+            || b.contains("element")
+            || b.contains("signal")
+            || b.contains("whatsapp")
+            || b.contains("messenger")
+            || b.contains("zulip")
+            || b.contains("chrome")
+            || b.contains("firefox")
+            || b.contains("brave")
+            || b.contains("safari")
+            || b.contains("arc")
+            || b.contains("opera")
+    }
+
+    private func isSlackBundle(_ bundleID: String) -> Bool {
+        bundleID.lowercased().contains("slack")
+    }
+
+    private func isBrowserBundle(_ bundleID: String) -> Bool {
+        let b = bundleID.lowercased()
+        return b.contains("chrome")
+            || b.contains("firefox")
+            || b.contains("brave")
+            || b.contains("safari")
+            || b.contains("arc")
+            || b.contains("opera")
+    }
+
+    private func handleMarkerHover(_ isHovering: Bool) {
+        isMarkerHovered = isHovering
+        if isHovering {
+            cancelScheduledHoverHide()
+            if isMouseInsideHoverCard() {
+                isHoverCardHovered = true
+                return
+            }
+            showHoverCard()
+        } else {
+            scheduleHoverHideIfNeeded()
+        }
+    }
+
+    private func handleMarkerHoverMoved() {
+        guard isMarkerHovered || hoverCardPanel?.isVisible == true else { return }
+        if isMouseInsideHoverCard() || isHoverCardHovered {
+            cancelScheduledHoverHide()
+            return
+        }
+        let issueUnderMouse = issue(atScreenPoint: NSEvent.mouseLocation)
+        if !latestIssues.isEmpty, issueUnderMouse == nil {
+            return
+        }
+        let nextID = issueUnderMouse?.id ?? primaryIssue(in: latestIssues)?.id
+        guard nextID != hoveredIssueID else { return }
+        cancelScheduledHoverHide()
+        showHoverCard(for: issueUnderMouse ?? primaryIssue(in: latestIssues))
+    }
+
+    private func handleHoverCardHover(_ isHovering: Bool) {
+        isHoverCardHovered = isHovering
+        if isHovering {
+            cancelScheduledHoverHide()
+        } else {
+            scheduleHoverHideIfNeeded()
+        }
+    }
+
+    private func showHoverCard() {
+        if isMouseInsideHoverCard(), hoverCardPanel?.isVisible == true {
+            cancelScheduledHoverHide()
+            return
+        }
+        // Per-issue hit test: if the cursor is over a specific
+        // underline, show only that issue's suggestion. Otherwise fall
+        // back to the primary (highest-priority) issue, or to the
+        // legacy `latestSuggestionOptions` list when no audited issues
+        // exist for this segment at all.
+        let mouseScreen = NSEvent.mouseLocation
+        let issueUnderMouse = issue(atScreenPoint: mouseScreen)
+        if !latestIssues.isEmpty, issueUnderMouse == nil {
+            return
+        }
+        let resolved = issueUnderMouse ?? primaryIssue(in: latestIssues)
+        showHoverCard(for: resolved)
+    }
+
+    private func showHoverCard(for issue: OverlayIssue?) {
+        let segmentText = latestContext?.text ?? ""
+        let cardSuggestions: [OverlaySuggestion]
+        let anchorFrame: CGRect
+        let cardIssueID: UUID?
+        if let issue, !segmentText.isEmpty {
+            cardSuggestions = [
+                OverlaySuggestion(
+                    operation: issue.category,
+                    text: applyIssueToSegment(segmentText, issue: issue)
+                )
+            ]
+            anchorFrame = issuePanelLayouts.first(where: { $0.issueID == issue.id })?.frame
+                ?? markerPanel?.frame
+                ?? .zero
+            cardIssueID = issue.id
+        } else {
+            cardSuggestions = latestSuggestionOptions.isEmpty
+                ? [OverlaySuggestion(operation: .fixGrammar, text: latestSuggestion)]
+                : latestSuggestionOptions
+            anchorFrame = markerPanel?.frame ?? .zero
+            cardIssueID = nil
+        }
+        guard !cardSuggestions.isEmpty, latestContext != nil else { return }
+        guard anchorFrame != .zero else { return }
+        hoveredIssueID = cardIssueID
+        refreshIssueUnderlineHighlight()
+        // Capture the issue ID so the apply closure routes the user's
+        // click to the partial-apply path. Falls back to the legacy
+        // full-suggestion apply when the card is not bound to a
+        // specific issue.
+        let applyIssueID = cardIssueID
+        let skipHandler: ((OverlaySuggestion) -> Void)? = applyIssueID.map { id in
+            { [weak self] _ in
+                self?.skipIssue(withID: id)
+            }
+        }
+        if hoverCardPanel == nil {
+            let host = NSHostingView(
+                rootView: HoverSuggestionCardView(
+                    originalText: segmentText,
+                    suggestions: cardSuggestions,
+                    anchorSource: markerAnchor.rawValue,
+                    onApply: { [weak self] suggestion in
+                        self?.applyFromHoverCard(suggestion.text, issueID: applyIssueID)
+                    },
+                    onHoverChanged: { [weak self] isHovering in
+                        self?.handleHoverCardHover(isHovering)
+                    },
+                    onSkip: skipHandler
+                )
+            )
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: hoverCardHeight(for: cardSuggestions)),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+            panel.hasShadow = true
+            panel.hidesOnDeactivate = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+            panel.ignoresMouseEvents = false
+            panel.contentView = host
+            hoverCardPanel = panel
+        } else if let host = hoverCardPanel?.contentView as? NSHostingView<HoverSuggestionCardView> {
+            host.rootView = HoverSuggestionCardView(
+                originalText: segmentText,
+                suggestions: cardSuggestions,
+                anchorSource: markerAnchor.rawValue,
+                onApply: { [weak self] suggestion in
+                    self?.applyFromHoverCard(suggestion.text, issueID: applyIssueID)
+                },
+                onHoverChanged: { [weak self] isHovering in
+                    self?.handleHoverCardHover(isHovering)
+                },
+                onSkip: skipHandler
+            )
+        }
+        updateHoverCardFrame(for: cardSuggestions, anchorFrame: anchorFrame)
+        hoverCardPanel?.orderFrontRegardless()
+        keepMarkerPanelBehindHoverCardIfNeeded()
+    }
+
+    private func isMouseInsideHoverCard() -> Bool {
+        guard let hoverCardPanel, hoverCardPanel.isVisible else { return false }
+        return hoverCardPanel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation)
+    }
+
+    private func keepMarkerPanelBehindHoverCardIfNeeded() {
+        guard let hoverCardPanel,
+              hoverCardPanel.isVisible,
+              hoverCardPanel.windowNumber != 0 else {
+            return
+        }
+        markerPanel?.order(.below, relativeTo: hoverCardPanel.windowNumber)
+        extraMarkerPanels.forEach { $0.order(.below, relativeTo: hoverCardPanel.windowNumber) }
+    }
+
+    private func updateHoverCardFrame(
+        for suggestions: [OverlaySuggestion],
+        anchorFrame: CGRect? = nil
+    ) {
+        guard let frame = anchorFrame ?? markerPanel?.frame else { return }
+        let cardFrame = clampedToVisibleScreens(
+            CGRect(
+                x: frame.minX,
+                y: frame.maxY + 6,
+                width: 440,
+                height: hoverCardHeight(for: suggestions)
+            )
+        )
+        hoverCardPanel?.setFrame(cardFrame, display: true)
+    }
+
+    private func hoverCardHeight(for suggestions: [OverlaySuggestion]) -> CGFloat {
+        let count = max(1, min(4, suggestions.count))
+        let listHeight = min(CGFloat(count) * 112, 390)
+        return CGFloat(66 + listHeight)
+    }
+
+    /// User dismissed a specific underline via the Skip button on the
+    /// hover card. We remember the signature so it does not re-appear
+    /// on subsequent re-evaluations of this segment, drop it from
+    /// `latestIssues`, hide the hover card, and immediately repaint
+    /// the remaining underlines. The skip is scoped to the current
+    /// segment's normalized text — editing the sentence brings back
+    /// the full batch of suggestions on the next tick.
+    private func skipIssue(withID id: UUID) {
+        guard let skipped = latestIssues.first(where: { $0.id == id }),
+              let segmentText = latestContext?.text else {
+            hideHoverCard()
+            return
+        }
+        let signature = skipped.segmentSignature ?? segmentCacheKey(segmentText)
+        let ns = segmentText as NSString
+        let spanText: String
+        if skipped.localRange.location >= 0,
+           NSMaxRange(skipped.localRange) <= ns.length,
+           skipped.localRange.length > 0 {
+            spanText = ns.substring(with: skipped.localRange)
+        } else {
+            spanText = ""
+        }
+        let sig = skipSignature(
+            segmentSignature: signature,
+            issue: skipped,
+            spanText: spanText
+        )
+        skippedIssueSignatures.insert(sig)
+
+        textoraDiagLog(
+            "skipIssue",
+            "dismiss id=\(skipped.id) category=\(skipped.category.rawValue) "
+            + "span=\(textoraDiagPreview(spanText)) "
+            + "replacement=\(textoraDiagPreview(skipped.replacement))"
+        )
+
+        // Drop the skipped entry from live state and recompute the
+        // remaining ring / primary-suggestion projection so the
+        // floating icon no longer nudges the user toward it.
+        let remaining = latestIssues.filter { $0.id != skipped.id }
+        latestIssues = remaining
+        hoveredIssueID = nil
+        if remaining.isEmpty {
+            suggestionState = .looksGood
+            latestSuggestion = ""
+            latestSuggestionOptions = []
+            latestIssueRange = nil
+        } else if let primary = primaryIssue(in: remaining) {
+            latestSuggestion = applyIssueToSegment(segmentText, issue: primary)
+            latestIssueRange = primary.localRange
+            latestSuggestionOptions = overlaySuggestions(for: remaining, in: segmentText)
+        }
+
+        hideHoverCard()
+        updateRingColor()
+        if remaining.isEmpty {
+            scheduleSegmentRecheckAfterApply()
+        }
+        if let frame = lastFrameSnapshot() {
+            updateMarker(caretFrame: lastMarkerCaretFrame, fieldFrame: frame, anchor: markerAnchor)
+        }
+    }
+
+    /// Small convenience so `skipIssue` can redraw without re-running
+    /// the AX geometry query — we already have a stable field frame
+    /// cached from the last `updateMarker` pass.
+    private func lastFrameSnapshot() -> CGRect? {
+        let frame = lastMarkerFieldFrame ?? markerPanel?.frame ?? .zero
+        return frame == .zero ? nil : frame
+    }
+
+    private func localizedApplyTarget(
+        for issue: OverlayIssue,
+        in context: TextAccessService.FocusedTextContext,
+        sourceRange: NSRange
+    ) -> (context: TextAccessService.FocusedTextContext, issue: OverlayIssue, suggestion: String)? {
+        let fullNS = context.text as NSString
+        guard sourceRange.location >= 0,
+              NSMaxRange(sourceRange) <= fullNS.length,
+              issue.localRange.location >= sourceRange.location else {
+            return nil
+        }
+
+        let segmentText = fullNS.substring(with: sourceRange)
+        let localRange = NSRange(
+            location: issue.localRange.location - sourceRange.location,
+            length: issue.localRange.length
+        )
+        let segmentNS = segmentText as NSString
+        guard localRange.location >= 0,
+              NSMaxRange(localRange) <= segmentNS.length else {
+            return nil
+        }
+
+        let localIssue = OverlayIssue(
+            id: issue.id,
+            localRange: localRange,
+            originalText: segmentNS.substring(with: localRange),
+            category: issue.category,
+            replacement: issue.replacement,
+            reason: issue.reason,
+            segmentSignature: issue.segmentSignature,
+            sourceSegmentRange: nil
+        )
+        let scoped = scopedFocusedContext(
+            context,
+            scope: CorrectionScope(text: segmentText, range: sourceRange)
+        )
+        let suggestion = applyIssueToSegment(segmentText, issue: localIssue)
+        return (scoped, localIssue, suggestion)
+    }
+
+    private func localizedGeometryTarget(
+        for issue: OverlayIssue,
+        in context: TextAccessService.FocusedTextContext
+    ) -> (context: TextAccessService.FocusedTextContext, localRange: NSRange)? {
+        guard let sourceRange = issue.sourceSegmentRange else {
+            return nil
+        }
+        let fullNS = context.text as NSString
+        guard sourceRange.location >= 0,
+              NSMaxRange(sourceRange) <= fullNS.length,
+              issue.localRange.location >= sourceRange.location else {
+            return nil
+        }
+
+        let segmentText = fullNS.substring(with: sourceRange)
+        let localRange = NSRange(
+            location: issue.localRange.location - sourceRange.location,
+            length: issue.localRange.length
+        )
+        let segmentNS = segmentText as NSString
+        guard localRange.location >= 0,
+              NSMaxRange(localRange) <= segmentNS.length else {
+            return nil
+        }
+
+        let scoped = scopedFocusedContext(
+            context,
+            scope: CorrectionScope(text: segmentText, range: sourceRange)
+        )
+        return (scoped, localRange)
+    }
+
+    private func applyFromHoverCard(_ suggestion: String, issueID: UUID?) {
+        guard let context = latestContext, !latestSuggestion.isEmpty else {
+            textoraDiagLog(
+                "applyFromHoverCard",
+                "abort: latestContext=\(latestContext == nil ? "nil" : "set") "
+                + "latestSuggestion.isEmpty=\(latestSuggestion.isEmpty)"
+            )
+            return
+        }
+        let previousSuggestion = latestSuggestion
+        let previousSuggestionOptions = latestSuggestionOptions
+        let previousContext = latestContext
+        let previousIssues = latestIssues
+        let previousIssueRange = latestIssueRange
+
+        // Resolve the targeted issue (if any) so we can apply ONLY its
+        // span and leave the other issues' underlines visible. When
+        // `issueID` is nil we keep legacy behavior — apply the whole
+        // `suggestion` against `latestIssueRange`.
+        let targetedIssue = issueID.flatMap { id in
+            previousIssues.first(where: { $0.id == id })
+        }
+        let applyContext = context
+        let applySuggestion = suggestion
+        let applyPatch = targetedIssue?.patch
+        let preferredLocalRange = targetedIssue?.localRange ?? latestIssueRange
+        let appliedSegmentText = context.text
+        // Keep per-issue applies anchored to the FULL focused value.
+        // The shifted `latestIssues` already carry full-text ranges, and
+        // host AX offsets become less reliable when we re-scope the
+        // context back down to the sentence and then try to rediscover its
+        // absolute location inside a rich text composer.
+
+        if let applyPatch, !applyPatch.isValid(in: applyContext.text) {
+            textoraDiagLog(
+                "applyFromHoverCard",
+                "reject outdated patch id=\(applyPatch.id) range=\(applyPatch.start):\(applyPatch.end)"
+            )
+            postStatus("Suggestion outdated, re-analyzing")
+            evaluateCurrentText()
+            return
+        }
+
+        textoraDiagLog(
+            "applyFromHoverCard",
+            "invoke bundle=\(applyContext.targetBundleID) "
+            + "segment=\(textoraDiagPreview(applyContext.text)) "
+            + "suggestion=\(textoraDiagPreview(applySuggestion)) "
+            + "issueID=\(issueID?.uuidString ?? "nil") "
+            + "preferredLocal=\(preferredLocalRange.map { "\($0.location):\($0.length)" } ?? "nil")"
+        )
+
+        // Hide panels FIRST so AX focus can return to the original text field.
+        hideMarkerAndCard()
+
+        // Brief delay lets the system settle focus back to the text field.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            let result: TextAccessService.ApplyResult
+            result = self.textService.applyLocalizedRewrite(
+                applySuggestion,
+                basedOn: applyContext,
+                preferredLocalRange: preferredLocalRange
+            )
+            textoraDiagLog("applyFromHoverCard", "applyLocalizedRewrite result=\(result)")
+            switch result {
+            case .success:
+                self.handleHoverApplySuccess(
+                    previousContext: context,
+                    appliedSegmentText: appliedSegmentText,
+                    rewrittenSegmentText: applySuggestion,
+                    appliedIssue: targetedIssue,
+                    previousIssues: previousIssues
+                )
+
+            case .clipboardArmed:
+                self.suggestionState = .needsAttention
+                self.latestSuggestion = previousSuggestion
+                self.latestSuggestionOptions = previousSuggestionOptions
+                self.latestContext = previousContext
+                self.latestIssues = previousIssues
+                self.latestIssueRange = previousIssueRange
+                self.postStatus("Apply requires user action")
+                self.updateRingColor()
+
+            case .failed, .unsupportedTarget:
+                self.suggestionState = .needsAttention
+                self.latestSuggestion = previousSuggestion
+                self.latestSuggestionOptions = previousSuggestionOptions
+                self.latestContext = previousContext
+                self.latestIssues = previousIssues
+                self.latestIssueRange = previousIssueRange
+                self.postStatus("Apply failed in this field")
+                self.updateRingColor()
+            }
+        }
+    }
+
+    /// Routes a successful per-span apply: drop caches for the
+    /// just-applied segment so the next evaluation tick definitely
+    /// re-runs `auditIssues` against the post-apply field value, then
+    /// optimistically retain the still-pending issues (with shifted
+    /// offsets) so the user sees the other underlines disappear from
+    /// the DOM-corrupted Slack readback only briefly. The debounced
+    /// re-evaluation either repaints those underlines on top of the
+    /// new text or — if the segment is now clean — flips the floating
+    /// ring to green.
+    private func handleHoverApplySuccess(
+        previousContext: TextAccessService.FocusedTextContext,
+        appliedSegmentText: String,
+        rewrittenSegmentText: String,
+        appliedIssue: OverlayIssue?,
+        previousIssues: [OverlayIssue]
+    ) {
+        invalidateSegmentCache(for: appliedSegmentText)
+        invalidateSegmentCache(for: rewrittenSegmentText)
+        localBatchMutationGraceUntil = Date().addingTimeInterval(2.0)
+
+        guard let appliedIssue else {
+            rememberAppliedRewrite(original: appliedSegmentText, rewritten: rewrittenSegmentText)
+            suggestionState = .looksGood
+            latestSuggestion = ""
+            latestSuggestionOptions = []
+            latestContext = nil
+            latestIssueRange = nil
+            latestIssues = []
+            hoveredIssueID = nil
+            updateRingColor()
+            scheduleSegmentRecheckAfterApply()
+            return
+        }
+
+        let updatedText = applyIssueToSegment(previousContext.text, issue: appliedIssue)
+        rememberAppliedRewrite(
+            original: appliedIssue.patch.originalText,
+            rewritten: appliedIssue.replacement
+        )
+        if let sourceRange = appliedIssue.sourceSegmentRange,
+           let localized = localizedApplyTarget(
+            for: appliedIssue,
+            in: previousContext,
+            sourceRange: sourceRange
+           ) {
+            rememberAppliedRewrite(
+                original: localized.context.text,
+                rewritten: localized.suggestion
+            )
+        } else {
+            rememberAppliedRewrite(original: previousContext.text, rewritten: updatedText)
+        }
+        let remaining = remainingIssuesAfterApply(
+            appliedIssue: appliedIssue,
+            from: previousIssues
+        )
+        textoraDiagLog(
+            "applyFromHoverCard",
+            "partial apply success — applied id=\(appliedIssue.id) "
+            + "category=\(appliedIssue.category.rawValue) "
+            + "remainingCarryover=\(remaining.count)"
+        )
+
+        guard !remaining.isEmpty, let primary = primaryIssue(in: remaining) else {
+            suggestionState = .looksGood
+            latestSuggestion = ""
+            latestSuggestionOptions = []
+            latestContext = nil
+            latestIssueRange = nil
+            latestIssues = []
+            hoveredIssueID = nil
+            updateRingColor()
+            scheduleSegmentRecheckAfterApply()
+            return
+        }
+
+        let updatedContext = TextAccessService.FocusedTextContext(
+            text: updatedText,
+            frame: previousContext.frame,
+            usesSelection: previousContext.usesSelection,
+            selectedRange: previousContext.selectedRange,
+            targetElement: previousContext.targetElement,
+            targetAppPID: previousContext.targetAppPID,
+            targetBundleID: previousContext.targetBundleID,
+            anchor: previousContext.anchor
+        )
+        suggestionState = .needsAttention
+        latestContext = updatedContext
+        latestIssues = remaining
+        hoveredIssueID = nil
+        latestSuggestion = applyIssueToSegment(updatedText, issue: primary)
+        latestSuggestionOptions = overlaySuggestions(for: remaining, in: updatedText)
+        latestIssueRange = primary.localRange
+        lastCheckedValueSegment = updatedText
+        updateRingColor()
+        if let frame = lastFrameSnapshot() {
+            updateMarker(caretFrame: lastMarkerCaretFrame, fieldFrame: frame, anchor: markerAnchor)
+        }
+    }
+
+    /// Returns the issues that survive applying `appliedIssue`. Issues
+    /// strictly to the left are unchanged; issues strictly to the
+    /// right are shifted by the length delta; overlapping issues are
+    /// invalidated. Currently only used for diagnostics — the live
+    /// marker is rebuilt by the debounced re-evaluation.
+    private func remainingIssuesAfterApply(
+        appliedIssue: OverlayIssue,
+        from previous: [OverlayIssue]
+    ) -> [OverlayIssue] {
+        let oldRange = appliedIssue.localRange
+        let oldEnd = NSMaxRange(oldRange)
+        let replacementLen = (appliedIssue.replacement as NSString).length
+        let delta = replacementLen - oldRange.length
+
+        var result: [OverlayIssue] = []
+        for issue in previous where issue.id != appliedIssue.id {
+            let r = issue.localRange
+            let rEnd = NSMaxRange(r)
+            if rEnd <= oldRange.location {
+                result.append(issue)
+            } else if r.location >= oldEnd {
+                let shifted = NSRange(location: r.location + delta, length: r.length)
+                guard shifted.location >= 0 else { continue }
+                result.append(
+                    OverlayIssue(
+                        id: issue.id,
+                        localRange: shifted,
+                        originalText: issue.patch.originalText,
+                        category: issue.category,
+                        replacement: issue.replacement,
+                        reason: issue.reason,
+                        segmentSignature: issue.segmentSignature,
+                        sourceSegmentRange: shiftedSourceSegmentRange(
+                            issue.sourceSegmentRange,
+                            afterApplying: oldRange,
+                            delta: delta
+                        )
+                    )
+                )
+            } else {
+                continue
+            }
+        }
+        return result
+    }
+
+    private func shiftedSourceSegmentRange(
+        _ source: NSRange?,
+        afterApplying applied: NSRange,
+        delta: Int
+    ) -> NSRange? {
+        guard let source else { return nil }
+        let appliedEnd = NSMaxRange(applied)
+        let sourceEnd = NSMaxRange(source)
+        if sourceEnd <= applied.location {
+            return source
+        }
+        if source.location >= appliedEnd {
+            return NSRange(location: max(0, source.location + delta), length: source.length)
+        }
+        return NSRange(location: source.location, length: max(0, source.length + delta))
+    }
+
+    /// Triggers a delayed `evaluateCurrentText()` after a successful
+    /// apply so the AI gets to see the post-paste field value (Slack /
+    /// other Electron hosts need ~250 ms for AX to settle), without
+    /// thrashing the model when the user clicks rapidly.
+    private func scheduleSegmentRecheckAfterApply() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            self?.evaluateCurrentText()
+        }
+    }
+
+    private func hideHoverCard() {
+        cancelScheduledHoverHide()
+        isHoverCardHovered = false
+        hoverCardPanel?.orderOut(nil)
+    }
+
+    private func hideMarkerAndCard() {
+        isMarkerHovered = false
+        isHoverCardHovered = false
+        cancelScheduledHoverHide()
+        issueOverlayPanel?.orderOut(nil)
+        extraIssueOverlayPanels.forEach { $0.orderOut(nil) }
+        markerPanel?.orderOut(nil)
+        extraMarkerPanels.forEach { $0.orderOut(nil) }
+        lastMarkerDebugSignature = nil
+        hideHoverCard()
+    }
+
+    private func scheduleHoverHideIfNeeded() {
+        cancelScheduledHoverHide()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if !self.isMarkerHovered && !self.isHoverCardHovered {
+                self.hideHoverCard()
+            }
+        }
+        hoverHideTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: task)
+    }
+
+    private func cancelScheduledHoverHide() {
+        hoverHideTask?.cancel()
+        hoverHideTask = nil
+    }
+
+    private func ringColors(for state: SuggestionState) -> [Color] {
+        switch state {
+        case .neutral:
+            return [.blue]
+        case .needsAttention:
+            let colors = suggestionOperationColors()
+            return colors.isEmpty ? [.red] : colors
+        case .looksGood:
+            return [.green]
+        }
+    }
+
+    private func issueOverlayColors() -> [Color] {
+        let colors = suggestionOperationColors()
+        return colors.count == 1 ? colors : TextoraSuggestionColors.brandGradient
+    }
+
+    private func suggestionOperationColors() -> [Color] {
+        var seen = Set<String>()
+        var colors: [Color] = []
+        for suggestion in latestSuggestionOptions {
+            let key = suggestion.operation.rawValue
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            colors.append(TextoraSuggestionColors.color(for: suggestion.operation))
+        }
+        return colors
+    }
+
+    private func clampedToVisibleScreens(_ rect: CGRect) -> CGRect {
+        guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(rect) }) ?? NSScreen.main else {
+            return rect
+        }
+        let vf = screen.visibleFrame
+        let padding: CGFloat = 6
+        let minX = vf.minX + padding
+        let maxX = vf.maxX - rect.width - padding
+        let minY = vf.minY + padding
+        let maxY = vf.maxY - rect.height - padding
+        return CGRect(
+            x: min(max(rect.minX, minX), maxX),
+            y: min(max(rect.minY, minY), maxY),
+            width: rect.width,
+            height: rect.height
+        )
+    }
+}

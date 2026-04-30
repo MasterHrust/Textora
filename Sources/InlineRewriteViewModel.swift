@@ -1,0 +1,888 @@
+import AppKit
+import Foundation
+
+@MainActor
+final class InlineRewriteViewModel: ObservableObject {
+    @Published var operation: RewriteOperation {
+        didSet {
+            UserDefaults.standard.set(operation.rawValue, forKey: Self.lastOperationKey)
+        }
+    }
+    @Published var originalText = ""
+    @Published var rewrittenText = ""
+    @Published var isLoading = false
+    @Published var errorText = ""
+    @Published var applyErrorText = ""
+    @Published private(set) var noChangesNeeded = false
+
+    @Published var translateTargetLanguage: String
+    @Published var translatedText: String = ""
+    @Published var isTranslating: Bool = false
+    @Published var translateErrorText: String = ""
+    @Published var needsMailManualCapture: Bool = false {
+        didSet {
+            if needsMailManualCapture {
+                startMailAutoCaptureWatcherIfNeeded()
+            } else {
+                stopMailAutoCaptureWatcher()
+            }
+        }
+    }
+
+    private let textService = TextAccessService()
+    private let aiClient = AIClient()
+    private let spellChecker = NSSpellChecker.shared
+    private var lastContext: TextAccessService.FocusedTextContext?
+    private var rewriteTask: Task<Void, Never>?
+    private var rewriteRequestID: Int = 0
+    private var translateTask: Task<Void, Never>?
+    private var translateRequestID: Int = 0
+    private var mailAutoCaptureTask: Task<Void, Never>?
+    private var mailSelectionStableSince: Date?
+    private var suppressNextOperationTriggeredRewrite = false
+    private static let lastOperationKey = "inlineRewrite.lastOperation"
+    private static let lastTranslateLanguageKey = "inlineTranslate.lastTargetLanguage"
+    private let mailBundleID = "com.apple.mail"
+
+    private struct RewriteScope {
+        let text: String
+        let range: NSRange
+    }
+
+    private func stopMailAutoCaptureWatcher() {
+        mailAutoCaptureTask?.cancel()
+        mailAutoCaptureTask = nil
+        mailSelectionStableSince = nil
+    }
+
+    private func startMailAutoCaptureWatcherIfNeeded() {
+        guard mailAutoCaptureTask == nil else { return }
+        // Pop-up steals key focus from Mail, so we cannot rely on AX "selection in frontmost app".
+        // Debounce from watcher start, then `manualCaptureSelectionFromMail` briefly activates Mail for Cmd+C.
+        mailSelectionStableSince = Date()
+        mailAutoCaptureTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled && self.needsMailManualCapture {
+                if let since = self.mailSelectionStableSince,
+                   Date().timeIntervalSince(since) >= 1.0 {
+                    self.captureMailSelectionAndRewrite()
+                    if !self.needsMailManualCapture {
+                        break
+                    }
+                    if self.errorText.contains("mail_capture_busy") {
+                        // Retry soon after clipboard/copy throttle clears.
+                        self.mailSelectionStableSince = Date().addingTimeInterval(-0.92)
+                    } else {
+                        // No selection / other failure: wait again so the user can adjust highlight.
+                        self.mailSelectionStableSince = Date()
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            self.mailAutoCaptureTask = nil
+        }
+    }
+
+    static let translateLanguageSuggestions: [String] = [
+        "English",
+        "Ukrainian",
+        "Russian",
+        "Spanish",
+        "French",
+        "German",
+        "Italian",
+        "Portuguese",
+        "Polish",
+        "Czech",
+        "Slovak",
+        "Dutch",
+        "Swedish",
+        "Norwegian",
+        "Danish",
+        "Finnish",
+        "Estonian",
+        "Latvian",
+        "Lithuanian",
+        "Romanian",
+        "Bulgarian",
+        "Greek",
+        "Turkish",
+        "Arabic",
+        "Hebrew",
+        "Hindi",
+        "Indonesian",
+        "Vietnamese",
+        "Thai",
+        "Chinese (Simplified)",
+        "Chinese (Traditional)",
+        "Japanese",
+        "Korean"
+    ]
+
+    init() {
+        translateTargetLanguage =
+            (UserDefaults.standard.string(forKey: Self.lastTranslateLanguageKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let raw = UserDefaults.standard.string(forKey: Self.lastOperationKey) {
+            operation = Self.migrateOperation(from: raw) ?? .fixGrammar
+        } else {
+            operation = .fixGrammar
+        }
+        if translateTargetLanguage.isEmpty {
+            translateTargetLanguage = "English"
+        }
+    }
+
+    /// Maps saved strings including legacy labels from older builds.
+    private static func migrateOperation(from raw: String) -> RewriteOperation? {
+        if let op = RewriteOperation(rawValue: raw) { return op }
+        let legacy: [String: RewriteOperation] = [
+            "Fix grammar": .fixGrammar,
+            "Make professional": .makeProfessional
+        ]
+        return legacy[raw]
+    }
+
+    func loadFromFocusedField(minLength: Int = 1) -> Bool {
+        // Pop-up should operate on a larger slice than the auto-check to reduce “multiple iterations”.
+        guard let context = textService.focusedTextContext(
+            minLength: minLength,
+            maxLength: 6000,
+            allowClipboardFallback: true
+        ) else {
+            // Critical: never keep stale context/text when current focus can't be read.
+            lastContext = nil
+            originalText = ""
+            rewrittenText = ""
+            translatedText = ""
+            translateErrorText = ""
+            isTranslating = false
+            noChangesNeeded = false
+            applyErrorText = ""
+            errorText = "No suitable editable field found"
+            return false
+        }
+        guard let scopedContext = contextForRewriteUI(context) else {
+            lastContext = nil
+            originalText = ""
+            rewrittenText = ""
+            translatedText = ""
+            translateErrorText = ""
+            isTranslating = false
+            noChangesNeeded = false
+            applyErrorText = ""
+            errorText = "No editable text to rewrite"
+            return false
+        }
+        lastContext = scopedContext
+        originalText = scopedContext.text
+        rewrittenText = ""
+        translatedText = ""
+        translateErrorText = ""
+        errorText = ""
+        applyErrorText = ""
+        noChangesNeeded = false
+        return true
+    }
+
+    func loadFromSelection(minLength: Int = 1) -> Bool {
+        guard let context = textService.selectedTextContextAnyFocus(
+            minLength: minLength,
+            maxLength: 6000,
+            allowClipboardFallback: true
+        ) else {
+            lastContext = nil
+            originalText = ""
+            rewrittenText = ""
+            translatedText = ""
+            translateErrorText = ""
+            isTranslating = false
+            noChangesNeeded = false
+            applyErrorText = ""
+            errorText = "No selected text found"
+            return false
+        }
+        lastContext = context
+        originalText = context.text
+        rewrittenText = ""
+        translatedText = ""
+        translateErrorText = ""
+        errorText = ""
+        applyErrorText = ""
+        noChangesNeeded = false
+        return true
+    }
+
+    /// AX chain → selection → **live Cmd+C** when Slack/Electron hides selection from Accessibility.
+    func loadFromBestAvailable(minLength: Int = 1) -> Bool {
+        let isMailFrontmost = textService.frontmostAppInfo()?.bundleID == mailBundleID
+        @discardableResult
+        func commit(_ ctx: TextAccessService.FocusedTextContext) -> Bool {
+            guard let scopedContext = contextForRewriteUI(ctx) else { return false }
+            lastContext = scopedContext
+            originalText = scopedContext.text
+            rewrittenText = ""
+            translatedText = ""
+            translateErrorText = ""
+            isTranslating = false
+            noChangesNeeded = false
+            applyErrorText = ""
+            errorText = ""
+            needsMailManualCapture = false
+            return true
+        }
+        if let signal = textService.selectedTextSignalAnyFocus(), signal.hasSelection,
+           let ctx = textService.selectedTextContextAnyFocus(
+            minLength: minLength,
+            maxLength: 6000,
+            allowClipboardFallback: true
+               ) {
+            if commit(ctx) { return true }
+        }
+        if let ctx = textService.focusedTextContext(
+            minLength: minLength,
+            maxLength: 6000,
+            allowClipboardFallback: true
+        ) {
+            if commit(ctx) { return true }
+        }
+        if textService.hasFocusedEditableElement(),
+           let ctx = textService.focusedTextContext(
+            minLength: 0,
+               maxLength: 6000,
+               allowClipboardFallback: true
+           ) {
+            if commit(ctx) { return true }
+        }
+        if let ctx = textService.selectedTextContextAnyFocus(
+            minLength: minLength,
+            maxLength: 6000,
+            allowClipboardFallback: true
+        ) {
+            if commit(ctx) { return true }
+        }
+        if let ctx = textService.focusedTextContextFromLiveCopy(minLength: minLength, maxLength: 6000) {
+            if commit(ctx) { return true }
+        }
+        lastContext = nil
+        originalText = ""
+        rewrittenText = ""
+        translatedText = ""
+        translateErrorText = ""
+        isTranslating = false
+        noChangesNeeded = false
+        applyErrorText = ""
+        if isMailFrontmost {
+            needsMailManualCapture = true
+            errorText = "No text available for rewrite (mail_ax_empty)"
+        } else {
+            errorText = "No suitable editable field found"
+        }
+        return false
+    }
+
+    private func captureMailSelectionAndRewrite() {
+        switch textService.manualCaptureSelectionFromMail(minLength: 1, maxLength: 6000) {
+        case .success(let context):
+            let scopedContext = contextForRewriteUI(context) ?? context
+            lastContext = scopedContext
+            originalText = scopedContext.text
+            rewrittenText = ""
+            translatedText = ""
+            translateErrorText = ""
+            isTranslating = false
+            noChangesNeeded = false
+            applyErrorText = ""
+            errorText = ""
+            needsMailManualCapture = false
+            triggerRewrite(.manual)
+        case .busy:
+            errorText = "No text available for rewrite (mail_capture_busy)"
+            needsMailManualCapture = true
+        case .noSelection:
+            errorText = "No text available for rewrite (mail_manual_capture_empty)"
+            needsMailManualCapture = true
+        case .notAllowed:
+            errorText = "No text available for rewrite (mail_not_allowed)"
+            needsMailManualCapture = true
+        case .notMail:
+            errorText = "No text available for rewrite (mail_not_frontmost)"
+            needsMailManualCapture = true
+        }
+    }
+
+    func setPrefilled(
+        context: TextAccessService.FocusedTextContext,
+        suggestion: String,
+        operation: RewriteOperation
+    ) {
+        lastContext = context
+        originalText = context.text
+        rewrittenText = suggestion
+        translatedText = ""
+        translateErrorText = ""
+        isTranslating = false
+        self.operation = operation
+        errorText = ""
+        applyErrorText = ""
+        isLoading = false
+        suppressNextOperationTriggeredRewrite = true
+        updateNoChangesNeededFlag()
+    }
+
+    func rewrite(requestID: Int) async {
+        // Refresh from AX when we still see real text; after the popup opens, focus may move off Slack — do not wipe a good snapshot.
+        if let freshContext = textService.focusedTextContext(minLength: 1, maxLength: 6000, allowClipboardFallback: true),
+           let scopedFreshContext = contextForRewriteUI(freshContext),
+           !scopedFreshContext.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lastContext = scopedFreshContext
+            originalText = scopedFreshContext.text
+            needsMailManualCapture = false
+        } else if textService.hasFocusedEditableElement(),
+                  let emptyField = textService.focusedTextContext(minLength: 0, maxLength: 6000, allowClipboardFallback: true) {
+            let existing = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if existing.isEmpty || lastContext == nil {
+                // Use empty fallback only when we have no previously captured text.
+                let scopedEmptyField = contextForRewriteUI(emptyField) ?? emptyField
+                lastContext = scopedEmptyField
+                originalText = scopedEmptyField.text
+            }
+        } else if let live = textService.focusedTextContextFromLiveCopy(minLength: 1, maxLength: 6000),
+                  let scopedLive = contextForRewriteUI(live) {
+            lastContext = scopedLive
+            originalText = scopedLive.text
+            needsMailManualCapture = false
+        } else if lastContext == nil {
+            guard requestID == rewriteRequestID else { return }
+            if textService.frontmostAppInfo()?.bundleID == mailBundleID {
+                needsMailManualCapture = true
+                errorText = "No text available for rewrite (mail_ax_empty)"
+            } else {
+                errorText = "No text available for rewrite"
+            }
+            rewrittenText = ""
+            noChangesNeeded = false
+            return
+        }
+
+        let text = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            guard requestID == rewriteRequestID else { return }
+            if textService.frontmostAppInfo()?.bundleID == mailBundleID {
+                needsMailManualCapture = true
+                errorText = "No text available for rewrite (mail_ax_empty)"
+            } else {
+                errorText = "No text available for rewrite"
+            }
+            return
+        }
+
+        let provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
+        let fallbackModel: String
+        switch provider {
+        case .openai:
+            fallbackModel = AIClient.Defaults.openAIModel
+        case .gemini:
+            fallbackModel = AIClient.Defaults.geminiModel
+        case .claude:
+            fallbackModel = AIClient.Defaults.claudeModel
+        case .other:
+            fallbackModel = AIClient.Defaults.customModel
+        }
+        let model = UserDefaults.standard.string(forKey: "model") ?? fallbackModel
+        let key: String
+        switch provider {
+        case .openai:
+            key = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
+        case .gemini:
+            key = KeychainHelper.read(key: KeychainHelper.geminiKeyAccount) ?? ""
+        case .claude:
+            key = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
+        case .other:
+            key = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
+        }
+        guard !key.isEmpty else {
+            guard requestID == rewriteRequestID else { return }
+            errorText = "Add API key in Settings"
+            return
+        }
+        if provider == .other {
+            let base = UserDefaults.standard
+                .string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !base.isEmpty else {
+                guard requestID == rewriteRequestID else { return }
+                errorText = "Add API base URL in Settings (Other AI)"
+                return
+            }
+        }
+
+        guard requestID == rewriteRequestID else { return }
+        isLoading = true
+        errorText = ""
+        applyErrorText = ""
+        rewrittenText = ""
+        noChangesNeeded = false
+        if operation == .fixGrammar {
+            let localMixedScriptFix = fixMixedLatinCyrillicWords(in: text)
+            if normalized(localMixedScriptFix) != normalized(text) {
+                rewrittenText = localMixedScriptFix
+                isLoading = false
+                updateNoChangesNeededFlag()
+                return
+            }
+        }
+        do {
+            let newText = try await aiClient.rewriteText(
+                provider: provider,
+                model: model,
+                apiKey: key,
+                text: text,
+                operation: operation
+            )
+            guard requestID == rewriteRequestID else { return }
+            rewrittenText = newText
+            updateNoChangesNeededFlag()
+        } catch is CancellationError {
+            // Expected when user quickly re-triggers rewrite; keep UI stable.
+            guard requestID == rewriteRequestID else { return }
+        } catch {
+            guard requestID == rewriteRequestID else { return }
+            errorText = error.localizedDescription
+            rewrittenText = ""
+            noChangesNeeded = false
+        }
+        guard requestID == rewriteRequestID else { return }
+        isLoading = false
+    }
+
+    enum RewriteTrigger {
+        case popupOpened
+        case operationChanged
+        case manual
+    }
+
+    func triggerRewrite(_ trigger: RewriteTrigger = .manual) {
+        if trigger == .popupOpened, suppressNextOperationTriggeredRewrite {
+            suppressNextOperationTriggeredRewrite = false
+            return
+        }
+        suppressNextOperationTriggeredRewrite = false
+        if lastContext == nil, !loadFromBestAvailable(minLength: 1) {
+            return
+        }
+        rewriteTask?.cancel()
+        rewriteRequestID += 1
+        let requestID = rewriteRequestID
+        rewriteTask = Task { @MainActor in
+            await rewrite(requestID: requestID)
+        }
+    }
+
+    func triggerTranslate() {
+        // Ensure we operate on fresh focused text when possible.
+        if lastContext == nil, !loadFromBestAvailable(minLength: 1) {
+            return
+        }
+        translateTask?.cancel()
+        translateRequestID += 1
+        let requestID = translateRequestID
+        translateTask = Task { @MainActor in
+            await translate(requestID: requestID)
+        }
+    }
+
+    private func translate(requestID: Int) async {
+        // Best effort refresh — same reasoning as rewrite(); live copy for Electron when AX is blind.
+        if let freshContext = textService.focusedTextContext(minLength: 1, maxLength: 6000, allowClipboardFallback: true),
+           let scopedFreshContext = contextForRewriteUI(freshContext),
+           !scopedFreshContext.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lastContext = scopedFreshContext
+            originalText = scopedFreshContext.text
+            needsMailManualCapture = false
+        } else if textService.hasFocusedEditableElement(),
+                  let emptyField = textService.focusedTextContext(minLength: 0, maxLength: 6000, allowClipboardFallback: true) {
+            let existing = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if existing.isEmpty || lastContext == nil {
+                let scopedEmptyField = contextForRewriteUI(emptyField) ?? emptyField
+                lastContext = scopedEmptyField
+                originalText = scopedEmptyField.text
+            }
+        } else if let live = textService.focusedTextContextFromLiveCopy(minLength: 1, maxLength: 6000),
+                  let scopedLive = contextForRewriteUI(live) {
+            lastContext = scopedLive
+            originalText = scopedLive.text
+            needsMailManualCapture = false
+        } else if lastContext == nil {
+            guard requestID == translateRequestID else { return }
+            if textService.frontmostAppInfo()?.bundleID == mailBundleID {
+                needsMailManualCapture = true
+                translateErrorText = "No text available for translation (mail_ax_empty)"
+            } else {
+                translateErrorText = "No text available for translation"
+            }
+            translatedText = ""
+            return
+        }
+
+        // If we already have a suggestion, translate the suggested text (more useful than translating the original).
+        let candidateSuggestion = rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidateOriginal = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = candidateSuggestion.isEmpty ? candidateOriginal : candidateSuggestion
+        guard !text.isEmpty else {
+            guard requestID == translateRequestID else { return }
+            translateErrorText = "No text available for translation"
+            translatedText = ""
+            return
+        }
+
+        let target = translateTargetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else {
+            guard requestID == translateRequestID else { return }
+            translateErrorText = "Choose target language"
+            translatedText = ""
+            return
+        }
+
+        let provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
+        let fallbackModel: String
+        switch provider {
+        case .openai:
+            fallbackModel = AIClient.Defaults.openAIModel
+        case .gemini:
+            fallbackModel = AIClient.Defaults.geminiModel
+        case .claude:
+            fallbackModel = AIClient.Defaults.claudeModel
+        case .other:
+            fallbackModel = AIClient.Defaults.customModel
+        }
+        let model = UserDefaults.standard.string(forKey: "model") ?? fallbackModel
+        let key: String
+        switch provider {
+        case .openai:
+            key = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
+        case .gemini:
+            key = KeychainHelper.read(key: KeychainHelper.geminiKeyAccount) ?? ""
+        case .claude:
+            key = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
+        case .other:
+            key = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
+        }
+        guard !key.isEmpty else {
+            guard requestID == translateRequestID else { return }
+            translateErrorText = "Add API key in Settings"
+            translatedText = ""
+            return
+        }
+        if provider == .other {
+            let base = UserDefaults.standard
+                .string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !base.isEmpty else {
+                guard requestID == translateRequestID else { return }
+                translateErrorText = "Add API base URL in Settings (Other AI)"
+                translatedText = ""
+                return
+            }
+        }
+
+        guard requestID == translateRequestID else { return }
+        isTranslating = true
+        translateErrorText = ""
+        translatedText = ""
+        UserDefaults.standard.set(target, forKey: Self.lastTranslateLanguageKey)
+
+        do {
+            let out = try await aiClient.translateText(
+                provider: provider,
+                model: model,
+                apiKey: key,
+                text: text,
+                targetLanguage: target
+            )
+            guard requestID == translateRequestID else { return }
+            translatedText = out
+        } catch is CancellationError {
+            guard requestID == translateRequestID else { return }
+        } catch {
+            guard requestID == translateRequestID else { return }
+            translateErrorText = error.localizedDescription
+            translatedText = ""
+        }
+        guard requestID == translateRequestID else { return }
+        isTranslating = false
+    }
+
+    func apply() -> TextAccessService.ApplyResult {
+        guard let context = lastContext, !rewrittenText.isEmpty, !noChangesNeeded else { return .failed }
+        return textService.applyRewrittenText(rewrittenText, basedOn: context)
+    }
+
+    /// Apply after a brief delay — gives the system time to return AX focus
+    /// to the original text field once the popup panel is dismissed.
+    func scheduleApply(onSuccess: @escaping () -> Void = {}) {
+        guard let context = lastContext, !rewrittenText.isEmpty, !noChangesNeeded else { return }
+        let text = rewrittenText
+        let baselineOriginal = originalText
+        applyErrorText = ""
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            // Refresh context right before apply to avoid stale AX element/range.
+            let applyContext: TextAccessService.FocusedTextContext = {
+                guard let fresh = self.textService.focusedTextContext(minLength: 1, allowClipboardFallback: true) else {
+                    return context
+                }
+                let normalizedFresh = self.normalized(fresh.text)
+                let normalizedBaseline = self.normalized(baselineOriginal)
+                return normalizedFresh == normalizedBaseline ? fresh : context
+            }()
+
+            let result = self.textService.applyRewrittenText(text, basedOn: applyContext)
+            switch result {
+            case .success:
+                self.applyErrorText = ""
+                onSuccess()
+            case .clipboardArmed:
+                self.applyErrorText = "Исправление в буфере — нажмите ⌘V"
+            case .failed, .unsupportedTarget:
+                self.applyErrorText = "Could not apply automatically in this field."
+            }
+        }
+    }
+
+    func copyResult() {
+        let translated = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !translated.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(translated, forType: .string)
+            return
+        }
+        guard !rewrittenText.isEmpty, !noChangesNeeded else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rewrittenText, forType: .string)
+    }
+
+    private func updateNoChangesNeededFlag() {
+        let trimmed = rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            noChangesNeeded = false
+            return
+        }
+        let unchangedByNormalization = normalized(trimmed) == normalized(originalText)
+        // For Fix mode, do not show "no changes needed" if local spell checker still
+        // sees a typo in the original text (AI sometimes returns input unchanged).
+        if operation == .fixGrammar,
+           unchangedByNormalization,
+           (hasLocalSpellingIssues(originalText) || containsMixedLatinCyrillicWord(originalText)) {
+            noChangesNeeded = false
+            return
+        }
+        noChangesNeeded = unchangedByNormalization
+    }
+
+    private func contextForRewriteUI(
+        _ context: TextAccessService.FocusedTextContext
+    ) -> TextAccessService.FocusedTextContext? {
+        // Explicit selection should stay exact. This keeps selected-text translation/rewrite predictable.
+        guard !context.usesSelection else { return context }
+        guard let scope = rewriteScope(in: context.text) else { return nil }
+        let fullLength = (context.text as NSString).length
+        if scope.range.location == 0, scope.range.length == fullLength {
+            return context
+        }
+        return TextAccessService.FocusedTextContext(
+            text: scope.text,
+            frame: context.frame,
+            usesSelection: false,
+            selectedRange: nil,
+            targetElement: context.targetElement,
+            targetAppPID: context.targetAppPID,
+            targetBundleID: context.targetBundleID,
+            anchor: context.anchor,
+            textFragments: scopedFragments(from: context.textFragments, scope: scope)
+        )
+    }
+
+    private func rewriteScope(in text: String) -> RewriteScope? {
+        let ns = text as NSString
+        guard ns.length > 0 else { return nil }
+        let protectedRanges = protectedTokenRanges(in: text).sorted { $0.location < $1.location }
+        guard !protectedRanges.isEmpty else {
+            let trimmed = trimmedRange(NSRange(location: 0, length: ns.length), in: ns)
+            guard trimmed.length > 0 else { return nil }
+            return RewriteScope(text: ns.substring(with: trimmed), range: trimmed)
+        }
+
+        var segments: [RewriteScope] = []
+        var cursor = 0
+        for protectedRange in protectedRanges {
+            if protectedRange.location > cursor {
+                appendRewriteSegment(
+                    NSRange(location: cursor, length: protectedRange.location - cursor),
+                    in: ns,
+                    to: &segments
+                )
+            }
+            cursor = max(cursor, protectedRange.location + protectedRange.length)
+        }
+        if cursor < ns.length {
+            appendRewriteSegment(NSRange(location: cursor, length: ns.length - cursor), in: ns, to: &segments)
+        }
+
+        return segments
+            .filter { isMeaningfulRewriteSegment($0.text) }
+            .max { lhs, rhs in
+                rewriteScore(lhs.text) < rewriteScore(rhs.text)
+            }
+    }
+
+    private func appendRewriteSegment(_ range: NSRange, in text: NSString, to segments: inout [RewriteScope]) {
+        let trimmed = trimmedRange(range, in: text)
+        guard trimmed.length > 0 else { return }
+        segments.append(RewriteScope(text: text.substring(with: trimmed), range: trimmed))
+    }
+
+    private func scopedFragments(
+        from fragments: [TextAccessService.TextFragment],
+        scope: RewriteScope
+    ) -> [TextAccessService.TextFragment] {
+        let scopeNS = scope.text as NSString
+        return fragments.compactMap { fragment -> TextAccessService.TextFragment? in
+            let overlap = NSIntersectionRange(fragment.range, scope.range)
+            guard overlap.length > 0 else { return nil }
+            let localLocation = max(0, overlap.location - scope.range.location)
+            let localLength = max(0, min(overlap.length, scopeNS.length - localLocation))
+            guard localLength > 0 else { return nil }
+            let fragmentLength = max(1, fragment.range.length)
+            let startOffset = max(0, overlap.location - fragment.range.location)
+            let charWidth = fragment.rect.width / CGFloat(fragmentLength)
+            let x = fragment.rect.minX + CGFloat(startOffset) * charWidth
+            let width = max(12, CGFloat(overlap.length) * charWidth)
+            return TextAccessService.TextFragment(
+                text: scopeNS.substring(with: NSRange(location: localLocation, length: localLength)),
+                range: NSRange(location: localLocation, length: localLength),
+                rect: CGRect(
+                    x: x,
+                    y: fragment.rect.minY,
+                    width: min(width, max(12, fragment.rect.maxX - x)),
+                    height: fragment.rect.height
+                )
+            )
+        }
+    }
+
+    private func protectedTokenRanges(in text: String) -> [NSRange] {
+        let ns = text as NSString
+        guard ns.length > 0 else { return [] }
+        let pattern = #"(?i)(?:https?://|www\.)\S+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[@#][\p{L}\p{N}_][\p{L}\p{N}_-]*|\+?\d[\d\s().-]{2,}\d|\b\d+(?:[.,:/-]\d+)*\b|\b[\w.-]+\.(?:com|net|org|io|dev|app|ai|co|ru|ua|by|de|fr|es|it|pl|nl|uk)\b\S*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+    }
+
+    private func trimmedRange(_ range: NSRange, in text: NSString) -> NSRange {
+        var start = max(0, min(range.location, text.length))
+        var end = max(start, min(range.location + range.length, text.length))
+        while start < end, isWhitespace(text.character(at: start)) {
+            start += 1
+        }
+        while end > start, isWhitespace(text.character(at: end - 1)) {
+            end -= 1
+        }
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    private func isWhitespace(_ codeUnit: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(UInt32(codeUnit)) else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
+    private func isMeaningfulRewriteSegment(_ text: String) -> Bool {
+        let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        let nonSpace = text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
+        guard letters >= 3, nonSpace > 0 else { return false }
+        if text.split(whereSeparator: { $0.isWhitespace }).count == 1 {
+            return Double(letters) / Double(nonSpace) >= 0.75
+        }
+        return Double(letters) / Double(nonSpace) >= 0.45
+    }
+
+    private func rewriteScore(_ text: String) -> Int {
+        text.unicodeScalars.reduce(0) { score, scalar in
+            CharacterSet.letters.contains(scalar) ? score + 2 : score + 1
+        }
+    }
+
+    private func normalized(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private func hasLocalSpellingIssues(_ text: String) -> Bool {
+        let nsText = text as NSString
+        if nsText.length < 3 { return false }
+        let misspelled = spellChecker.checkSpelling(
+            of: text,
+            startingAt: 0,
+            language: nil,
+            wrap: false,
+            inSpellDocumentWithTag: 0,
+            wordCount: nil
+        )
+        return misspelled.location != NSNotFound
+    }
+
+    private func containsMixedLatinCyrillicWord(_ text: String) -> Bool {
+        for token in text.split(whereSeparator: { !$0.isLetter }) {
+            var hasLatin = false
+            var hasCyrillic = false
+            for scalar in token.unicodeScalars {
+                let v = scalar.value
+                if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) {
+                    hasLatin = true
+                } else if (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v) {
+                    hasCyrillic = true
+                }
+                if hasLatin && hasCyrillic {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func fixMixedLatinCyrillicWords(in text: String) -> String {
+        let map: [Character: Character] = [
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X", "У": "Y",
+            "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "к": "k", "м": "m", "т": "t", "в": "b", "н": "h"
+        ]
+        var result = ""
+        var token = ""
+        for ch in text {
+            if ch.isLetter {
+                token.append(ch)
+                continue
+            }
+            result.append(normalizeToken(token, map: map))
+            token.removeAll(keepingCapacity: true)
+            result.append(ch)
+        }
+        result.append(normalizeToken(token, map: map))
+        return result
+    }
+
+    private func normalizeToken(_ token: String, map: [Character: Character]) -> String {
+        guard !token.isEmpty else { return token }
+        let hasLatin = token.unicodeScalars.contains {
+            let v = $0.value
+            return (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v)
+        }
+        let hasCyrillic = token.unicodeScalars.contains {
+            let v = $0.value
+            return (0x0400...0x04FF).contains(v) || (0x0500...0x052F).contains(v)
+        }
+        guard hasLatin && hasCyrillic else { return token }
+        return String(token.map { map[$0] ?? $0 })
+    }
+}

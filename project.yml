@@ -1,0 +1,19 @@
+name: Textora
+options:
+  minimumXcodeGenVersion: 2.38.0
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.textora.app
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  Textora:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      base:
+        INFOPLIST_FILE: Sources/Info.plist
+    scheme:
+      testTargets: []
