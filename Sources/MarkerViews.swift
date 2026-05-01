@@ -1,12 +1,23 @@
 import SwiftUI
 
+enum FloatingIssueMarkerStyle: Equatable {
+    case underline
+    case compactDot
+}
+
 struct FloatingIssueUnderlineView: View {
     let colors: [Color]
     let isHighlighted: Bool
+    let style: FloatingIssueMarkerStyle
 
-    init(colors: [Color] = TextoraSuggestionColors.brandGradient, isHighlighted: Bool = false) {
+    init(
+        colors: [Color] = TextoraSuggestionColors.brandGradient,
+        isHighlighted: Bool = false,
+        style: FloatingIssueMarkerStyle = .underline
+    ) {
         self.colors = colors.isEmpty ? TextoraSuggestionColors.brandGradient : colors
         self.isHighlighted = isHighlighted
+        self.style = style
     }
 
     var body: some View {
@@ -20,23 +31,48 @@ struct FloatingIssueUnderlineView: View {
             // "thin colored bar UNDER the words, never on top of
             // them", so we render exactly that: a 2pt gradient bar
             // pinned to the bottom edge of the issue line.
-            let underlineHeight: CGFloat = isHighlighted ? min(4, proxy.size.height) : 2
-            ZStack(alignment: .bottomLeading) {
-                RoundedRectangle(cornerRadius: underlineHeight / 2)
-                    .fill(
-                        LinearGradient(
-                            colors: activeColors,
-                            startPoint: .leading,
-                            endPoint: .trailing
+            switch style {
+            case .underline:
+                let underlineHeight: CGFloat = isHighlighted ? min(4, proxy.size.height) : 2
+                ZStack(alignment: .bottomLeading) {
+                    RoundedRectangle(cornerRadius: underlineHeight / 2)
+                        .fill(
+                            LinearGradient(
+                                colors: activeColors,
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
                         )
-                    )
-                    .frame(width: proxy.size.width, height: underlineHeight)
-                    .shadow(
-                        color: activeColors[0].opacity(0.35),
-                        radius: isHighlighted ? 2.6 : 1.5,
-                        x: 0,
-                        y: 0.5
-                    )
+                        .frame(width: proxy.size.width, height: underlineHeight)
+                        .shadow(
+                            color: activeColors[0].opacity(0.35),
+                            radius: isHighlighted ? 2.6 : 1.5,
+                            x: 0,
+                            y: 0.5
+                        )
+                }
+            case .compactDot:
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: activeColors,
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(
+                            width: min(proxy.size.width, isHighlighted ? 12 : 9),
+                            height: min(proxy.size.height, isHighlighted ? 12 : 9)
+                        )
+                        .shadow(
+                            color: activeColors[0].opacity(isHighlighted ? 0.46 : 0.32),
+                            radius: isHighlighted ? 3.2 : 1.8,
+                            x: 0,
+                            y: 0.8
+                        )
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
             }
         }
         .allowsHitTesting(false)

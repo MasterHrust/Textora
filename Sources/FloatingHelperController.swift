@@ -64,6 +64,7 @@ final class FloatingHelperController {
         let panelIndex: Int
         let frame: CGRect
         let issueID: UUID?
+        let style: FloatingIssueMarkerStyle
     }
     private var issuePanelLayouts: [IssuePanelLayout] = []
     /// Signatures of issues the user explicitly dismissed via "Skip"
@@ -136,6 +137,7 @@ final class FloatingHelperController {
     private var anchorMode: AnchorMode = .focusedEditable
     private var selectionSignature: String?
     private var selectionSignatureSince: Date?
+    private var lastFocusSurfaceSignature: String?
     private let selectionAppearDelay: TimeInterval = 0.22
     private weak var keepBelowWindow: NSWindow?
     private var isManuallyPlacedForCurrentFocus = false
@@ -331,6 +333,7 @@ final class FloatingHelperController {
         latestSignature = nil
         selectionSignature = nil
         selectionSignatureSince = nil
+        lastFocusSurfaceSignature = nil
         hoveredIssueID = nil
         lastActivityAt = Date()
         cancelScheduledVisibilityDrop()
@@ -432,6 +435,7 @@ final class FloatingHelperController {
                 self.hideFloatingHelperImmediately()
                 return
             }
+            self.resetOverlayStateIfFocusSurfaceChanged()
             if self.textService.selectedTextSignalAnyFocus()?.hasSelection == true {
                 self.applyFloatingHelperLayoutForCurrentFocus()
                 return
@@ -850,6 +854,33 @@ final class FloatingHelperController {
         lastMarkerCaretFrame = nil
         issuePanelLayouts = []
         updateRingColor()
+    }
+
+    private func resetOverlayStateIfFocusSurfaceChanged() {
+        let signature = textService.currentFocusSurfaceSignature()
+        guard lastFocusSurfaceSignature != signature else { return }
+        let hadPreviousSurface = lastFocusSurfaceSignature != nil
+        lastFocusSurfaceSignature = signature
+        guard hadPreviousSurface else { return }
+
+        selectionSignature = nil
+        selectionSignatureSince = nil
+        latestSignature = nil
+        latestSuggestion = ""
+        latestSuggestionOptions = []
+        latestContext = nil
+        latestIssueRange = nil
+        latestIssues = []
+        hoveredIssueID = nil
+        lastCheckedValueSegment = nil
+        suggestionState = .neutral
+        issuePanelLayouts = []
+        lastMarkerFieldFrame = nil
+        lastMarkerCaretFrame = nil
+        lastMarkerDebugSignature = nil
+        hideMarkerAndCard()
+        updateRingColor()
+        postStatus("Focus/window changed; cleared overlays")
     }
 
     private func hideFloatingHelperImmediately() {
@@ -2862,6 +2893,7 @@ final class FloatingHelperController {
             let issueID: UUID?
             let geometry: String
             let source: String
+            let style: FloatingIssueMarkerStyle
         }
         var jobs: [UnderlineJob] = []
         if !latestIssues.isEmpty {
@@ -2889,17 +2921,24 @@ final class FloatingHelperController {
                 )
                 let axFramesAreHostFallback = axFrames.count == 1 && approximatelySameRect(axFrames[0], issueFallback)
                 let preciseFrames = axFramesAreHostFallback ? nil : usablePreciseIssueFrames(axFrames, fallback: issueFallback)
-                let estimatedFrames = preciseFrames == nil
-                    ? hostEstimatedIssueFrames(
-                        caretFrame: caretFrame,
-                        fieldFrame: fieldFrame,
-                        context: fallbackContext,
-                        issueRange: fallbackRange
-                    )
-                    : nil
+                let estimatedFrames = hostEstimatedIssueFrames(
+                    caretFrame: caretFrame,
+                    fieldFrame: fieldFrame,
+                    context: fallbackContext,
+                    issueRange: fallbackRange
+                )
+                let preferEstimated = estimatedFrames != nil && shouldPreferHostEstimatedGeometry(
+                    for: fallbackContext,
+                    fieldFrame: fieldFrame,
+                    issueFallback: issueFallback,
+                    preciseFrames: preciseFrames
+                )
                 let selectedSource: String
                 let rawFrames: [CGRect]
-                if let preciseFrames {
+                if preferEstimated, let estimatedFrames {
+                    selectedSource = "hostEstimated"
+                    rawFrames = estimatedFrames
+                } else if let preciseFrames {
                     selectedSource = "axPrecise"
                     rawFrames = preciseFrames
                 } else if let estimatedFrames {
@@ -2912,7 +2951,15 @@ final class FloatingHelperController {
                     selectedSource = "axRawOrFallback"
                     rawFrames = axFrames
                 }
-                let normalized = normalizedIssueOverlayFrames(for: rawFrames, fallback: issueFallback)
+                let markerStyle = issueMarkerStyle(
+                    selectedSource: selectedSource,
+                    context: fallbackContext
+                )
+                let normalized = normalizedIssueOverlayFrames(
+                    for: rawFrames,
+                    fallback: issueFallback,
+                    style: markerStyle
+                )
                 postMarkerPipelineDebug(
                     stage: "issue",
                     context: issueContext,
@@ -2933,7 +2980,8 @@ final class FloatingHelperController {
                             colors: [issueColor],
                             issueID: issue.id,
                             geometry: geometry,
-                            source: selectedSource
+                            source: selectedSource,
+                            style: markerStyle
                         )
                     )
                 }
@@ -2951,17 +2999,24 @@ final class FloatingHelperController {
             )
             let axFramesAreHostFallback = axFrames.count == 1 && approximatelySameRect(axFrames[0], fallback)
             let preciseFrames = axFramesAreHostFallback ? nil : usablePreciseIssueFrames(axFrames, fallback: fallback)
-            let estimatedFrames = preciseFrames == nil
-                ? hostEstimatedIssueFrames(
-                    caretFrame: caretFrame,
-                    fieldFrame: fieldFrame,
-                    context: context,
-                    issueRange: latestIssueRange
-                )
-                : nil
+            let estimatedFrames = hostEstimatedIssueFrames(
+                caretFrame: caretFrame,
+                fieldFrame: fieldFrame,
+                context: context,
+                issueRange: latestIssueRange
+            )
+            let preferEstimated = estimatedFrames != nil && shouldPreferHostEstimatedGeometry(
+                for: context,
+                fieldFrame: fieldFrame,
+                issueFallback: fallback,
+                preciseFrames: preciseFrames
+            )
             let selectedSource: String
             let rawFrames: [CGRect]
-            if let preciseFrames {
+            if preferEstimated, let estimatedFrames {
+                selectedSource = "hostEstimated"
+                rawFrames = estimatedFrames
+            } else if let preciseFrames {
                 selectedSource = "axPrecise"
                 rawFrames = preciseFrames
             } else if let estimatedFrames {
@@ -2974,7 +3029,15 @@ final class FloatingHelperController {
                 selectedSource = "axRawOrFallback"
                 rawFrames = axFrames
             }
-            let normalized = normalizedIssueOverlayFrames(for: rawFrames, fallback: fallback)
+            let markerStyle = issueMarkerStyle(
+                selectedSource: selectedSource,
+                context: context
+            )
+            let normalized = normalizedIssueOverlayFrames(
+                for: rawFrames,
+                fallback: fallback,
+                style: markerStyle
+            )
             postMarkerPipelineDebug(
                 stage: "legacy",
                 context: context,
@@ -2998,7 +3061,8 @@ final class FloatingHelperController {
                         colors: colors,
                         issueID: nil,
                         geometry: geometry,
-                        source: selectedSource
+                        source: selectedSource,
+                        style: markerStyle
                     )
                 )
             }
@@ -3028,7 +3092,8 @@ final class FloatingHelperController {
             if let host = overlayPanel.contentView as? NSHostingView<FloatingIssueUnderlineView> {
                 host.rootView = FloatingIssueUnderlineView(
                     colors: job.colors,
-                    isHighlighted: job.issueID != nil && job.issueID == hoveredIssueID
+                    isHighlighted: job.issueID != nil && job.issueID == hoveredIssueID,
+                    style: job.style
                 )
             }
             let overlayWasVisible = overlayPanel.isVisible
@@ -3044,7 +3109,7 @@ final class FloatingHelperController {
             if !hitWasVisible {
                 hitPanel.orderFrontRegardless()
             }
-            newLayouts.append(IssuePanelLayout(panelIndex: index, frame: job.frame, issueID: job.issueID))
+            newLayouts.append(IssuePanelLayout(panelIndex: index, frame: job.frame, issueID: job.issueID, style: job.style))
         }
         // Hide any panels left over from a previous render with more
         // jobs than this one.
@@ -3080,7 +3145,8 @@ final class FloatingHelperController {
             let colors = issueColor.map { [$0] } ?? issueOverlayColors()
             host.rootView = FloatingIssueUnderlineView(
                 colors: colors,
-                isHighlighted: layout.issueID != nil && layout.issueID == hoveredIssueID
+                isHighlighted: layout.issueID != nil && layout.issueID == hoveredIssueID,
+                style: layout.style
             )
         }
     }
@@ -3151,11 +3217,56 @@ final class FloatingHelperController {
         return result
     }
 
-    private func normalizedIssueOverlayFrames(for bounds: [CGRect], fallback: CGRect) -> [CGRect] {
+    private func shouldPreferHostEstimatedGeometry(
+        for context: TextAccessService.FocusedTextContext,
+        fieldFrame: CGRect,
+        issueFallback: CGRect,
+        preciseFrames: [CGRect]?
+    ) -> Bool {
+        if isSlackBundle(context.targetBundleID) {
+            return true
+        }
+        guard isBrowserBundle(context.targetBundleID) else {
+            return false
+        }
+        if preciseFrames == nil {
+            return true
+        }
+        return context.anchor.source == .axElementFrame
+            || context.frame.height > 44
+            || fieldFrame.height > 44
+            || issueFallback.height > 44
+    }
+
+    private func issueMarkerStyle(
+        selectedSource: String,
+        context: TextAccessService.FocusedTextContext
+    ) -> FloatingIssueMarkerStyle {
+        if isSlackBundle(context.targetBundleID) {
+            return .compactDot
+        }
+        if selectedSource == "hostFallbackFrame" || selectedSource == "axRawOrFallback" {
+            return .compactDot
+        }
+        return .underline
+    }
+
+    private func normalizedIssueOverlayFrames(
+        for bounds: [CGRect],
+        fallback: CGRect,
+        style: FloatingIssueMarkerStyle = .underline
+    ) -> [CGRect] {
         let sourceBounds = bounds.isEmpty ? [fallback] : bounds
         var frames: [CGRect] = []
         for rect in sourceBounds.prefix(8) {
-            let frame = normalizedIssueOverlayFrame(for: rect, fallback: fallback)
+            let frame: CGRect = {
+                switch style {
+                case .underline:
+                    return normalizedIssueOverlayFrame(for: rect, fallback: fallback)
+                case .compactDot:
+                    return normalizedCompactIssueOverlayFrame(for: rect, fallback: fallback)
+                }
+            }()
             guard !frame.isEmpty else { continue }
             let isDuplicate = frames.contains {
                 abs($0.minX - frame.minX) < 2
@@ -3222,6 +3333,19 @@ final class FloatingHelperController {
             y: source.minY - underlineOffset,
             width: width,
             height: underlineHeight
+        )
+        return clampedToVisibleScreens(frame)
+    }
+
+    private func normalizedCompactIssueOverlayFrame(for bounds: CGRect, fallback: CGRect) -> CGRect {
+        let source = bounds.isEmpty ? fallback : bounds
+        guard !source.isEmpty else { return .zero }
+        let side: CGFloat = 10
+        let frame = CGRect(
+            x: source.minX - side * 0.35,
+            y: source.minY - 1,
+            width: side,
+            height: side
         )
         return clampedToVisibleScreens(frame)
     }
@@ -3849,15 +3973,14 @@ final class FloatingHelperController {
         guard textEndX > textStartX + 16 else { return nil }
 
         let isSingleLineComposer = newlineMetrics.lineCount == 1 && anchorFrame.height <= 48
-        let estimatedCharWidth: CGFloat = {
-            if isSingleLineComposer {
-                return min(max(anchorFrame.height * 0.18, 6.4), 7.6)
-            }
-            return min(
-                max((textEndX - textStartX) / CGFloat(max(newlineMetrics.lineLength, min(text.length, 42), 24)), 6.2),
-                10.8
-            )
-        }()
+        let estimatedCharWidth = slackEstimatedCharWidth(
+            availableWidth: textEndX - textStartX,
+            anchorHeight: anchorFrame.height,
+            text: text,
+            issueLocation: issueLocation,
+            lineLength: newlineMetrics.lineLength,
+            isSingleLineComposer: isSingleLineComposer
+        )
         let topInset = min(max(anchorFrame.height * 0.10, 8), 18)
         let topY = anchorFrame.maxY - topInset
         let lineMetrics = wrappedIssueLineMetrics(
@@ -3887,6 +4010,57 @@ final class FloatingHelperController {
             let y = max(anchorFrame.minY + 2, topY - CGFloat(metric.lineIndex) * lineStep - letterHeight)
             return CGRect(x: x, y: y, width: width, height: letterHeight)
         }
+    }
+
+    private func slackEstimatedCharWidth(
+        availableWidth: CGFloat,
+        anchorHeight: CGFloat,
+        text: NSString,
+        issueLocation: Int,
+        lineLength: Int,
+        isSingleLineComposer: Bool
+    ) -> CGFloat {
+        let lineRange = textLineRange(in: text, containing: issueLocation)
+        let lineUnits = max(
+            1,
+            weightedUnits(
+                in: text,
+                range: lineRange.length > 0
+                    ? lineRange
+                    : NSRange(location: 0, length: text.length)
+            )
+        )
+        let widthFromAvailable = availableWidth / lineUnits
+
+        if isSingleLineComposer {
+            // Slack's AX line frames usually describe the visible text row,
+            // not a narrow glyph box. A height-derived 6-7pt estimate makes
+            // every later word drift left; calibrating from the row width
+            // keeps offsets aligned across long composer lines.
+            let heightFloor = anchorHeight * 0.28
+            return min(max(widthFromAvailable, heightFloor, 7.6), 11.2)
+        }
+
+        let lengthBased = availableWidth / CGFloat(max(lineLength, min(text.length, 42), 24))
+        return min(max(widthFromAvailable * 0.92, lengthBased, 6.8), 11.4)
+    }
+
+    private func textLineRange(in text: NSString, containing location: Int) -> NSRange {
+        guard text.length > 0 else { return NSRange(location: 0, length: 0) }
+        let safeLocation = max(0, min(location, text.length - 1))
+        var start = safeLocation
+        while start > 0 {
+            let ch = text.character(at: start - 1)
+            if ch == 10 || ch == 13 { break }
+            start -= 1
+        }
+        var end = safeLocation
+        while end < text.length {
+            let ch = text.character(at: end)
+            if ch == 10 || ch == 13 { break }
+            end += 1
+        }
+        return NSRange(location: start, length: max(0, end - start))
     }
 
     private func slackLineAnchorFrame(

@@ -289,6 +289,35 @@ final class TextAccessService {
     private let sensitiveFieldHints: [String] = [
         "password", "passcode", "otp", "token", "2fa", "login"
     ]
+    private let neverEditableRoles: Set<String> = [
+        "AXApplication",
+        "AXBrowser",
+        "AXButton",
+        "AXCell",
+        "AXCheckBox",
+        "AXDisclosureTriangle",
+        "AXGroup",
+        "AXImage",
+        "AXLayoutArea",
+        "AXLayoutItem",
+        "AXLink",
+        "AXList",
+        "AXMenu",
+        "AXMenuBar",
+        "AXMenuBarItem",
+        "AXMenuButton",
+        "AXMenuItem",
+        "AXOutline",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXRow",
+        "AXScrollArea",
+        "AXSplitter",
+        "AXStaticText",
+        "AXTable",
+        "AXToolbar",
+        "AXWindow"
+    ]
     private let maxContextCharacters = 1600
     private var isCopyProbeInProgress = false
     private var lastCopyProbeAt: Date = .distantPast
@@ -452,6 +481,22 @@ final class TextAccessService {
         return false
     }
 
+    func currentFocusSurfaceSignature() -> String {
+        let front = frontmostAppInfo()
+        let frontPart = "\(front?.bundleID ?? "nil"):\(front?.displayName ?? "nil")"
+        let windowPart: String = {
+            guard let window = queryFocusedWindowElementFromSystem() else {
+                if let focused = focusedElement() {
+                    return "window=nil focused=\(elementSignature(focused))"
+                }
+                return "window=nil focused=nil"
+            }
+            return "window=\(elementSignature(window))"
+        }()
+        let focusedPart = focusedElement().map { "focused=\(elementSignature($0))" } ?? "focused=nil"
+        return "\(frontPart)|\(windowPart)|\(focusedPart)"
+    }
+
     func issueBounds(
         in context: FocusedTextContext,
         localRange: NSRange?,
@@ -520,18 +565,9 @@ final class TextAccessService {
         for fragment in context.textFragments {
             let overlap = NSIntersectionRange(range, fragment.range)
             guard overlap.length > 0 else { continue }
-            let fragmentLength = max(1, fragment.range.length)
-            let startOffset = max(0, overlap.location - fragment.range.location)
-            let charWidth = fragment.rect.width / CGFloat(fragmentLength)
-            let x = fragment.rect.minX + CGFloat(startOffset) * charWidth
-            let width = max(12, CGFloat(overlap.length) * charWidth)
-            let rect = CGRect(
-                x: x,
-                y: fragment.rect.minY,
-                width: min(width, max(12, fragment.rect.maxX - x)),
-                height: fragment.rect.height
-            )
-            rects.append(rect)
+            if let rect = TextoraCharacterGeometry.rect(for: overlap, in: fragment) {
+                rects.append(rect)
+            }
         }
         return rects
     }
@@ -3782,6 +3818,7 @@ end tell
         var roleValue: CFTypeRef?
         let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
         let role = roleStatus == .success ? (roleValue as? String ?? "") : ""
+        let subrole = axString(of: element, attribute: kAXSubroleAttribute) ?? ""
         let editableRoles: Set<String> = [
             kAXTextFieldRole as String,
             kAXTextAreaRole as String,
@@ -3800,8 +3837,15 @@ end tell
         if selectedRangeValue(of: element) != nil {
             return true
         }
-        // Some hosts expose string value but miss AXEditable flag.
-        if valueText(of: element) != nil {
+        if neverEditableRoles.contains(role) || neverEditableRoles.contains(subrole) {
+            return false
+        }
+        // Some hosts expose string value but miss AXEditable flag. Treat it
+        // as an input only when AX says the value can actually be changed;
+        // otherwise browser/app labels are indistinguishable from user text
+        // and produce false overlays.
+        if valueText(of: element) != nil,
+           isAXAttributeSettable(element, attribute: kAXValueAttribute as String) {
             return true
         }
         return false
@@ -3842,7 +3886,6 @@ end tell
         if lowerRole.contains("menu") || lowerSubrole.contains("menu") || lowerRole.contains("popover") || lowerSubrole.contains("popover") {
             return true
         }
-        guard role == "AXDialog" || role == "AXWindow" else { return false }
         let title = (axString(of: element, attribute: kAXTitleAttribute) ?? "").lowercased()
         let description = (axString(of: element, attribute: kAXDescriptionAttribute) ?? "").lowercased()
         let identifier = (axString(of: element, attribute: "AXIdentifier") ?? "").lowercased()
@@ -3851,8 +3894,10 @@ end tell
             return true
         }
         if role == "AXList" || role == "AXTable" || role == "AXOutline" {
-            return false
+            guard let frame = elementFrame(of: element) else { return false }
+            return isSmallDetachedPopupFrame(frame)
         }
+        guard role == "AXDialog" || role == "AXWindow" || role == "AXSheet" else { return false }
         guard lowerSubrole.contains("dialog")
                 || lowerSubrole.contains("floating")
                 || lowerSubrole.contains("system")
@@ -3863,6 +3908,10 @@ end tell
             return false
         }
         guard let frame = elementFrame(of: element) else { return false }
+        return isSmallDetachedPopupFrame(frame)
+    }
+
+    private func isSmallDetachedPopupFrame(_ frame: CGRect) -> Bool {
         guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) }) ?? NSScreen.main else {
             return frame.width <= 820 && frame.height <= 620
         }
@@ -3917,6 +3966,24 @@ end tell
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard status == .success else { return nil }
         return value as? String
+    }
+
+    private func isAXAttributeSettable(_ element: AXUIElement, attribute: String) -> Bool {
+        var settable = DarwinBoolean(false)
+        let status = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
+        return status == .success && settable.boolValue
+    }
+
+    private func elementSignature(_ element: AXUIElement) -> String {
+        let role = axString(of: element, attribute: kAXRoleAttribute) ?? "nil"
+        let subrole = axString(of: element, attribute: kAXSubroleAttribute) ?? "nil"
+        let includeTitle = role == "AXWindow" || role == "AXDialog" || role == "AXSheet"
+        let title = includeTitle ? (axString(of: element, attribute: kAXTitleAttribute) ?? "") : ""
+        let identifier = axString(of: element, attribute: "AXIdentifier") ?? ""
+        let frame = elementFrame(of: element)
+        var pid: pid_t = 0
+        _ = AXUIElementGetPid(element, &pid)
+        return "pid=\(pid) role=\(role) subrole=\(subrole) id=\(identifier) title=\(title) frame=\(textoraDiagRect(frame))"
     }
 
     private func axElement(of element: AXUIElement, attribute: String) -> AXUIElement? {
