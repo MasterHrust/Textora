@@ -56,6 +56,7 @@ final class FloatingHelperController {
     /// the hover card is showing. `nil` for the floating-icon hover
     /// (shows the primary issue).
     private var hoveredIssueID: UUID?
+    private var hoveredIssueIDs: Set<UUID> = []
     /// Maps each rendered underline panel back to the issue it
     /// represents. Used by the per-issue hover hit-test (mouseEntered
     /// → look up panel index → look up issue ID → show that issue's
@@ -64,6 +65,7 @@ final class FloatingHelperController {
         let panelIndex: Int
         let frame: CGRect
         let issueID: UUID?
+        let issueIDs: [UUID]
         let style: FloatingIssueMarkerStyle
     }
     private var issuePanelLayouts: [IssuePanelLayout] = []
@@ -86,6 +88,7 @@ final class FloatingHelperController {
     private let recentAppliedRewriteTTL: TimeInterval = 180
     private let recentAppliedRewriteCap = 24
     private var localBatchMutationGraceUntil: Date?
+    private var pendingHoverCardIssueIDsAfterApply: [UUID] = []
     private var lastMarkerFieldFrame: CGRect?
     private var lastMarkerCaretFrame: CGRect?
     private var lastMarkerDebugSignature: String?
@@ -335,6 +338,7 @@ final class FloatingHelperController {
         selectionSignatureSince = nil
         lastFocusSurfaceSignature = nil
         hoveredIssueID = nil
+        hoveredIssueIDs = []
         lastActivityAt = Date()
         cancelScheduledVisibilityDrop()
         hideFloatingHelperImmediately()
@@ -550,6 +554,7 @@ final class FloatingHelperController {
                 latestIssueRange = nil
                 latestIssues = []
                 hoveredIssueID = nil
+                hoveredIssueIDs = []
                 lastCheckedValueSegment = nil
                 lastSignature = nil
                 updateRingColor()
@@ -662,6 +667,7 @@ final class FloatingHelperController {
                     latestIssueRange = nil
                     latestIssues = []
                     hoveredIssueID = nil
+                    hoveredIssueIDs = []
                     latestSuggestion = ""
                     latestSuggestionOptions = []
                     latestContext = nil
@@ -850,6 +856,7 @@ final class FloatingHelperController {
         latestIssueRange = nil
         latestIssues = []
         hoveredIssueID = nil
+        hoveredIssueIDs = []
         lastMarkerFieldFrame = nil
         lastMarkerCaretFrame = nil
         issuePanelLayouts = []
@@ -872,6 +879,7 @@ final class FloatingHelperController {
         latestIssueRange = nil
         latestIssues = []
         hoveredIssueID = nil
+        hoveredIssueIDs = []
         lastCheckedValueSegment = nil
         suggestionState = .neutral
         issuePanelLayouts = []
@@ -909,6 +917,7 @@ final class FloatingHelperController {
         latestIssueRange = nil
         latestIssues = []
         hoveredIssueID = nil
+        hoveredIssueIDs = []
         updateRingColor()
         hideMarkerAndCard()
     }
@@ -960,6 +969,7 @@ final class FloatingHelperController {
                 latestIssueRange = nil
                 latestIssues = []
                 hoveredIssueID = nil
+                hoveredIssueIDs = []
                 return
             }
             // Break the full focused text into every meaningful segment
@@ -976,6 +986,7 @@ final class FloatingHelperController {
                 latestIssueRange = nil
                 latestIssues = []
                 hoveredIssueID = nil
+                hoveredIssueIDs = []
                 updateRingColor()
                 return
             }
@@ -1046,6 +1057,7 @@ final class FloatingHelperController {
                 latestIssueRange = primary.localRange
                 latestIssues = aggregatedIssues
                 hoveredIssueID = nil
+                hoveredIssueIDs = []
                 latestSignature = self.lastSignature
                 updateRingColor()
                 return
@@ -1086,6 +1098,7 @@ final class FloatingHelperController {
                 latestIssueRange = activeResult.issueLocalRange
                 latestIssues = activeResult.issues
                 hoveredIssueID = nil
+                hoveredIssueIDs = []
                 latestSignature = self.lastSignature
                 updateRingColor()
                 return
@@ -1106,6 +1119,7 @@ final class FloatingHelperController {
             latestIssueRange = nil
             latestIssues = []
             hoveredIssueID = nil
+            hoveredIssueIDs = []
             updateRingColor()
         }
     }
@@ -2891,9 +2905,11 @@ final class FloatingHelperController {
             let frame: CGRect
             let colors: [Color]
             let issueID: UUID?
+            let issueIDs: [UUID]
             let geometry: String
             let source: String
             let style: FloatingIssueMarkerStyle
+            let lineFrame: CGRect
         }
         var jobs: [UnderlineJob] = []
         if !latestIssues.isEmpty {
@@ -2979,9 +2995,11 @@ final class FloatingHelperController {
                             frame: frame,
                             colors: [issueColor],
                             issueID: issue.id,
+                            issueIDs: [issue.id],
                             geometry: geometry,
                             source: selectedSource,
-                            style: markerStyle
+                            style: markerStyle,
+                            lineFrame: fallbackContext.frame.isEmpty ? frame : fallbackContext.frame
                         )
                     )
                 }
@@ -3060,9 +3078,11 @@ final class FloatingHelperController {
                         frame: frame,
                         colors: colors,
                         issueID: nil,
+                        issueIDs: [],
                         geometry: geometry,
                         source: selectedSource,
-                        style: markerStyle
+                        style: markerStyle,
+                        lineFrame: context.frame.isEmpty ? frame : context.frame
                     )
                 )
             }
@@ -3070,6 +3090,58 @@ final class FloatingHelperController {
         guard !jobs.isEmpty else {
             hideMarkerAndCard()
             return
+        }
+        if shouldGroupCompactLineMarkers(for: context) {
+            var grouped: [UnderlineJob] = []
+            var compactGroups: [(key: Int, jobs: [UnderlineJob])] = []
+            for job in jobs {
+                guard job.style == .compactDot, !job.issueIDs.isEmpty else {
+                    grouped.append(job)
+                    continue
+                }
+                let key = Int((job.lineFrame.midY / 8).rounded())
+                if let index = compactGroups.firstIndex(where: { $0.key == key }) {
+                    compactGroups[index].jobs.append(job)
+                } else {
+                    compactGroups.append((key, [job]))
+                }
+            }
+            for group in compactGroups {
+                guard let first = group.jobs.first else { continue }
+                let lineFrame = group.jobs
+                    .map(\.lineFrame)
+                    .filter { !$0.isEmpty }
+                    .reduce(first.lineFrame.isEmpty ? first.frame : first.lineFrame) { $0.union($1) }
+                let markerSide: CGFloat = 10
+                let frame = clampedToVisibleScreens(
+                    CGRect(
+                        x: lineFrame.minX + 8,
+                        y: lineFrame.minY + max(0, (lineFrame.height - markerSide) * 0.5),
+                        width: markerSide,
+                        height: markerSide
+                    )
+                )
+                let issueIDs = uniqueIssueIDs(group.jobs.flatMap(\.issueIDs))
+                let colors = group.jobs.flatMap(\.colors)
+                grouped.append(
+                    UnderlineJob(
+                        frame: frame,
+                        colors: colors.isEmpty ? first.colors : colors,
+                        issueID: issueIDs.first,
+                        issueIDs: issueIDs,
+                        geometry: first.geometry,
+                        source: first.source,
+                        style: .compactDot,
+                        lineFrame: lineFrame
+                    )
+                )
+            }
+            jobs = grouped.sorted { lhs, rhs in
+                if abs(lhs.frame.midY - rhs.frame.midY) > 2 {
+                    return lhs.frame.midY > rhs.frame.midY
+                }
+                return lhs.frame.minX < rhs.frame.minX
+            }
         }
 
         let allFrames = jobs.map(\.frame)
@@ -3092,7 +3164,7 @@ final class FloatingHelperController {
             if let host = overlayPanel.contentView as? NSHostingView<FloatingIssueUnderlineView> {
                 host.rootView = FloatingIssueUnderlineView(
                     colors: job.colors,
-                    isHighlighted: job.issueID != nil && job.issueID == hoveredIssueID,
+                    isHighlighted: isLayoutHighlighted(issueID: job.issueID, issueIDs: job.issueIDs),
                     style: job.style
                 )
             }
@@ -3109,7 +3181,15 @@ final class FloatingHelperController {
             if !hitWasVisible {
                 hitPanel.orderFrontRegardless()
             }
-            newLayouts.append(IssuePanelLayout(panelIndex: index, frame: job.frame, issueID: job.issueID, style: job.style))
+            newLayouts.append(
+                IssuePanelLayout(
+                    panelIndex: index,
+                    frame: job.frame,
+                    issueID: job.issueID,
+                    issueIDs: job.issueIDs,
+                    style: job.style
+                )
+            )
         }
         // Hide any panels left over from a previous render with more
         // jobs than this one.
@@ -3133,6 +3213,20 @@ final class FloatingHelperController {
         latestIssues
     }
 
+    private func shouldGroupCompactLineMarkers(for context: TextAccessService.FocusedTextContext) -> Bool {
+        isSlackBundle(context.targetBundleID) || isBrowserBundle(context.targetBundleID)
+    }
+
+    private func uniqueIssueIDs(_ ids: [UUID]) -> [UUID] {
+        var seen: Set<UUID> = []
+        var result: [UUID] = []
+        for id in ids where !seen.contains(id) {
+            seen.insert(id)
+            result.append(id)
+        }
+        return result
+    }
+
     private func refreshIssueUnderlineHighlight() {
         for layout in issuePanelLayouts {
             let overlayPanel = issueOverlayPanel(at: layout.panelIndex)
@@ -3145,10 +3239,17 @@ final class FloatingHelperController {
             let colors = issueColor.map { [$0] } ?? issueOverlayColors()
             host.rootView = FloatingIssueUnderlineView(
                 colors: colors,
-                isHighlighted: layout.issueID != nil && layout.issueID == hoveredIssueID,
+                isHighlighted: isLayoutHighlighted(issueID: layout.issueID, issueIDs: layout.issueIDs),
                 style: layout.style
             )
         }
+    }
+
+    private func isLayoutHighlighted(issueID: UUID?, issueIDs: [UUID]) -> Bool {
+        if let issueID, issueID == hoveredIssueID {
+            return true
+        }
+        return !hoveredIssueIDs.isDisjoint(with: Set(issueIDs))
     }
 
     private func shouldUseScopedOverlayGeometry(
@@ -3168,20 +3269,20 @@ final class FloatingHelperController {
         return false
     }
 
-    /// Returns the issue (if any) whose underline panel covers `point`
+    /// Returns the issues (if any) whose underline panel covers `point`
     /// in screen coordinates. Used by the per-issue hover hit-test —
     /// when the mouse moves over the marker panel we look up which
     /// underline it actually sits over and show that issue's card.
-    private func issue(atScreenPoint point: CGPoint) -> OverlayIssue? {
+    private func issues(atScreenPoint point: CGPoint) -> [OverlayIssue] {
         for layout in issuePanelLayouts {
             let hit = markerHitFrame(forSingleUnderline: layout.frame)
             guard hit.contains(point) else { continue }
-            guard let issueID = layout.issueID else { continue }
-            if let match = latestIssues.first(where: { $0.id == issueID }) {
-                return match
-            }
+            let ids = layout.issueIDs.isEmpty
+                ? layout.issueID.map { [$0] } ?? []
+                : layout.issueIDs
+            return ids.compactMap { id in latestIssues.first(where: { $0.id == id }) }
         }
-        return nil
+        return []
     }
 
     private func postMarkerGeometryStatus(
@@ -3245,7 +3346,8 @@ final class FloatingHelperController {
         if isSlackBundle(context.targetBundleID) {
             return .compactDot
         }
-        if selectedSource == "hostFallbackFrame" || selectedSource == "axRawOrFallback" {
+        if isBrowserBundle(context.targetBundleID),
+           (selectedSource == "hostFallbackFrame" || selectedSource == "axRawOrFallback" || selectedSource == "hostEstimated") {
             return .compactDot
         }
         return .underline
@@ -4316,14 +4418,18 @@ final class FloatingHelperController {
             cancelScheduledHoverHide()
             return
         }
-        let issueUnderMouse = issue(atScreenPoint: NSEvent.mouseLocation)
-        if !latestIssues.isEmpty, issueUnderMouse == nil {
+        let issuesUnderMouse = issues(atScreenPoint: NSEvent.mouseLocation)
+        if !latestIssues.isEmpty, issuesUnderMouse.isEmpty {
             return
         }
-        let nextID = issueUnderMouse?.id ?? primaryIssue(in: latestIssues)?.id
-        guard nextID != hoveredIssueID else { return }
+        let nextIDs = Set(issuesUnderMouse.map(\.id))
+        guard nextIDs != hoveredIssueIDs else { return }
         cancelScheduledHoverHide()
-        showHoverCard(for: issueUnderMouse ?? primaryIssue(in: latestIssues))
+        if issuesUnderMouse.isEmpty, let primary = primaryIssue(in: latestIssues) {
+            showHoverCard(for: [primary])
+        } else {
+            showHoverCard(for: issuesUnderMouse)
+        }
     }
 
     private func handleHoverCardHover(_ isHovering: Bool) {
@@ -4346,51 +4452,69 @@ final class FloatingHelperController {
         // legacy `latestSuggestionOptions` list when no audited issues
         // exist for this segment at all.
         let mouseScreen = NSEvent.mouseLocation
-        let issueUnderMouse = issue(atScreenPoint: mouseScreen)
-        if !latestIssues.isEmpty, issueUnderMouse == nil {
+        let issuesUnderMouse = issues(atScreenPoint: mouseScreen)
+        if !latestIssues.isEmpty, issuesUnderMouse.isEmpty {
             return
         }
-        let resolved = issueUnderMouse ?? primaryIssue(in: latestIssues)
-        showHoverCard(for: resolved)
+        if issuesUnderMouse.isEmpty, let primary = primaryIssue(in: latestIssues) {
+            showHoverCard(for: [primary])
+        } else {
+            showHoverCard(for: issuesUnderMouse)
+        }
     }
 
     private func showHoverCard(for issue: OverlayIssue?) {
+        showHoverCard(for: issue.map { [$0] } ?? [])
+    }
+
+    private func showHoverCard(for issues: [OverlayIssue]) {
         let segmentText = latestContext?.text ?? ""
         let cardSuggestions: [OverlaySuggestion]
         let anchorFrame: CGRect
-        let cardIssueID: UUID?
-        if let issue, !segmentText.isEmpty {
-            cardSuggestions = [
+        let cardIssueIDs: [UUID]
+        let suggestionIssueIDs: [String: UUID]
+        if !issues.isEmpty, !segmentText.isEmpty {
+            cardSuggestions = issues.map { issue in
                 OverlaySuggestion(
                     operation: issue.category,
                     text: applyIssueToSegment(segmentText, issue: issue)
                 )
-            ]
-            anchorFrame = issuePanelLayouts.first(where: { $0.issueID == issue.id })?.frame
+            }
+            cardIssueIDs = issues.map(\.id)
+            var issueIDsBySuggestion: [String: UUID] = [:]
+            for (suggestion, issue) in zip(cardSuggestions, issues) {
+                issueIDsBySuggestion[hoverSuggestionKey(suggestion)] = issue.id
+            }
+            suggestionIssueIDs = issueIDsBySuggestion
+            let cardIssueIDSet = Set(cardIssueIDs)
+            anchorFrame = issuePanelLayouts.first(where: { layout in
+                !cardIssueIDSet.isDisjoint(with: Set(layout.issueIDs))
+                    || layout.issueID.map { cardIssueIDSet.contains($0) } == true
+            })?.frame
                 ?? markerPanel?.frame
                 ?? .zero
-            cardIssueID = issue.id
         } else {
             cardSuggestions = latestSuggestionOptions.isEmpty
                 ? [OverlaySuggestion(operation: .fixGrammar, text: latestSuggestion)]
                 : latestSuggestionOptions
             anchorFrame = markerPanel?.frame ?? .zero
-            cardIssueID = nil
+            cardIssueIDs = []
+            suggestionIssueIDs = [:]
         }
         guard !cardSuggestions.isEmpty, latestContext != nil else { return }
         guard anchorFrame != .zero else { return }
-        hoveredIssueID = cardIssueID
+        hoveredIssueID = cardIssueIDs.first
+        hoveredIssueIDs = Set(cardIssueIDs)
         refreshIssueUnderlineHighlight()
         // Capture the issue ID so the apply closure routes the user's
         // click to the partial-apply path. Falls back to the legacy
         // full-suggestion apply when the card is not bound to a
         // specific issue.
-        let applyIssueID = cardIssueID
-        let skipHandler: ((OverlaySuggestion) -> Void)? = applyIssueID.map { id in
-            { [weak self] _ in
-                self?.skipIssue(withID: id)
-            }
-        }
+        let skipHandler: ((OverlaySuggestion) -> Void)? = !suggestionIssueIDs.isEmpty ? { [weak self] suggestion in
+            guard let self,
+                  let id = suggestionIssueIDs[self.hoverSuggestionKey(suggestion)] else { return }
+            self.skipIssue(withID: id)
+        } : nil
         if hoverCardPanel == nil {
             let host = NSHostingView(
                 rootView: HoverSuggestionCardView(
@@ -4398,7 +4522,11 @@ final class FloatingHelperController {
                     suggestions: cardSuggestions,
                     anchorSource: markerAnchor.rawValue,
                     onApply: { [weak self] suggestion in
-                        self?.applyFromHoverCard(suggestion.text, issueID: applyIssueID)
+                        guard let self else { return }
+                        self.applyFromHoverCard(
+                            suggestion.text,
+                            issueID: suggestionIssueIDs[self.hoverSuggestionKey(suggestion)]
+                        )
                     },
                     onHoverChanged: { [weak self] isHovering in
                         self?.handleHoverCardHover(isHovering)
@@ -4427,7 +4555,11 @@ final class FloatingHelperController {
                 suggestions: cardSuggestions,
                 anchorSource: markerAnchor.rawValue,
                 onApply: { [weak self] suggestion in
-                    self?.applyFromHoverCard(suggestion.text, issueID: applyIssueID)
+                    guard let self else { return }
+                    self.applyFromHoverCard(
+                        suggestion.text,
+                        issueID: suggestionIssueIDs[self.hoverSuggestionKey(suggestion)]
+                    )
                 },
                 onHoverChanged: { [weak self] isHovering in
                     self?.handleHoverCardHover(isHovering)
@@ -4438,6 +4570,10 @@ final class FloatingHelperController {
         updateHoverCardFrame(for: cardSuggestions, anchorFrame: anchorFrame)
         hoverCardPanel?.orderFrontRegardless()
         keepMarkerPanelBehindHoverCardIfNeeded()
+    }
+
+    private func hoverSuggestionKey(_ suggestion: OverlaySuggestion) -> String {
+        "\(suggestion.operation.rawValue)|\(suggestion.text)"
     }
 
     private func isMouseInsideHoverCard() -> Bool {
@@ -4472,8 +4608,8 @@ final class FloatingHelperController {
     }
 
     private func hoverCardHeight(for suggestions: [OverlaySuggestion]) -> CGFloat {
-        let count = max(1, min(4, suggestions.count))
-        let listHeight = min(CGFloat(count) * 112, 390)
+        let count = max(1, min(12, suggestions.count))
+        let listHeight = min(CGFloat(count) * 112, 430)
         return CGFloat(66 + listHeight)
     }
 
@@ -4520,6 +4656,7 @@ final class FloatingHelperController {
         let remaining = latestIssues.filter { $0.id != skipped.id }
         latestIssues = remaining
         hoveredIssueID = nil
+        hoveredIssueIDs.remove(skipped.id)
         if remaining.isEmpty {
             suggestionState = .looksGood
             latestSuggestion = ""
@@ -4674,6 +4811,14 @@ final class FloatingHelperController {
             + "preferredLocal=\(preferredLocalRange.map { "\($0.location):\($0.length)" } ?? "nil")"
         )
 
+        if let issueID {
+            pendingHoverCardIssueIDsAfterApply = hoveredIssueIDs
+                .filter { $0 != issueID }
+                .map { $0 }
+        } else {
+            pendingHoverCardIssueIDsAfterApply = []
+        }
+
         // Hide panels FIRST so AX focus can return to the original text field.
         hideMarkerAndCard()
 
@@ -4741,6 +4886,7 @@ final class FloatingHelperController {
         localBatchMutationGraceUntil = Date().addingTimeInterval(2.0)
 
         guard let appliedIssue else {
+            pendingHoverCardIssueIDsAfterApply = []
             rememberAppliedRewrite(original: appliedSegmentText, rewritten: rewrittenSegmentText)
             suggestionState = .looksGood
             latestSuggestion = ""
@@ -4749,6 +4895,7 @@ final class FloatingHelperController {
             latestIssueRange = nil
             latestIssues = []
             hoveredIssueID = nil
+            hoveredIssueIDs = []
             updateRingColor()
             scheduleSegmentRecheckAfterApply()
             return
@@ -4784,6 +4931,7 @@ final class FloatingHelperController {
         )
 
         guard !remaining.isEmpty, let primary = primaryIssue(in: remaining) else {
+            pendingHoverCardIssueIDsAfterApply = []
             suggestionState = .looksGood
             latestSuggestion = ""
             latestSuggestionOptions = []
@@ -4791,6 +4939,7 @@ final class FloatingHelperController {
             latestIssueRange = nil
             latestIssues = []
             hoveredIssueID = nil
+            hoveredIssueIDs = []
             updateRingColor()
             scheduleSegmentRecheckAfterApply()
             return
@@ -4810,6 +4959,7 @@ final class FloatingHelperController {
         latestContext = updatedContext
         latestIssues = remaining
         hoveredIssueID = nil
+        hoveredIssueIDs = []
         latestSuggestion = applyIssueToSegment(updatedText, issue: primary)
         latestSuggestionOptions = overlaySuggestions(for: remaining, in: updatedText)
         latestIssueRange = primary.localRange
@@ -4817,6 +4967,18 @@ final class FloatingHelperController {
         updateRingColor()
         if let frame = lastFrameSnapshot() {
             updateMarker(caretFrame: lastMarkerCaretFrame, fieldFrame: frame, anchor: markerAnchor)
+        }
+        reopenPendingHoverCardIfNeeded()
+    }
+
+    private func reopenPendingHoverCardIfNeeded() {
+        guard !pendingHoverCardIssueIDsAfterApply.isEmpty else { return }
+        let ids = pendingHoverCardIssueIDsAfterApply
+        pendingHoverCardIssueIDsAfterApply = []
+        let remaining = ids.compactMap { id in latestIssues.first(where: { $0.id == id }) }
+        guard !remaining.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.showHoverCard(for: remaining)
         }
     }
 

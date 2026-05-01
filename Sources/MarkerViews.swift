@@ -164,10 +164,10 @@ struct HoverSuggestionCardView: View {
                             .fill((anchorSource == "caret" ? Color.green : Color.orange).opacity(0.13))
                     )
             }
-            let visibleSuggestions = Array(suggestions.prefix(4))
+            let visibleSuggestions = Array(suggestions.prefix(12))
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(visibleSuggestions) { suggestion in
+                    ForEach(Array(visibleSuggestions.enumerated()), id: \.offset) { index, suggestion in
                         SuggestionSectionView(
                             original: originalText,
                             suggestion: suggestion,
@@ -175,7 +175,7 @@ struct HoverSuggestionCardView: View {
                             onApply: { onApply(suggestion) },
                             onSkip: onSkip.map { skip in { skip(suggestion) } }
                         )
-                        if suggestion.id != visibleSuggestions.last?.id {
+                        if index != visibleSuggestions.indices.last {
                             Divider().overlay(Color.white.opacity(0.08))
                         }
                     }
@@ -220,7 +220,7 @@ struct HoverSuggestionCardView: View {
     }
 
     private func suggestionListHeight(count: Int) -> CGFloat {
-        min(CGFloat(max(1, count)) * 112, 390)
+        min(CGFloat(max(1, count)) * 112, 430)
     }
 }
 
