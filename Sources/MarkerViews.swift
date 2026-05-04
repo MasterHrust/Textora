@@ -52,26 +52,41 @@ struct FloatingIssueUnderlineView: View {
                         )
                 }
             case .compactDot:
+                let side = min(proxy.size.width, proxy.size.height, isHighlighted ? 16 : 14)
+                let lineWidth: CGFloat = isHighlighted ? 3.8 : 3.2
+                let segmentColors = activeColors.isEmpty ? TextoraSuggestionColors.brandGradient : activeColors
                 ZStack {
                     Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: activeColors,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
+                        .stroke(Color.black.opacity(0.22), lineWidth: lineWidth + 1.6)
+                        .frame(width: side, height: side)
+
+                    ForEach(segmentColors.indices, id: \.self) { index in
+                        Circle()
+                            .trim(
+                                from: CGFloat(index) / CGFloat(segmentColors.count),
+                                to: CGFloat(index + 1) / CGFloat(segmentColors.count)
                             )
-                        )
-                        .frame(
-                            width: min(proxy.size.width, isHighlighted ? 12 : 9),
-                            height: min(proxy.size.height, isHighlighted ? 12 : 9)
-                        )
-                        .shadow(
-                            color: activeColors[0].opacity(isHighlighted ? 0.46 : 0.32),
-                            radius: isHighlighted ? 3.2 : 1.8,
-                            x: 0,
-                            y: 0.8
-                        )
+                            .stroke(
+                                segmentColors[index],
+                                style: StrokeStyle(
+                                    lineWidth: lineWidth,
+                                    lineCap: segmentColors.count == 1 ? .round : .butt
+                                )
+                            )
+                            .rotationEffect(.degrees(-90))
+                            .frame(width: side, height: side)
+                    }
+
+                    Circle()
+                        .stroke(Color.white.opacity(isHighlighted ? 0.42 : 0.26), lineWidth: 0.7)
+                        .frame(width: max(2, side - lineWidth), height: max(2, side - lineWidth))
                 }
+                .shadow(
+                    color: activeColors[0].opacity(isHighlighted ? 0.50 : 0.34),
+                    radius: isHighlighted ? 4.2 : 2.4,
+                    x: 0,
+                    y: 1.1
+                )
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
             }
         }

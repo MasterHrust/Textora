@@ -1556,6 +1556,7 @@ final class TextAccessService {
         )
 
         let isElectronLikeHost = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
+        let canUseReconstructedFallback = prefersAtomicClipboardRangePaste(for: context)
 
         if let preferredLocalRange,
            let patch = localizedPatch(
@@ -1592,21 +1593,12 @@ final class TextAccessService {
                 if ok { return .success }
             }
 
-            // Electron/webview composers (Slack, Teams, Discord, Telegram,
-            // …) expose an AX NSString that includes hidden soft-breaks
-            // between DOM nodes, so our absolute offsets disagree with the
-            // composer's keystroke-navigable offsets by a few characters.
-            // Empirically ALL of our range-based fallbacks
-            // (clipboardRangePaste / keystrokeRangePaste /
-            // caretAnchoredRangePaste) produce the exact same shifted
-            // result — the drift is in the coordinate system itself, not
-            // in the strategy. Running the full chain just burns 3 paste +
-            // 3 undo cycles before arriving at the reconstructed full
-            // paste anyway. So for these hosts we go straight from a
-            // single failed targeted paste to the only strategy that
-            // actually works here: rebuild the full value with the scope
-            // replaced and paste via Cmd+A + Cmd+V.
-            if isElectronLikeHost {
+            // Default path for every host is the localized Telegram/Notes-
+            // style range paste above. If that does not land cleanly, fall
+            // back to the heavier Slack/Chrome-style reconstruction: rebuild
+            // the full field value with this scoped correction and paste it
+            // via Cmd+A + Cmd+V.
+            if canUseReconstructedFallback {
                 // Before pulling the Cmd+A + Cmd+V trigger, make sure we
                 // won't destroy adjacent layout. Slack's Quill composer
                 // (and every Electron composer we've tested) strips rich
@@ -1631,7 +1623,7 @@ final class TextAccessService {
                 let ok = applyReconstructedFullValuePaste(rewritten, basedOn: context)
                 textoraDiagLog(
                     "applyLocalizedRewrite",
-                    "reconstructedFullValuePaste (electron fast-path) result=\(ok)"
+                    "reconstructedFullValuePaste (fallback) result=\(ok)"
                 )
                 return ok ? .success : .failed
             }
@@ -1814,10 +1806,7 @@ final class TextAccessService {
     }
 
     private func prefersAtomicClipboardRangePaste(for context: FocusedTextContext) -> Bool {
-        guard prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) else {
-            return false
-        }
-        return true
+        !context.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func applyClipboardSelectionPasteReplace(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {

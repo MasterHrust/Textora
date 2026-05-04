@@ -3112,17 +3112,17 @@ final class FloatingHelperController {
                     .map(\.lineFrame)
                     .filter { !$0.isEmpty }
                     .reduce(first.lineFrame.isEmpty ? first.frame : first.lineFrame) { $0.union($1) }
-                let markerSide: CGFloat = 10
+                let markerSide: CGFloat = 16
                 let frame = clampedToVisibleScreens(
                     CGRect(
-                        x: lineFrame.minX + 8,
+                        x: lineFrame.minX - markerSide - 7,
                         y: lineFrame.minY + max(0, (lineFrame.height - markerSide) * 0.5),
                         width: markerSide,
                         height: markerSide
                     )
                 )
                 let issueIDs = uniqueIssueIDs(group.jobs.flatMap(\.issueIDs))
-                let colors = group.jobs.flatMap(\.colors)
+                let colors = issueOverlayColors(for: issueIDs)
                 grouped.append(
                     UnderlineJob(
                         frame: frame,
@@ -3214,7 +3214,8 @@ final class FloatingHelperController {
     }
 
     private func shouldGroupCompactLineMarkers(for context: TextAccessService.FocusedTextContext) -> Bool {
-        isSlackBundle(context.targetBundleID) || isBrowserBundle(context.targetBundleID)
+        _ = context
+        return true
     }
 
     private func uniqueIssueIDs(_ ids: [UUID]) -> [UUID] {
@@ -3236,7 +3237,10 @@ final class FloatingHelperController {
             let issueColor = layout.issueID
                 .flatMap { id in latestIssues.first(where: { $0.id == id })?.category }
                 .map { TextoraSuggestionColors.color(for: $0) }
-            let colors = issueColor.map { [$0] } ?? issueOverlayColors()
+            let issueGroupColors = issueOverlayColors(for: layout.issueIDs)
+            let colors = issueGroupColors.isEmpty
+                ? (issueColor.map { [$0] } ?? issueOverlayColors())
+                : issueGroupColors
             host.rootView = FloatingIssueUnderlineView(
                 colors: colors,
                 isHighlighted: isLayoutHighlighted(issueID: layout.issueID, issueIDs: layout.issueIDs),
@@ -3324,14 +3328,11 @@ final class FloatingHelperController {
         issueFallback: CGRect,
         preciseFrames: [CGRect]?
     ) -> Bool {
-        if isSlackBundle(context.targetBundleID) {
-            return true
-        }
-        guard isBrowserBundle(context.targetBundleID) else {
+        if preciseFrames != nil {
             return false
         }
-        if preciseFrames == nil {
-            return true
+        guard isBrowserBundle(context.targetBundleID) else {
+            return isSlackBundle(context.targetBundleID)
         }
         return context.anchor.source == .axElementFrame
             || context.frame.height > 44
@@ -3343,11 +3344,10 @@ final class FloatingHelperController {
         selectedSource: String,
         context: TextAccessService.FocusedTextContext
     ) -> FloatingIssueMarkerStyle {
-        if isSlackBundle(context.targetBundleID) {
-            return .compactDot
-        }
-        if isBrowserBundle(context.targetBundleID),
-           (selectedSource == "hostFallbackFrame" || selectedSource == "axRawOrFallback" || selectedSource == "hostEstimated") {
+        _ = context
+        if selectedSource == "hostFallbackFrame"
+            || selectedSource == "axRawOrFallback"
+            || selectedSource == "hostEstimated" {
             return .compactDot
         }
         return .underline
@@ -3442,10 +3442,10 @@ final class FloatingHelperController {
     private func normalizedCompactIssueOverlayFrame(for bounds: CGRect, fallback: CGRect) -> CGRect {
         let source = bounds.isEmpty ? fallback : bounds
         guard !source.isEmpty else { return .zero }
-        let side: CGFloat = 10
+        let side: CGFloat = 16
         let frame = CGRect(
-            x: source.minX - side * 0.35,
-            y: source.minY - 1,
+            x: source.minX - side - 7,
+            y: source.minY + max(0, (source.height - side) * 0.5),
             width: side,
             height: side
         )
@@ -4402,11 +4402,14 @@ final class FloatingHelperController {
         isMarkerHovered = isHovering
         if isHovering {
             cancelScheduledHoverHide()
-            if isMouseInsideHoverCard() {
+            if !issues(atScreenPoint: NSEvent.mouseLocation).isEmpty {
+                showHoverCard()
+            } else if isMouseInsideHoverCard() {
                 isHoverCardHovered = true
                 return
+            } else {
+                showHoverCard()
             }
-            showHoverCard()
         } else {
             scheduleHoverHideIfNeeded()
         }
@@ -4414,11 +4417,11 @@ final class FloatingHelperController {
 
     private func handleMarkerHoverMoved() {
         guard isMarkerHovered || hoverCardPanel?.isVisible == true else { return }
-        if isMouseInsideHoverCard() || isHoverCardHovered {
+        let issuesUnderMouse = issues(atScreenPoint: NSEvent.mouseLocation)
+        if issuesUnderMouse.isEmpty, isMouseInsideHoverCard() || isHoverCardHovered {
             cancelScheduledHoverHide()
             return
         }
-        let issuesUnderMouse = issues(atScreenPoint: NSEvent.mouseLocation)
         if !latestIssues.isEmpty, issuesUnderMouse.isEmpty {
             return
         }
@@ -4442,10 +4445,6 @@ final class FloatingHelperController {
     }
 
     private func showHoverCard() {
-        if isMouseInsideHoverCard(), hoverCardPanel?.isVisible == true {
-            cancelScheduledHoverHide()
-            return
-        }
         // Per-issue hit test: if the cursor is over a specific
         // underline, show only that issue's suggestion. Otherwise fall
         // back to the primary (highest-priority) issue, or to the
@@ -4453,6 +4452,10 @@ final class FloatingHelperController {
         // exist for this segment at all.
         let mouseScreen = NSEvent.mouseLocation
         let issuesUnderMouse = issues(atScreenPoint: mouseScreen)
+        if issuesUnderMouse.isEmpty, isMouseInsideHoverCard(), hoverCardPanel?.isVisible == true {
+            cancelScheduledHoverHide()
+            return
+        }
         if !latestIssues.isEmpty, issuesUnderMouse.isEmpty {
             return
         }
@@ -5105,6 +5108,19 @@ final class FloatingHelperController {
     private func issueOverlayColors() -> [Color] {
         let colors = suggestionOperationColors()
         return colors.count == 1 ? colors : TextoraSuggestionColors.brandGradient
+    }
+
+    private func issueOverlayColors(for issueIDs: [UUID]) -> [Color] {
+        var seen = Set<String>()
+        var colors: [Color] = []
+        for id in issueIDs {
+            guard let category = latestIssues.first(where: { $0.id == id })?.category else { continue }
+            let key = category.rawValue
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            colors.append(TextoraSuggestionColors.color(for: category))
+        }
+        return colors
     }
 
     private func suggestionOperationColors() -> [Color] {
