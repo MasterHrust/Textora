@@ -9,15 +9,18 @@ struct FloatingIssueUnderlineView: View {
     let colors: [Color]
     let isHighlighted: Bool
     let style: FloatingIssueMarkerStyle
+    let isLoading: Bool
 
     init(
         colors: [Color] = TextoraSuggestionColors.brandGradient,
         isHighlighted: Bool = false,
-        style: FloatingIssueMarkerStyle = .underline
+        style: FloatingIssueMarkerStyle = .underline,
+        isLoading: Bool = false
     ) {
         self.colors = colors.isEmpty ? TextoraSuggestionColors.brandGradient : colors
         self.isHighlighted = isHighlighted
         self.style = style
+        self.isLoading = isLoading
     }
 
     var body: some View {
@@ -60,21 +63,37 @@ struct FloatingIssueUnderlineView: View {
                         .stroke(Color.black.opacity(0.22), lineWidth: lineWidth + 1.6)
                         .frame(width: side, height: side)
 
-                    ForEach(segmentColors.indices, id: \.self) { index in
-                        Circle()
-                            .trim(
-                                from: CGFloat(index) / CGFloat(segmentColors.count),
-                                to: CGFloat(index + 1) / CGFloat(segmentColors.count)
-                            )
-                            .stroke(
-                                segmentColors[index],
-                                style: StrokeStyle(
-                                    lineWidth: lineWidth,
-                                    lineCap: segmentColors.count == 1 ? .round : .butt
+                    if isLoading {
+                        TimelineView(.animation(minimumInterval: 1.0 / 45.0, paused: false)) { context in
+                            let cycle: TimeInterval = 0.75
+                            let t = context.date.timeIntervalSinceReferenceDate
+                            let phase = (t.truncatingRemainder(dividingBy: cycle) / cycle) * 360.0
+                            Circle()
+                                .trim(from: 0.15, to: 0.9)
+                                .stroke(
+                                    segmentColors.first ?? .gray,
+                                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                                 )
-                            )
-                            .rotationEffect(.degrees(-90))
-                            .frame(width: side, height: side)
+                                .rotationEffect(.degrees(phase))
+                                .frame(width: side, height: side)
+                        }
+                    } else {
+                        ForEach(segmentColors.indices, id: \.self) { index in
+                            Circle()
+                                .trim(
+                                    from: CGFloat(index) / CGFloat(segmentColors.count),
+                                    to: CGFloat(index + 1) / CGFloat(segmentColors.count)
+                                )
+                                .stroke(
+                                    segmentColors[index],
+                                    style: StrokeStyle(
+                                        lineWidth: lineWidth,
+                                        lineCap: segmentColors.count == 1 ? .round : .butt
+                                    )
+                                )
+                                .rotationEffect(.degrees(-90))
+                                .frame(width: side, height: side)
+                        }
                     }
 
                     Circle()
@@ -144,6 +163,7 @@ struct HoverSuggestionCardView: View {
     let anchorSource: String
     let onApply: (OverlaySuggestion) -> Void
     let onHoverChanged: (Bool) -> Void
+    let showsDiffPreview: Bool
     /// Optional dismiss action. Non-nil when the card is bound to a
     /// specific `OverlayIssue` — gives the user a "not here, not now"
     /// escape hatch so one unwanted suggestion never blocks the rest
@@ -188,7 +208,8 @@ struct HoverSuggestionCardView: View {
                             suggestion: suggestion,
                             color: labelColor(for: suggestion.operation),
                             onApply: { onApply(suggestion) },
-                            onSkip: onSkip.map { skip in { skip(suggestion) } }
+                            onSkip: onSkip.map { skip in { skip(suggestion) } },
+                            showsDiffPreview: showsDiffPreview
                         )
                         if index != visibleSuggestions.indices.last {
                             Divider().overlay(Color.white.opacity(0.08))
@@ -250,6 +271,7 @@ private struct SuggestionSectionView: View {
     /// tap gesture so the user does not accidentally apply the
     /// suggestion they meant to skip.
     var onSkip: (() -> Void)? = nil
+    var showsDiffPreview: Bool = true
 
     @State private var isHovered = false
     @State private var isSkipHovered = false
@@ -292,10 +314,18 @@ private struct SuggestionSectionView: View {
                     .help("Dismiss this suggestion for the current sentence")
                 }
             }
-            DiffPreviewView(
-                original: original,
-                suggestion: suggestion.text
-            )
+            if showsDiffPreview {
+                DiffPreviewView(
+                    original: original,
+                    suggestion: suggestion.text
+                )
+            } else {
+                Text(displaySuggestion(suggestion.text))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
@@ -314,6 +344,11 @@ private struct SuggestionSectionView: View {
         .onHover { hovering in
             isHovered = hovering
         }
+    }
+
+    private func displaySuggestion(_ text: String) -> String {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? " " : cleaned
     }
 }
 

@@ -43,6 +43,9 @@ struct ContentView: View {
                 }
                 providerSetupHelp
 
+                Toggle("Detailed corrections", isOn: $viewModel.detailedCorrectionsEnabled)
+                    .toggleStyle(.checkbox)
+
                 Button("Save settings") {
                     viewModel.saveSettings()
                 }
@@ -133,6 +136,7 @@ struct ContentView: View {
         .onChange(of: viewModel.claudeKey) { _, _ in viewModel.debouncedSave() }
         .onChange(of: viewModel.customToken) { _, _ in viewModel.debouncedSave() }
         .onChange(of: viewModel.customOpenAIBaseURL) { _, _ in viewModel.debouncedSave() }
+        .onChange(of: viewModel.detailedCorrectionsEnabled) { _, _ in viewModel.debouncedSave() }
     }
 
     private var donateSection: some View {

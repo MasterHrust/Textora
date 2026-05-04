@@ -3,6 +3,10 @@ import Foundation
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    enum SettingsKeys {
+        static let detailedCorrectionsEnabled = "overlay.detailedCorrections.enabled"
+    }
+
     private enum OnboardingDefaults {
         static let completedKey = "onboarding.byok.completed"
         static let skippedKey = "onboarding.byok.skipped"
@@ -35,6 +39,7 @@ final class AppViewModel: ObservableObject {
     @Published var customOpenAIBaseURL: String = ""
     @Published var appConsentRows: [AppConsentRow] = []
     @Published var hasAccessibilityPermission: Bool = false
+    @Published var detailedCorrectionsEnabled: Bool = false
     @Published var onboardingStep: Int = 1
     @Published var onboardingErrorText: String = ""
     @Published var isOnboardingBusy: Bool = false
@@ -61,6 +66,7 @@ final class AppViewModel: ObservableObject {
         claudeKey = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
         customToken = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
         customOpenAIBaseURL = UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? ""
+        detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
     }
@@ -136,6 +142,7 @@ final class AppViewModel: ObservableObject {
             customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
         )
+        UserDefaults.standard.set(detailedCorrectionsEnabled, forKey: SettingsKeys.detailedCorrectionsEnabled)
         KeychainHelper.saveAll(
             openAI: openAIKey,
             gemini: geminiKey,

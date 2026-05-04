@@ -15,6 +15,7 @@ final class DraggableFloatingPanel: NSPanel {
     var onDragEnded: ((CGRect) -> Void)?
     var onClicked: (() -> Void)?
     var onHoverChanged: ((Bool) -> Void)?
+    var allowsDragging = true
     /// Fires at `mouseDown` (before click vs drag is known) so the host can pause auto-layout timers.
     var onLeftMouseSessionBegan: (() -> Void)?
     /// Fires when the tracking loop ends (mouse up, lost events, etc.).
@@ -112,6 +113,7 @@ final class DraggableFloatingPanel: NSPanel {
             super.mouseDragged(with: event)
             return
         }
+        guard allowsDragging else { return }
 
         let currentInWindow = event.locationInWindow
         let moved = hypot(currentInWindow.x - pressLocationInWindow.x, currentInWindow.y - pressLocationInWindow.y)
@@ -146,10 +148,12 @@ final class DraggableFloatingPanel: NSPanel {
         let moved = hypot(currentInWindow.x - pressLocationInWindow.x, currentInWindow.y - pressLocationInWindow.y)
 
         if dragCommitted || moved >= dragThreshold {
-            if !dragCommitted {
-                onDragBegan?()
+            if allowsDragging {
+                if !dragCommitted {
+                    onDragBegan?()
+                }
+                onDragEnded?(frame)
             }
-            onDragEnded?(frame)
         } else {
             if frame != frameAtLeftPress {
                 setFrame(frameAtLeftPress, display: true)

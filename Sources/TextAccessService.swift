@@ -3793,7 +3793,7 @@ end tell
         if isEditable(element: current) {
             return current
         }
-        for _ in 0..<8 {
+        for _ in 0..<24 {
             guard let parent = axElement(of: current, attribute: kAXParentAttribute as String) else { break }
             current = parent
             if isEditable(element: current) {

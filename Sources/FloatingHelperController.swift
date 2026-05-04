@@ -67,6 +67,7 @@ final class FloatingHelperController {
         let issueID: UUID?
         let issueIDs: [UUID]
         let style: FloatingIssueMarkerStyle
+        let isLoading: Bool
     }
     private var issuePanelLayouts: [IssuePanelLayout] = []
     /// Signatures of issues the user explicitly dismissed via "Skip"
@@ -106,6 +107,9 @@ final class FloatingHelperController {
     private var spotlightDismissWorkItem: DispatchWorkItem?
     private var visibilityDropTask: DispatchWorkItem?
     private let visibilityDropDelay: TimeInterval = 0.45
+    private var detailedCorrectionsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.detailedCorrectionsEnabled)
+    }
 
     private struct CorrectionScope {
         let text: String
@@ -368,11 +372,13 @@ final class FloatingHelperController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.alphaValue = 0.82
         panel.level = .screenSaver
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.ignoresMouseEvents = false
+        panel.allowsDragging = false
         panel.contentView = content
         panel.orderOut(nil)
 
@@ -386,20 +392,18 @@ final class FloatingHelperController {
         }
         panel.onDragBegan = { [weak self] in
             guard let self else { return }
-            self.isDragging = true
-            self.floatingPanelNeedsZOrderPass = true
-            self.bringToFrontOrBelowIfNeeded()
+            self.isDragging = false
         }
         panel.onDragMoved = { [weak self] newFrame in
-            self?.lastFrame = newFrame
+            guard let self else { return }
+            self.applyMainBubbleFrameIfChanged(self.pinnedBubbleFrame(fallback: newFrame))
         }
         panel.onDragEnded = { [weak self] finalFrame in
             guard let self else { return }
-            // After user drag, freeze at absolute screen position.
-            self.manualFixedFrame = finalFrame
             self.isManuallyPlacedForCurrentFocus = true
             self.isDragging = false
-            self.postStatus("Helper moved manually")
+            self.applyMainBubbleFrameIfChanged(self.pinnedBubbleFrame(fallback: finalFrame))
+            self.postStatus("Helper is pinned")
         }
 
         self.panel = panel
@@ -565,16 +569,11 @@ final class FloatingHelperController {
                 return
             }
             let nextFrame: CGRect = {
-                if isManuallyPlacedForCurrentFocus, let fixed = manualFixedFrame {
-                    let clamped = clampedToVisibleScreens(fixed)
-                    if clamped != fixed { manualFixedFrame = clamped }
-                    return clamped
-                }
                 let anchorRect = textService.focusedWindowFrame() ?? signal.bounds ?? lastFrame
                 return clampedToVisibleScreens(
                     CGRect(
                         x: anchorRect.maxX - Self.floatingPanelSide - autoGap,
-                        y: anchorRect.minY + autoGap,
+                        y: anchorRect.maxY - Self.floatingPanelSide - autoGap,
                         width: Self.floatingPanelSide,
                         height: Self.floatingPanelSide
                     )
@@ -643,6 +642,8 @@ final class FloatingHelperController {
             // Reset manual offset base to align with editable anchors.
             let baseAnchor = textService.focusedWindowFrame() ?? fieldFrameUnwrapped
             manualOffset = CGPoint(x: lastFrame.minX - baseAnchor.minX, y: lastFrame.minY - baseAnchor.maxY)
+            isManuallyPlacedForCurrentFocus = false
+            manualFixedFrame = nil
         }
         if isDragging {
             bringToFrontOrBelowIfNeeded()
@@ -680,11 +681,6 @@ final class FloatingHelperController {
 
         let caretFrame = textService.focusedCaretFrame()
         let nextFrame: CGRect = {
-            if isManuallyPlacedForCurrentFocus, let fixed = manualFixedFrame {
-                let clamped = clampedToVisibleScreens(fixed)
-                if clamped != fixed { manualFixedFrame = clamped }
-                return clamped
-            }
             return computeAutoBubbleFrame(
                 fieldFrame: fieldFrameUnwrapped,
                 windowFrame: fallbackAnchorFrame,
@@ -741,14 +737,26 @@ final class FloatingHelperController {
         let bubbleH = Self.floatingPanelSide
         _ = caretFrame
         let anchor = windowFrame ?? fieldFrame
-        // Stable auto-mode: bottom-right corner of active window, falling back to field bounds.
+        // Stable auto-mode: top-right corner of active window, falling back to field bounds.
         let target = CGRect(
             x: anchor.maxX - bubbleW - autoGap,
-            y: anchor.minY + autoGap,
+            y: anchor.maxY - bubbleH - autoGap,
             width: bubbleW,
             height: bubbleH
         )
         return clampedToVisibleScreens(target)
+    }
+
+    private func pinnedBubbleFrame(fallback: CGRect) -> CGRect {
+        let anchor = textService.focusedWindowFrame() ?? fallback
+        return clampedToVisibleScreens(
+            CGRect(
+                x: anchor.maxX - Self.floatingPanelSide - autoGap,
+                y: anchor.maxY - Self.floatingPanelSide - autoGap,
+                width: Self.floatingPanelSide,
+                height: Self.floatingPanelSide
+            )
+        )
     }
 
     private func bringToFrontOrBelowIfNeeded() {
@@ -782,7 +790,7 @@ final class FloatingHelperController {
             if let windowFrame {
                 initial = CGRect(
                     x: windowFrame.maxX - Self.floatingPanelSide - autoGap,
-                    y: windowFrame.minY + autoGap,
+                    y: windowFrame.maxY - Self.floatingPanelSide - autoGap,
                     width: Self.floatingPanelSide,
                     height: Self.floatingPanelSide
                 )
@@ -972,6 +980,28 @@ final class FloatingHelperController {
                 hoveredIssueIDs = []
                 return
             }
+
+            guard let credentials = resolveAutoCheckCredentials() else { return }
+
+            if !detailedCorrectionsEnabled {
+                latestContext = context
+                latestIssueRange = NSRange(location: 0, length: (context.text as NSString).length)
+                latestIssues = []
+                updateRingColor()
+                let result = await evaluateWholeContext(context, credentials: credentials)
+                suggestionState = suggestionState(from: result.state)
+                latestContext = context
+                latestSuggestion = result.suggestion
+                latestSuggestionOptions = result.suggestionOptions
+                latestIssueRange = NSRange(location: 0, length: (context.text as NSString).length)
+                latestIssues = []
+                hoveredIssueID = nil
+                hoveredIssueIDs = []
+                latestSignature = self.lastSignature
+                updateRingColor()
+                return
+            }
+
             // Break the full focused text into every meaningful segment
             // (paragraphs / list items / sentences around protected tokens),
             // so the overlay considers every logical piece of the message
@@ -990,8 +1020,6 @@ final class FloatingHelperController {
                 updateRingColor()
                 return
             }
-
-            guard let credentials = resolveAutoCheckCredentials() else { return }
 
             // Evaluate each segment concurrently, honouring the cache so we
             // don't hit the AI for paragraphs whose text hasn't changed.
@@ -1173,6 +1201,131 @@ final class FloatingHelperController {
             }
         }
         return AutoCheckCredentials(provider: provider, model: model, apiKey: key)
+    }
+
+    private func evaluateWholeContext(
+        _ context: TextAccessService.FocusedTextContext,
+        credentials: AutoCheckCredentials
+    ) async -> SegmentEvaluationResult {
+        let text = context.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .inconclusive
+            )
+        }
+
+        if !isMeaningfulForAutoCheck(text) {
+            if text.count >= 3,
+               let localIssue = firstMisspelledRange(in: text),
+               let localFix = bestLocalSpellingReplacement(in: text).flatMap({
+                validatedSafeFixSuggestion(original: text, candidate: $0)
+               }) {
+                return SegmentEvaluationResult(
+                    suggestion: localFix,
+                    suggestionOptions: [OverlaySuggestion(operation: .fixGrammar, text: localFix)],
+                    issueLocalRange: localIssue.0,
+                    state: .needsAttention
+                )
+            }
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .clean
+            )
+        }
+
+        let localMixedScriptFix = fixMixedLatinCyrillicWords(in: text)
+        if let validatedMixedScriptFix = validatedSafeFixSuggestion(
+            original: text,
+            candidate: localMixedScriptFix
+        ) {
+            return SegmentEvaluationResult(
+                suggestion: validatedMixedScriptFix,
+                suggestionOptions: [OverlaySuggestion(operation: .fixGrammar, text: validatedMixedScriptFix)],
+                issueLocalRange: firstMixedLatinCyrillicRange(in: text),
+                state: .needsAttention
+            )
+        }
+
+        do {
+            var suggestions = try await aiClient.overlaySuggestions(
+                provider: credentials.provider,
+                model: credentials.model,
+                apiKey: credentials.apiKey,
+                text: text
+            )
+
+            let fallbackFix = try await aiClient.checkAndSuggestIfNeeded(
+                provider: credentials.provider,
+                model: credentials.model,
+                apiKey: credentials.apiKey,
+                text: text
+            )
+            if let safeFix = validatedSafeFixSuggestion(original: text, candidate: fallbackFix),
+               !suggestions.contains(where: { $0.operation == .fixGrammar }) {
+                suggestions.insert(OverlaySuggestion(operation: .fixGrammar, text: safeFix), at: 0)
+            }
+
+            suggestions = orderedUniqueWholeTextSuggestions(suggestions, original: text)
+            guard !suggestions.isEmpty else {
+                return SegmentEvaluationResult(
+                    suggestion: "",
+                    suggestionOptions: [],
+                    issueLocalRange: nil,
+                    state: .clean
+                )
+            }
+            return SegmentEvaluationResult(
+                suggestion: suggestions.first?.text ?? "",
+                suggestionOptions: suggestions,
+                issueLocalRange: NSRange(location: 0, length: (text as NSString).length),
+                state: .needsAttention
+            )
+        } catch {
+            postStatus("Auto-check failed: \(error.localizedDescription)")
+            return SegmentEvaluationResult(
+                suggestion: "",
+                suggestionOptions: [],
+                issueLocalRange: nil,
+                state: .inconclusive
+            )
+        }
+    }
+
+    private func suggestionState(from state: SegmentEvaluationResult.State) -> SuggestionState {
+        switch state {
+        case .clean:
+            return .looksGood
+        case .needsAttention:
+            return .needsAttention
+        case .inconclusive:
+            return .neutral
+        }
+    }
+
+    private func orderedUniqueWholeTextSuggestions(
+        _ suggestions: [OverlaySuggestion],
+        original: String
+    ) -> [OverlaySuggestion] {
+        let priority: [RewriteOperation] = [.fixGrammar, .shorten, .makeProfessional, .humanize]
+        var byOperation: [RewriteOperation: OverlaySuggestion] = [:]
+        var seenText = Set<String>()
+        let originalKey = normalized(original)
+        for suggestion in suggestions {
+            let text = suggestion.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            let key = normalized(text)
+            guard key != originalKey, !seenText.contains(key) else { continue }
+            seenText.insert(key)
+            if byOperation[suggestion.operation] == nil {
+                byOperation[suggestion.operation] = OverlaySuggestion(operation: suggestion.operation, text: text)
+            }
+        }
+        return priority.compactMap { byOperation[$0] }
     }
 
     /// Evaluates a single segment: local spelling, mixed-script fix, then AI.
@@ -2882,10 +3035,14 @@ final class FloatingHelperController {
     private func updateMarker(caretFrame: CGRect?, fieldFrame: CGRect, anchor: MarkerAnchor) {
         lastMarkerFieldFrame = fieldFrame
         lastMarkerCaretFrame = caretFrame
-        guard suggestionState == .needsAttention,
+        let shouldShowWholeTextMarker = !detailedCorrectionsEnabled
+            && (isEvaluating || suggestionState == .needsAttention || suggestionState == .looksGood)
+        let shouldShowDetailedMarker = detailedCorrectionsEnabled
+            && suggestionState == .needsAttention
+            && !latestSuggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard (shouldShowWholeTextMarker || shouldShowDetailedMarker),
               let context = latestContext,
-              context.anchor.source != .clipboardFallback,
-              !latestSuggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              context.anchor.source != .clipboardFallback else {
             hideMarkerAndCard()
             return
         }
@@ -2910,9 +3067,30 @@ final class FloatingHelperController {
             let source: String
             let style: FloatingIssueMarkerStyle
             let lineFrame: CGRect
+            let isLoading: Bool
         }
         var jobs: [UnderlineJob] = []
-        if !latestIssues.isEmpty {
+        if !detailedCorrectionsEnabled {
+            let lineFrame = globalOverlayLineFrame(context: context, fieldFrame: fieldFrame, fallback: fallback)
+            let markerFrame = globalCompactMarkerFrame(for: lineFrame)
+            let colors: [Color] = {
+                if isEvaluating { return [.gray] }
+                return ringColors(for: suggestionState)
+            }()
+            jobs.append(
+                UnderlineJob(
+                    frame: markerFrame,
+                    colors: colors,
+                    issueID: nil,
+                    issueIDs: [],
+                    geometry: "global",
+                    source: isEvaluating ? "loading" : "wholeText",
+                    style: .compactDot,
+                    lineFrame: lineFrame,
+                    isLoading: isEvaluating
+                )
+            )
+        } else if !latestIssues.isEmpty {
             let renderableIssues = issuesToRender(in: context)
             for issue in renderableIssues {
                 let geometryTarget = localizedGeometryTarget(for: issue, in: context)
@@ -2999,7 +3177,8 @@ final class FloatingHelperController {
                             geometry: geometry,
                             source: selectedSource,
                             style: markerStyle,
-                            lineFrame: fallbackContext.frame.isEmpty ? frame : fallbackContext.frame
+                            lineFrame: fallbackContext.frame.isEmpty ? frame : fallbackContext.frame,
+                            isLoading: false
                         )
                     )
                 }
@@ -3082,7 +3261,8 @@ final class FloatingHelperController {
                         geometry: geometry,
                         source: selectedSource,
                         style: markerStyle,
-                        lineFrame: context.frame.isEmpty ? frame : context.frame
+                        lineFrame: context.frame.isEmpty ? frame : context.frame,
+                        isLoading: false
                     )
                 )
             }
@@ -3132,7 +3312,8 @@ final class FloatingHelperController {
                         geometry: first.geometry,
                         source: first.source,
                         style: .compactDot,
-                        lineFrame: lineFrame
+                        lineFrame: lineFrame,
+                        isLoading: first.isLoading
                     )
                 )
             }
@@ -3165,7 +3346,8 @@ final class FloatingHelperController {
                 host.rootView = FloatingIssueUnderlineView(
                     colors: job.colors,
                     isHighlighted: isLayoutHighlighted(issueID: job.issueID, issueIDs: job.issueIDs),
-                    style: job.style
+                    style: job.style,
+                    isLoading: job.isLoading
                 )
             }
             let overlayWasVisible = overlayPanel.isVisible
@@ -3187,7 +3369,8 @@ final class FloatingHelperController {
                     frame: job.frame,
                     issueID: job.issueID,
                     issueIDs: job.issueIDs,
-                    style: job.style
+                    style: job.style,
+                    isLoading: job.isLoading
                 )
             )
         }
@@ -3244,7 +3427,8 @@ final class FloatingHelperController {
             host.rootView = FloatingIssueUnderlineView(
                 colors: colors,
                 isHighlighted: isLayoutHighlighted(issueID: layout.issueID, issueIDs: layout.issueIDs),
-                style: layout.style
+                style: layout.style,
+                isLoading: layout.isLoading
             )
         }
     }
@@ -3421,6 +3605,42 @@ final class FloatingHelperController {
             height: max(12, underlineFrame.height + 8)
         )
         return clampedToVisibleScreens(hit)
+    }
+
+    private func globalOverlayLineFrame(
+        context: TextAccessService.FocusedTextContext,
+        fieldFrame: CGRect,
+        fallback: CGRect
+    ) -> CGRect {
+        if !context.frame.isEmpty, context.frame.height <= 220 {
+            return context.frame
+        }
+        if !fallback.isEmpty, fallback.height <= 220 {
+            return fallback
+        }
+        if !fieldFrame.isEmpty {
+            let height = min(max(fieldFrame.height, 20), 44)
+            return CGRect(
+                x: fieldFrame.minX,
+                y: fieldFrame.maxY - height,
+                width: fieldFrame.width,
+                height: height
+            )
+        }
+        return fallback
+    }
+
+    private func globalCompactMarkerFrame(for lineFrame: CGRect) -> CGRect {
+        guard !lineFrame.isEmpty else { return .zero }
+        let side: CGFloat = 16
+        return clampedToVisibleScreens(
+            CGRect(
+                x: lineFrame.minX - side - 7,
+                y: lineFrame.minY + max(0, (lineFrame.height - side) * 0.5),
+                width: side,
+                height: side
+            )
+        )
     }
 
     private func normalizedIssueOverlayFrame(for bounds: CGRect, fallback: CGRect) -> CGRect {
@@ -4497,9 +4717,13 @@ final class FloatingHelperController {
                 ?? markerPanel?.frame
                 ?? .zero
         } else {
-            cardSuggestions = latestSuggestionOptions.isEmpty
-                ? [OverlaySuggestion(operation: .fixGrammar, text: latestSuggestion)]
-                : latestSuggestionOptions
+            if latestSuggestionOptions.isEmpty {
+                cardSuggestions = latestSuggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? []
+                    : [OverlaySuggestion(operation: .fixGrammar, text: latestSuggestion)]
+            } else {
+                cardSuggestions = latestSuggestionOptions
+            }
             anchorFrame = markerPanel?.frame ?? .zero
             cardIssueIDs = []
             suggestionIssueIDs = [:]
@@ -4534,6 +4758,7 @@ final class FloatingHelperController {
                     onHoverChanged: { [weak self] isHovering in
                         self?.handleHoverCardHover(isHovering)
                     },
+                    showsDiffPreview: self.detailedCorrectionsEnabled,
                     onSkip: skipHandler
                 )
             )
@@ -4567,6 +4792,7 @@ final class FloatingHelperController {
                 onHoverChanged: { [weak self] isHovering in
                     self?.handleHoverCardHover(isHovering)
                 },
+                showsDiffPreview: self.detailedCorrectionsEnabled,
                 onSkip: skipHandler
             )
         }
