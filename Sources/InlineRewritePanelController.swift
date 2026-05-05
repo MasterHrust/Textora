@@ -135,6 +135,7 @@ final class InlineRewritePanelController {
         // New showing session: not pinned unless user drags the popup itself.
         userPinnedOpen = false
         _ = viewModel.loadFromBestAvailable(minLength: 1)
+        viewModel.prepareOperationForMarkerWindow()
 
         if panel == nil {
             let rootView = InlineRewriteView(

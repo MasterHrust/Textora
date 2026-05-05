@@ -5,7 +5,9 @@ import Foundation
 final class InlineRewriteViewModel: ObservableObject {
     @Published var operation: RewriteOperation {
         didSet {
-            UserDefaults.standard.set(operation.rawValue, forKey: Self.lastOperationKey)
+            if shouldPersistOperationChanges {
+                UserDefaults.standard.set(operation.rawValue, forKey: Self.lastOperationKey)
+            }
         }
     }
     @Published var originalText = ""
@@ -40,6 +42,7 @@ final class InlineRewriteViewModel: ObservableObject {
     private var mailAutoCaptureTask: Task<Void, Never>?
     private var mailSelectionStableSince: Date?
     private var suppressNextOperationTriggeredRewrite = false
+    private var shouldPersistOperationChanges = true
     private static let lastOperationKey = "inlineRewrite.lastOperation"
     private static let lastTranslateLanguageKey = "inlineTranslate.lastTargetLanguage"
     private let mailBundleID = "com.apple.mail"
@@ -328,6 +331,25 @@ final class InlineRewriteViewModel: ObservableObject {
         isLoading = false
         suppressNextOperationTriggeredRewrite = true
         updateNoChangesNeededFlag()
+    }
+
+    func prepareOperationForMarkerWindow() {
+        let nextOperation: RewriteOperation
+        if UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.smartAIEnabled) {
+            nextOperation = recommendedOperation(for: originalText)
+        } else {
+            let raw = UserDefaults.standard.string(forKey: Self.lastOperationKey)
+                ?? RewriteOperation.fixGrammar.rawValue
+            nextOperation = Self.migrateOperation(from: raw) ?? .fixGrammar
+        }
+        setOperation(nextOperation, persist: false)
+    }
+
+    private func setOperation(_ nextOperation: RewriteOperation, persist: Bool) {
+        guard operation != nextOperation else { return }
+        shouldPersistOperationChanges = persist
+        operation = nextOperation
+        shouldPersistOperationChanges = true
     }
 
     func rewrite(requestID: Int) async {
@@ -678,6 +700,55 @@ final class InlineRewriteViewModel: ObservableObject {
             return
         }
         noChangesNeeded = unchangedByNormalization
+    }
+
+    private func recommendedOperation(for text: String) -> RewriteOperation {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return .fixGrammar }
+        if hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned) {
+            return .fixGrammar
+        }
+        if looksOverloaded(cleaned) {
+            return .shorten
+        }
+        if looksFormal(cleaned) {
+            return .makeProfessional
+        }
+        if looksPlain(cleaned) {
+            return .humanize
+        }
+        return .fixGrammar
+    }
+
+    private func looksFormal(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let cues = [
+            "dear ", "kindly", "regards", "sincerely", "appreciate", "would like",
+            "please find", "i am writing", "could you please", "thank you for",
+            "уважа", "пожалуйста", "благодар", "с уважением", "прошу", "не могли бы"
+        ]
+        return cues.contains { lower.contains($0) }
+    }
+
+    private func looksOverloaded(_ text: String) -> Bool {
+        let words = text.split { !$0.isLetter && !$0.isNumber }
+        guard words.count >= 24 else { return false }
+        let punctuationLoad = text.filter { ",;:()".contains($0) }.count
+        let fillerCues = [
+            "actually", "basically", "really", "very", "just", "probably",
+            "как бы", "в целом", "просто", "очень"
+        ]
+        let lower = text.lowercased()
+        let fillerCount = fillerCues.reduce(0) { partial, cue in
+            partial + (lower.contains(cue) ? 1 : 0)
+        }
+        return words.count >= 34 || punctuationLoad >= 5 || fillerCount >= 2
+    }
+
+    private func looksPlain(_ text: String) -> Bool {
+        let words = text.split { !$0.isLetter && !$0.isNumber }
+        guard words.count >= 3, words.count <= 28 else { return false }
+        return !looksFormal(text) && !looksOverloaded(text)
     }
 
     private func contextForRewriteUI(

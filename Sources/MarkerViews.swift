@@ -170,6 +170,8 @@ struct HoverSuggestionCardView: View {
     /// of the overlays on the same sentence.
     var onSkip: ((OverlaySuggestion) -> Void)? = nil
 
+    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
@@ -189,17 +191,9 @@ struct HoverSuggestionCardView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.82))
                 Spacer()
-                Text(anchorSource)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(anchorSource == "caret" ? Color.green.opacity(0.92) : Color.orange.opacity(0.95))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill((anchorSource == "caret" ? Color.green : Color.orange).opacity(0.13))
-                    )
+                SmartAIToggleButton(isOn: $smartAIEnabled)
             }
-            let visibleSuggestions = Array(suggestions.prefix(12))
+            let visibleSuggestions = Array(displaySuggestions.prefix(12))
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(visibleSuggestions.enumerated()), id: \.offset) { index, suggestion in
@@ -207,6 +201,7 @@ struct HoverSuggestionCardView: View {
                             original: originalText,
                             suggestion: suggestion,
                             color: labelColor(for: suggestion.operation),
+                            isDimmed: suggestion.isOptional,
                             onApply: { onApply(suggestion) },
                             onSkip: onSkip.map { skip in { skip(suggestion) } },
                             showsDiffPreview: showsDiffPreview
@@ -258,12 +253,130 @@ struct HoverSuggestionCardView: View {
     private func suggestionListHeight(count: Int) -> CGFloat {
         min(CGFloat(max(1, count)) * 112, 430)
     }
+
+    private var displaySuggestions: [OverlaySuggestion] {
+        let cleaned = suggestions.map { suggestion in
+            OverlaySuggestion(operation: suggestion.operation, text: suggestion.text)
+        }
+        guard smartAIEnabled else { return cleaned }
+        let preferred = smartPreferredOperation(in: Set(cleaned.map(\.operation)))
+        let fallbackOrder: [RewriteOperation] = [.fixGrammar, .makeProfessional, .shorten, .humanize]
+        var orderedOps: [RewriteOperation] = []
+        if let preferred {
+            orderedOps.append(preferred)
+        }
+        for op in fallbackOrder where !orderedOps.contains(op) {
+            orderedOps.append(op)
+        }
+        var byOperation: [RewriteOperation: OverlaySuggestion] = [:]
+        for suggestion in cleaned where byOperation[suggestion.operation] == nil {
+            byOperation[suggestion.operation] = suggestion
+        }
+        return orderedOps.compactMap { byOperation[$0] }.enumerated().map { index, suggestion in
+            var copy = suggestion
+            copy.isRecommended = index == 0
+            copy.isOptional = index > 0
+            return copy
+        }
+    }
+
+    private func smartPreferredOperation(in available: Set<RewriteOperation>) -> RewriteOperation? {
+        guard !available.isEmpty else { return nil }
+        let cleaned = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        let desired: RewriteOperation
+        if looksOverloaded(cleaned) {
+            desired = .shorten
+        } else if looksFormal(cleaned) {
+            desired = .makeProfessional
+        } else if looksPlain(cleaned) {
+            desired = .humanize
+        } else {
+            desired = .fixGrammar
+        }
+        return available.contains(desired) ? desired : available.first
+    }
+
+    private func looksFormal(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let cues = [
+            "dear ", "kindly", "regards", "sincerely", "appreciate", "would like",
+            "please find", "i am writing", "could you please", "thank you for",
+            "уважа", "пожалуйста", "благодар", "с уважением", "прошу", "не могли бы"
+        ]
+        return cues.contains { lower.contains($0) }
+    }
+
+    private func looksOverloaded(_ text: String) -> Bool {
+        let words = text.split { !$0.isLetter && !$0.isNumber }
+        guard words.count >= 24 else { return false }
+        let punctuationLoad = text.filter { ",;:()".contains($0) }.count
+        let fillerCues = [
+            "actually", "basically", "really", "very", "just", "probably",
+            "как бы", "в целом", "просто", "очень"
+        ]
+        let lower = text.lowercased()
+        let fillerCount = fillerCues.reduce(0) { partial, cue in
+            partial + (lower.contains(cue) ? 1 : 0)
+        }
+        return words.count >= 34 || punctuationLoad >= 5 || fillerCount >= 2
+    }
+
+    private func looksPlain(_ text: String) -> Bool {
+        let words = text.split { !$0.isLetter && !$0.isNumber }
+        guard words.count >= 3, words.count <= 28 else { return false }
+        return !looksFormal(text) && !looksOverloaded(text)
+    }
+}
+
+private struct SmartAIToggleButton: View {
+    @Binding var isOn: Bool
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            withAnimation(.interpolatingSpring(stiffness: 320, damping: 18)) {
+                isOn.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isOn ? "sparkles" : "sparkle")
+                    .font(.system(size: 11, weight: .bold))
+                Text("Smart AI")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(isOn ? .white : Color.white.opacity(0.56))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(
+                        isOn
+                        ? Color(red: 0.26, green: 0.48, blue: 1.0).opacity(isHovered ? 0.34 : 0.25)
+                        : Color.white.opacity(isHovered ? 0.12 : 0.07)
+                    )
+            )
+            .overlay(
+                Capsule()
+                    .stroke(isOn ? Color.white.opacity(0.20) : Color.white.opacity(0.10), lineWidth: 1)
+            )
+            .scaleEffect(isHovered ? 1.03 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .help(isOn ? "Smart AI recommendations enabled" : "Use last selected mode first")
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
+    }
 }
 
 private struct SuggestionSectionView: View {
     let original: String
     let suggestion: OverlaySuggestion
     let color: Color
+    var isDimmed: Bool = false
     let onApply: () -> Void
     /// Optional dismiss action. When provided the section shows a
     /// small "Skip" pill next to the category label; tapping it
@@ -281,13 +394,18 @@ private struct SuggestionSectionView: View {
             HStack(spacing: 6) {
                 Text(suggestion.title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(color)
+                    .foregroundStyle(isDimmed ? Color.white.opacity(0.46) : color)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(
                         Capsule()
-                            .fill(color.opacity(isHovered ? 0.24 : 0.16))
+                            .fill((isDimmed ? Color.white : color).opacity(isHovered ? 0.18 : 0.12))
                     )
+                if suggestion.isOptional {
+                    Text("Optional")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.42))
+                }
                 Spacer(minLength: 0)
                 if let onSkip {
                     Button(action: onSkip) {
@@ -319,10 +437,11 @@ private struct SuggestionSectionView: View {
                     original: original,
                     suggestion: suggestion.text
                 )
+                .opacity(isDimmed ? 0.58 : 1.0)
             } else {
                 Text(displaySuggestion(suggestion.text))
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.88))
+                    .foregroundStyle(.white.opacity(isDimmed ? 0.56 : 0.88))
                     .lineLimit(5)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -331,7 +450,7 @@ private struct SuggestionSectionView: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(isHovered ? 0.075 : 0.001))
+                .fill(Color.white.opacity(isHovered ? (isDimmed ? 0.045 : 0.075) : 0.001))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)

@@ -5,6 +5,7 @@ import Foundation
 final class AppViewModel: ObservableObject {
     enum SettingsKeys {
         static let detailedCorrectionsEnabled = "overlay.detailedCorrections.enabled"
+        static let smartAIEnabled = "overlay.smartAI.enabled"
     }
 
     private enum OnboardingDefaults {

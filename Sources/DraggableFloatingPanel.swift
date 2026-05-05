@@ -15,6 +15,7 @@ final class DraggableFloatingPanel: NSPanel {
     var onDragEnded: ((CGRect) -> Void)?
     var onClicked: (() -> Void)?
     var onHoverChanged: ((Bool) -> Void)?
+    var constrainDragFrame: ((CGRect) -> CGRect)?
     var allowsDragging = true
     /// Fires at `mouseDown` (before click vs drag is known) so the host can pause auto-layout timers.
     var onLeftMouseSessionBegan: (() -> Void)?
@@ -122,6 +123,9 @@ final class DraggableFloatingPanel: NSPanel {
         let newOrigin = NSPoint(x: m.x - grabDeltaScreen.x, y: m.y - grabDeltaScreen.y)
         var r = frame
         r.origin = newOrigin
+        if let constrainDragFrame {
+            r = constrainDragFrame(r)
+        }
         setFrame(r, display: true)
         displayIfNeeded()
 

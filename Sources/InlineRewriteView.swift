@@ -83,6 +83,7 @@ struct InlineRewriteView: View {
     let onClose: () -> Void
     let onHoverChanged: (Bool) -> Void
     let onActionInvoked: () -> Void
+    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = false
 
     private var showSuggestionCard: Bool {
         !viewModel.noChangesNeeded && !viewModel.rewrittenText.isEmpty
@@ -110,6 +111,9 @@ struct InlineRewriteView: View {
                 .onChange(of: viewModel.operation) { _, _ in
                     viewModel.triggerRewrite(.operationChanged)
                 }
+            if smartAIEnabled {
+                recommendedRow
+            }
 
             suggestionSection
             translationSection
@@ -166,6 +170,35 @@ struct InlineRewriteView: View {
 
                 Spacer(minLength: 0)
 
+                Button {
+                    let previousOperation = viewModel.operation
+                    smartAIEnabled.toggle()
+                    viewModel.prepareOperationForMarkerWindow()
+                    if previousOperation == viewModel.operation {
+                        viewModel.triggerRewrite(.operationChanged)
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: smartAIEnabled ? "sparkles" : "sparkle")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Smart AI")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(smartAIEnabled ? .white : TextoraPopupTheme.muted)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(smartAIEnabled ? Color.white.opacity(0.14) : Color.white.opacity(0.07))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(smartAIEnabled ? 0.20 : 0.10), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help(smartAIEnabled ? "Smart AI recommendations enabled" : "Use last selected mode first")
+
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
@@ -178,6 +211,17 @@ struct InlineRewriteView: View {
             }
             .zIndex(1)
         }
+    }
+
+    private var recommendedRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .semibold))
+            Text("\(viewModel.operation.rawValue) (Recommended)")
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(TextoraPopupTheme.muted)
+        .padding(.top, -8)
     }
 
     @ViewBuilder

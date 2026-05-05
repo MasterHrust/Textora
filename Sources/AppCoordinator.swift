@@ -165,20 +165,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             case .allowed:
                 isConsentPromptHovered = false
                 consentPrompt.hide()
-                // Only reuse cached auto-check for Fix operation; otherwise open popup and run exactly one request for the chosen mode.
-                let savedOpRaw = UserDefaults.standard.string(forKey: "inlineRewrite.lastOperation") ?? RewriteOperation.fixGrammar.rawValue
-                let savedOp = RewriteOperation(rawValue: savedOpRaw) ?? .fixGrammar
-                if savedOp == .fixGrammar, let cached = self.floatingHelper?.cachedFixGrammarResultForCurrentFocus() {
-                    rewritePanel.showWithSuggestion(
-                        near: frame,
-                        context: cached.context,
-                        suggestion: cached.suggestion,
-                        operation: .fixGrammar
-                    )
-                } else {
-                    rewritePanel.show(near: frame, triggerRewrite: true)
-                }
-                // Keep the floating helper below the pop-up to avoid z-order fighting.
+                rewritePanel.show(near: frame, triggerRewrite: true)
                 floatingHelper?.setKeepBelowWindow(rewritePanel.window)
             case .denied:
                 rewritePanel.hide()

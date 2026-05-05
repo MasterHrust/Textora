@@ -1,9 +1,36 @@
 import SwiftUI
 
+enum FloatingDragHintDirection: CaseIterable, Hashable {
+    case up
+    case down
+    case left
+    case right
+
+    var symbolName: String {
+        switch self {
+        case .up: return "arrow.up"
+        case .down: return "arrow.down"
+        case .left: return "arrow.left"
+        case .right: return "arrow.right"
+        }
+    }
+
+    var offset: CGSize {
+        switch self {
+        case .up: return CGSize(width: 0, height: -36)
+        case .down: return CGSize(width: 0, height: 36)
+        case .left: return CGSize(width: -36, height: 0)
+        case .right: return CGSize(width: 36, height: 0)
+        }
+    }
+}
+
 /// Floating helper: visual only — hover + drag + click handled by `DraggableFloatingPanel`.
 struct FloatingButtonView: View {
     let ringColors: [Color]
     let isLoading: Bool
+    let isHovered: Bool
+    let showsCheckmark: Bool
     var spotlightPulse: Bool = false
 
     @State private var spotlightGlowOpacity: CGFloat = 0
@@ -26,24 +53,33 @@ struct FloatingButtonView: View {
             iconView
                 .frame(width: iconSide, height: iconSide)
                 .clipShape(Circle())
+                .scaleEffect(isHovered ? 1.08 : 1.0)
                 .shadow(
-                    color: Color.cyan.opacity(Double(spotlightGlowOpacity) * 0.75),
-                    radius: spotlightGlowRadius,
+                    color: Color.cyan.opacity(isHovered ? 0.26 : Double(spotlightGlowOpacity) * 0.75),
+                    radius: isHovered ? 12 : spotlightGlowRadius,
                     x: 0,
-                    y: 0
+                    y: isHovered ? 5 : 0
                 )
                 .shadow(
-                    color: Color.blue.opacity(Double(spotlightGlowOpacity) * 0.45),
-                    radius: spotlightGlowRadius * 1.35,
+                    color: Color.blue.opacity(isHovered ? 0.18 : Double(spotlightGlowOpacity) * 0.45),
+                    radius: isHovered ? 20 : spotlightGlowRadius * 1.35,
                     x: 0,
                     y: 0
                 )
                 .overlay(loadingOrRing)
+                .overlay(alignment: .bottomTrailing) {
+                    if showsCheckmark && !isLoading {
+                        checkmarkBadge
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
         }
         .padding(outerPad)
         .frame(width: iconSide + outerPad * 2, height: iconSide + outerPad * 2)
         .contentShape(Rectangle())
         .help("Rewrite with Textora — drag to move")
+        .animation(.interpolatingSpring(stiffness: 310, damping: 16), value: isHovered)
+        .animation(.interpolatingSpring(stiffness: 360, damping: 18), value: showsCheckmark)
         .task(id: spotlightPulse) {
             guard spotlightPulse else {
                 spotlightGlowOpacity = 0
@@ -65,6 +101,21 @@ struct FloatingButtonView: View {
             spotlightGlowOpacity = 0
             spotlightGlowRadius = 6
         }
+    }
+
+    private var checkmarkBadge: some View {
+        ZStack {
+            Circle()
+                .fill(Color(red: 0.08, green: 0.14, blue: 0.10))
+                .frame(width: 18, height: 18)
+            Circle()
+                .fill(Color.green)
+                .frame(width: 14, height: 14)
+            Image(systemName: "checkmark")
+                .font(.system(size: 8, weight: .black))
+                .foregroundStyle(.white)
+        }
+        .offset(x: 2, y: 2)
     }
 
     private var spotlightGlowLayer: some View {
@@ -140,6 +191,47 @@ struct FloatingButtonView: View {
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.blue)
+        }
+    }
+}
+
+struct FloatingDragHintArrowView: View {
+    let direction: FloatingDragHintDirection
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let bounce = CGFloat(sin(t * .pi * 2.2)) * 3.0
+            let shift = direction.bounceOffset(amount: bounce)
+            Image(systemName: direction.symbolName)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white.opacity(isActive ? 0.80 : 0.48))
+                .frame(width: 32, height: 32)
+                .background(
+                    Circle()
+                        .fill(Color.black.opacity(isActive ? 0.30 : 0.18))
+                )
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(isActive ? 0.36 : 0.18), lineWidth: 1)
+                )
+                .shadow(color: Color.cyan.opacity(isActive ? 0.30 : 0.14), radius: isActive ? 11 : 7, x: 0, y: 0)
+                .scaleEffect(isActive ? 1.18 : 1.0)
+                .offset(shift)
+                .frame(width: 46, height: 46)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private extension FloatingDragHintDirection {
+    func bounceOffset(amount: CGFloat) -> CGSize {
+        switch self {
+        case .up: return CGSize(width: 0, height: -amount)
+        case .down: return CGSize(width: 0, height: amount)
+        case .left: return CGSize(width: -amount, height: 0)
+        case .right: return CGSize(width: amount, height: 0)
         }
     }
 }

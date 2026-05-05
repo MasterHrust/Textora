@@ -58,9 +58,13 @@ enum RewriteOperation: String, CaseIterable, Identifiable {
 struct OverlaySuggestion: Identifiable, Equatable {
     let operation: RewriteOperation
     let text: String
+    var isRecommended: Bool = false
+    var isOptional: Bool = false
 
     var id: String { operation.rawValue }
-    var title: String { operation.rawValue }
+    var title: String {
+        isRecommended ? "\(operation.rawValue) (Recommended)" : operation.rawValue
+    }
 }
 
 struct TextPatch: Identifiable, Equatable {
