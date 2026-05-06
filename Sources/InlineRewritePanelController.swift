@@ -7,6 +7,7 @@ final class InlineRewritePanelController {
     private let viewModel = InlineRewriteViewModel()
     var onHoverChanged: ((Bool) -> Void)?
     var onActionInvoked: (() -> Void)?
+    var onSuggestionAvailabilityChanged: ((Bool) -> Void)?
     private var isProgrammaticPositioning = false
     private var userPinnedOpen = false
     private var didAttachMoveObserver = false
@@ -21,8 +22,8 @@ final class InlineRewritePanelController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
     }
 
-    private static let rewritePanelWidth: CGFloat = 360
-    private static let rewritePanelHeight: CGFloat = 420
+    private static let rewritePanelWidth: CGFloat = 400
+    private static let rewritePanelHeight: CGFloat = 480
 
     /// Places the panel above the floating helper bubble without covering it.
     private func frameAnchoredToFloatingBubble(anchor: CGRect) -> CGRect {
@@ -142,7 +143,10 @@ final class InlineRewritePanelController {
                 viewModel: viewModel,
                 onClose: { [weak self] in self?.hide() },
                 onHoverChanged: { [weak self] hovering in self?.onHoverChanged?(hovering) },
-                onActionInvoked: { [weak self] in self?.onActionInvoked?() }
+                onActionInvoked: { [weak self] in self?.onActionInvoked?() },
+                onSuggestionAvailabilityChanged: { [weak self] hasSuggestion in
+                    self?.onSuggestionAvailabilityChanged?(hasSuggestion)
+                }
             )
             let host = NSHostingView(rootView: rootView)
             host.wantsLayer = true
@@ -185,16 +189,78 @@ final class InlineRewritePanelController {
         near anchorRect: CGRect,
         context: TextAccessService.FocusedTextContext,
         suggestion: String,
-        operation: RewriteOperation
+        operation: RewriteOperation,
+        suggestionOptions: [OverlaySuggestion] = [],
+        isNoIssues: Bool = false
     ) {
         userPinnedOpen = false
-        viewModel.setPrefilled(context: context, suggestion: suggestion, operation: operation)
+        if isNoIssues {
+            viewModel.setNoChanges(context: context, operation: operation)
+        } else {
+            viewModel.setPrefilled(
+                context: context,
+                suggestion: suggestion,
+                operation: operation,
+                suggestionOptions: suggestionOptions
+            )
+        }
         if panel == nil {
             let rootView = InlineRewriteView(
                 viewModel: viewModel,
                 onClose: { [weak self] in self?.hide() },
                 onHoverChanged: { [weak self] hovering in self?.onHoverChanged?(hovering) },
-                onActionInvoked: { [weak self] in self?.onActionInvoked?() }
+                onActionInvoked: { [weak self] in self?.onActionInvoked?() },
+                onSuggestionAvailabilityChanged: { [weak self] hasSuggestion in
+                    self?.onSuggestionAvailabilityChanged?(hasSuggestion)
+                }
+            )
+            let host = NSHostingView(rootView: rootView)
+            host.wantsLayer = true
+            host.layer?.backgroundColor = NSColor.clear.cgColor
+            host.frame = NSRect(x: 0, y: 0, width: Self.rewritePanelWidth, height: Self.rewritePanelHeight)
+            host.autoresizingMask = [.width, .height]
+            let panel = NSPanel(
+                contentRect: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: Self.rewritePanelWidth,
+                    height: Self.rewritePanelHeight
+                ),
+                styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            Self.configureRewriteSurface(panel)
+            panel.isMovableByWindowBackground = true
+            panel.contentView = host
+            self.panel = panel
+            attachMoveObserverIfNeeded()
+        }
+
+        let frame = frameAnchoredToFloatingBubble(anchor: anchorRect)
+        isProgrammaticPositioning = true
+        panel?.setFrame(frame, display: true)
+        isProgrammaticPositioning = false
+        panel?.contentView?.layoutSubtreeIfNeeded()
+        panel?.alphaValue = 1
+        panel?.orderFrontRegardless()
+    }
+
+    func showProcessing(
+        near anchorRect: CGRect,
+        context: TextAccessService.FocusedTextContext
+    ) {
+        userPinnedOpen = false
+        viewModel.setProcessing(context: context)
+        if panel == nil {
+            let rootView = InlineRewriteView(
+                viewModel: viewModel,
+                onClose: { [weak self] in self?.hide() },
+                onHoverChanged: { [weak self] hovering in self?.onHoverChanged?(hovering) },
+                onActionInvoked: { [weak self] in self?.onActionInvoked?() },
+                onSuggestionAvailabilityChanged: { [weak self] hasSuggestion in
+                    self?.onSuggestionAvailabilityChanged?(hasSuggestion)
+                }
             )
             let host = NSHostingView(rootView: rootView)
             host.wantsLayer = true

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum FloatingIssueMarkerStyle: Equatable {
@@ -60,7 +61,7 @@ struct FloatingIssueUnderlineView: View {
                 let segmentColors = activeColors.isEmpty ? TextoraSuggestionColors.brandGradient : activeColors
                 ZStack {
                     Circle()
-                        .stroke(Color.black.opacity(0.22), lineWidth: lineWidth + 1.6)
+                        .stroke(Color.white.opacity(0.70), lineWidth: lineWidth + 1.6)
                         .frame(width: side, height: side)
 
                     if isLoading {
@@ -123,13 +124,26 @@ enum TextoraSuggestionColors {
     static func color(for operation: RewriteOperation) -> Color {
         switch operation {
         case .fixGrammar:
-            return .blue
+            return Color(red: 0.24, green: 0.60, blue: 1.0)
         case .makeProfessional:
-            return .purple
+            return Color(red: 0.70, green: 0.42, blue: 1.0)
         case .humanize:
-            return .teal
+            return Color(red: 0.13, green: 0.78, blue: 0.72)
         case .shorten:
-            return .orange
+            return Color(red: 1.0, green: 0.57, blue: 0.18)
+        }
+    }
+
+    static func gradient(for operation: RewriteOperation) -> [Color] {
+        switch operation {
+        case .fixGrammar:
+            return [Color(red: 0.10, green: 0.55, blue: 1.0), Color(red: 0.24, green: 0.86, blue: 1.0)]
+        case .makeProfessional:
+            return [Color(red: 0.52, green: 0.34, blue: 1.0), Color(red: 0.94, green: 0.36, blue: 1.0)]
+        case .humanize:
+            return [Color(red: 0.06, green: 0.70, blue: 0.62), Color(red: 0.35, green: 0.90, blue: 0.64)]
+        case .shorten:
+            return [Color(red: 1.0, green: 0.46, blue: 0.16), Color(red: 1.0, green: 0.76, blue: 0.22)]
         }
     }
 }
@@ -170,7 +184,7 @@ struct HoverSuggestionCardView: View {
     /// of the overlays on the same sentence.
     var onSkip: ((OverlaySuggestion) -> Void)? = nil
 
-    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = false
+    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -201,7 +215,8 @@ struct HoverSuggestionCardView: View {
                             original: originalText,
                             suggestion: suggestion,
                             color: labelColor(for: suggestion.operation),
-                            isDimmed: suggestion.isOptional,
+                            isDimmed: smartAIEnabled && !suggestion.isRecommended && !suggestion.isOptional,
+                            isSecondary: suggestion.isOptional,
                             onApply: { onApply(suggestion) },
                             onSkip: onSkip.map { skip in { skip(suggestion) } },
                             showsDiffPreview: showsDiffPreview
@@ -221,9 +236,9 @@ struct HoverSuggestionCardView: View {
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 20)
-                    .fill(Color(red: 0.07, green: 0.08, blue: 0.13).opacity(0.98))
+                    .fill(Color(red: 0.07, green: 0.08, blue: 0.13))
             }
-            .shadow(color: Color.black.opacity(0.30), radius: 22, x: 0, y: 14)
+            .shadow(color: Color.black.opacity(0.24), radius: 18, x: 0, y: 10)
             .shadow(color: Color(red: 0.35, green: 0.22, blue: 0.85).opacity(0.18), radius: 18, x: 0, y: 8)
         )
         .overlay(
@@ -251,7 +266,7 @@ struct HoverSuggestionCardView: View {
     }
 
     private func suggestionListHeight(count: Int) -> CGFloat {
-        min(CGFloat(max(1, count)) * 112, 430)
+        min(CGFloat(max(1, count)) * 124, 452)
     }
 
     private var displaySuggestions: [OverlaySuggestion] {
@@ -275,7 +290,7 @@ struct HoverSuggestionCardView: View {
         return orderedOps.compactMap { byOperation[$0] }.enumerated().map { index, suggestion in
             var copy = suggestion
             copy.isRecommended = index == 0
-            copy.isOptional = index > 0
+            copy.isOptional = secondarySmartOperations(primary: preferred).contains(suggestion.operation)
             return copy
         }
     }
@@ -284,17 +299,39 @@ struct HoverSuggestionCardView: View {
         guard !available.isEmpty else { return nil }
         let cleaned = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return nil }
-        let desired: RewriteOperation
-        if looksOverloaded(cleaned) {
-            desired = .shorten
-        } else if looksFormal(cleaned) {
-            desired = .makeProfessional
-        } else if looksPlain(cleaned) {
-            desired = .humanize
-        } else {
-            desired = .fixGrammar
-        }
+        let hasTextIssues = hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned)
+        guard hasTextIssues else { return nil }
+        let desired: RewriteOperation = .fixGrammar
         return available.contains(desired) ? desired : available.first
+    }
+
+    private func secondarySmartOperations(primary: RewriteOperation?) -> Set<RewriteOperation> {
+        guard smartAIEnabled, primary != nil else { return [] }
+        let cleaned = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard primary != .fixGrammar,
+              hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned) else {
+            return []
+        }
+        return [.fixGrammar]
+    }
+
+    private func hasLocalSpellingIssues(_ text: String) -> Bool {
+        let nsText = text as NSString
+        guard nsText.length >= 3 else { return false }
+        let misspelled = NSSpellChecker.shared.checkSpelling(
+            of: text,
+            startingAt: 0,
+            language: nil,
+            wrap: false,
+            inSpellDocumentWithTag: 0,
+            wordCount: nil
+        )
+        return misspelled.location != NSNotFound
+    }
+
+    private func containsMixedLatinCyrillicWord(_ text: String) -> Bool {
+        let pattern = #"\b(?=[\p{L}\p{M}]*\p{Latin})(?=[\p{L}\p{M}]*\p{Cyrillic})[\p{L}\p{M}]{3,}\b"#
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 
     private func looksFormal(_ text: String) -> Bool {
@@ -302,6 +339,7 @@ struct HoverSuggestionCardView: View {
         let cues = [
             "dear ", "kindly", "regards", "sincerely", "appreciate", "would like",
             "please find", "i am writing", "could you please", "thank you for",
+            "following up", "as discussed", "regarding", "replacement logic",
             "уважа", "пожалуйста", "благодар", "с уважением", "прошу", "не могли бы"
         ]
         return cues.contains { lower.contains($0) }
@@ -343,7 +381,7 @@ private struct SmartAIToggleButton: View {
                 Image(systemName: isOn ? "sparkles" : "sparkle")
                     .font(.system(size: 11, weight: .bold))
                 Text("Smart AI")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .bold))
             }
             .foregroundStyle(isOn ? .white : Color.white.opacity(0.56))
             .padding(.horizontal, 11)
@@ -352,14 +390,30 @@ private struct SmartAIToggleButton: View {
                 Capsule()
                     .fill(
                         isOn
-                        ? Color(red: 0.26, green: 0.48, blue: 1.0).opacity(isHovered ? 0.34 : 0.25)
-                        : Color.white.opacity(isHovered ? 0.12 : 0.07)
+                        ? LinearGradient(
+                            colors: [
+                                Color(red: 0.12, green: 0.60, blue: 1.0),
+                                Color(red: 0.62, green: 0.30, blue: 1.0),
+                                Color(red: 1.0, green: 0.32, blue: 0.72)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        : LinearGradient(
+                            colors: [
+                                Color.white.opacity(isHovered ? 0.12 : 0.07),
+                                Color.white.opacity(isHovered ? 0.12 : 0.07)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
                     )
             )
             .overlay(
                 Capsule()
-                    .stroke(isOn ? Color.white.opacity(0.20) : Color.white.opacity(0.10), lineWidth: 1)
+                    .stroke(isOn ? Color.white.opacity(0.42) : Color.white.opacity(0.10), lineWidth: 1)
             )
+            .shadow(color: Color(red: 0.35, green: 0.70, blue: 1.0).opacity(isOn ? (isHovered ? 0.48 : 0.32) : 0), radius: isHovered ? 13 : 9, x: 0, y: 0)
             .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
@@ -377,6 +431,7 @@ private struct SuggestionSectionView: View {
     let suggestion: OverlaySuggestion
     let color: Color
     var isDimmed: Bool = false
+    var isSecondary: Bool = false
     let onApply: () -> Void
     /// Optional dismiss action. When provided the section shows a
     /// small "Skip" pill next to the category label; tapping it
@@ -392,20 +447,22 @@ private struct SuggestionSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text(suggestion.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isDimmed ? Color.white.opacity(0.46) : color)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill((isDimmed ? Color.white : color).opacity(isHovered ? 0.18 : 0.12))
-                    )
-                if suggestion.isOptional {
-                    Text("Optional")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.42))
+                Text(suggestion.operation.rawValue)
+                    .font(.system(size: 13.5, weight: suggestion.isRecommended || isSecondary ? .bold : .semibold))
+                .foregroundStyle(labelForeground)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(labelFill)
+                )
+                .overlay(alignment: .topTrailing) {
+                    if suggestion.isRecommended {
+                        SmartAIRecommendedBadge()
+                            .offset(x: 8, y: -8)
+                    }
                 }
+                .zIndex(suggestion.isRecommended ? 1 : 0)
                 Spacer(minLength: 0)
                 if let onSkip {
                     Button(action: onSkip) {
@@ -469,6 +526,17 @@ private struct SuggestionSectionView: View {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? " " : cleaned
     }
+
+    private var labelForeground: Color {
+        if isDimmed { return Color.white.opacity(0.46) }
+        if isSecondary { return color.opacity(0.96) }
+        return color
+    }
+
+    private var labelFill: Color {
+        if isDimmed { return Color.white.opacity(isHovered ? 0.12 : 0.07) }
+        return color.opacity(isHovered ? 0.20 : (isSecondary ? 0.12 : 0.15))
+    }
 }
 
 private struct DiffPreviewView: View {
@@ -481,14 +549,14 @@ private struct DiffPreviewView: View {
             diffLine(
                 title: "Before",
                 text: displayText(snippets.before),
-                textColor: Color(red: 1.0, green: 0.31, blue: 0.43),
-                fillColor: Color(red: 0.44, green: 0.05, blue: 0.17).opacity(0.42)
+                textColor: Color(red: 1.0, green: 0.52, blue: 0.58),
+                fillColor: Color(red: 0.46, green: 0.09, blue: 0.18).opacity(0.34)
             )
             diffLine(
                 title: "After",
                 text: displayText(snippets.after),
-                textColor: Color(red: 0.46, green: 0.92, blue: 0.64),
-                fillColor: Color(red: 0.05, green: 0.28, blue: 0.18).opacity(0.42)
+                textColor: Color(red: 0.60, green: 0.91, blue: 0.70),
+                fillColor: Color(red: 0.07, green: 0.30, blue: 0.18).opacity(0.34)
             )
         }
     }

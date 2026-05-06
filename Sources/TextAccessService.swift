@@ -318,7 +318,7 @@ final class TextAccessService {
         "AXToolbar",
         "AXWindow"
     ]
-    private let maxContextCharacters = 1600
+    private let maxContextCharacters = 6000
     private var isCopyProbeInProgress = false
     private var lastCopyProbeAt: Date = .distantPast
 
@@ -426,9 +426,16 @@ final class TextAccessService {
 
     private func queryFocusedWindowFrameFromSystem() -> CGRect? {
         if isGoogleDocsFrontmost(),
-           let chrome = NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome").first,
-           let chromeFrame = mainCGWindowFrame(for: chrome.processIdentifier) {
-            return chromeFrame
+           let focusedWindow = queryFocusedWindowElementFromSystem() {
+            let axFrame = elementFrame(of: focusedWindow)
+            var pid: pid_t = 0
+            if AXUIElementGetPid(focusedWindow, &pid) == .success,
+               pid != 0,
+               resolvedBundleID(forOwningPID: pid) == "com.google.Chrome" {
+                return focusedCGWindowFrame(for: pid, matching: axFrame)
+                    ?? axFrame
+                    ?? mainCGWindowFrame(for: pid)
+            }
         }
         guard let element = queryFocusedWindowElementFromSystem() else {
             guard let focused = focusedElement() else { return nil }
@@ -447,7 +454,7 @@ final class TextAccessService {
         }
         if resolvedBundleID(forOwningPID: pid) == "com.google.Chrome",
            isGoogleDocsFrontmost() {
-            return cgFrame
+            return focusedCGWindowFrame(for: pid, matching: axFrame) ?? cgFrame
         }
         guard let axFrame else { return cgFrame }
         if shouldPreferCGWindowFrame(cgFrame, overAXFrame: axFrame) {
@@ -834,8 +841,8 @@ final class TextAccessService {
         AXUIElementGetPid(focused, &pid)
         let bundleID = resolvedBundleID(forOwningPID: pid)
 
-        let selected = selectedText(of: focused)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let range = selectedRange(of: focused)
+        let selected = selectedText(of: focused)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let rawFrame = rectForTextContext(anchorElement: focused)
         let frame = textContextFrame(
             for: focused,
@@ -843,7 +850,9 @@ final class TextAccessService {
             rawFrame: rawFrame,
             selectedRange: range
         )
-        if selected.count >= minLength {
+        let full = valueText(of: focused)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasRealSelection = (range?.length ?? 0) > 0
+        if selected.count >= minLength, hasRealSelection || full.isEmpty {
             let anchor = textAnchor(
                 for: focused,
                 range: range,
@@ -862,7 +871,6 @@ final class TextAccessService {
             )
         }
 
-        let full = valueText(of: focused)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if full.isEmpty, allowClipboardFallback, bundleID != "com.apple.mail" {
             if (range?.length ?? 0) > 0 {
                 let copied = readViaClipboardFallback().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1556,8 +1564,6 @@ final class TextAccessService {
         )
 
         let isElectronLikeHost = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
-        let canUseReconstructedFallback = prefersAtomicClipboardRangePaste(for: context)
-
         if let preferredLocalRange,
            let patch = localizedPatch(
                 original: context.text,
@@ -1591,25 +1597,17 @@ final class TextAccessService {
                     "clipboardRangePaste result=\(ok)"
                 )
                 if ok { return .success }
+            } else {
+                let armed = armClipboardForManualPaste(patch.replacement)
+                textoraDiagLog(
+                    "applyLocalizedRewrite",
+                    "patch touches protected/rich token — clipboard armed=\(armed) "
+                    + "replacement=\(textoraDiagPreview(patch.replacement))"
+                )
+                return armed ? .clipboardArmed : .failed
             }
 
-            // Default path for every host is the localized Telegram/Notes-
-            // style range paste above. If that does not land cleanly, fall
-            // back to the heavier Slack/Chrome-style reconstruction: rebuild
-            // the full field value with this scoped correction and paste it
-            // via Cmd+A + Cmd+V.
-            if canUseReconstructedFallback {
-                // Before pulling the Cmd+A + Cmd+V trigger, make sure we
-                // won't destroy adjacent layout. Slack's Quill composer
-                // (and every Electron composer we've tested) strips rich
-                // HTML/RTF on paste and collapses all logical paragraph
-                // blocks into a single block, which flattens inter-block
-                // padding and re-autolinks URLs. If the content outside
-                // the correction scope contains URL/mention tokens or
-                // paragraph breaks (`\n`) we refuse the destructive
-                // full-field paste and instead arm the clipboard with
-                // only the replacement so the user can apply the fix
-                // manually with a single ⌘V.
+            if isElectronLikeHost {
                 if fullValuePasteWouldDamageSlackLayout(basedOn: context) {
                     let armed = armClipboardForManualPaste(patch.replacement)
                     textoraDiagLog(
@@ -1623,7 +1621,7 @@ final class TextAccessService {
                 let ok = applyReconstructedFullValuePaste(rewritten, basedOn: context)
                 textoraDiagLog(
                     "applyLocalizedRewrite",
-                    "reconstructedFullValuePaste (fallback) result=\(ok)"
+                    "reconstructedFullValuePaste (electron fast-path) result=\(ok)"
                 )
                 return ok ? .success : .failed
             }
@@ -1639,6 +1637,113 @@ final class TextAccessService {
             "exit via applyRewrittenText result=\(result)"
         )
         return result
+    }
+
+    func applyIterativeLocalizedRewrite(
+        _ rewritten: String,
+        basedOn context: FocusedTextContext
+    ) -> ApplyResult {
+        textoraDiagLog(
+            "applyIterativeLocalizedRewrite",
+            "enter bundle=\(context.targetBundleID) original=\(textoraDiagPreview(context.text)) rewritten=\(textoraDiagPreview(rewritten))"
+        )
+        if prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) {
+            textoraDiagLog("applyIterativeLocalizedRewrite", "delegating electron host to applyRewrittenText")
+            return applyRewrittenText(rewritten, basedOn: context)
+        }
+        let changes = safeIterativeRewriteChanges(original: context.text, corrected: rewritten)
+        guard !changes.isEmpty else {
+            textoraDiagLog("applyIterativeLocalizedRewrite", "no safe changes")
+            return normalized(context.text) == normalized(rewritten) ? .success : .failed
+        }
+
+        focusTargetAppAndElement(context)
+        let contextNS = context.text as NSString
+        struct PlannedChange {
+            let range: NSRange
+            let absoluteRange: NSRange
+            let expectedText: String
+            let replacement: String
+        }
+
+        let planned: [PlannedChange] = changes.compactMap { change in
+            guard let absoluteRange = absoluteRangeForAtomicPaste(change.range, in: context) else {
+                textoraDiagLog(
+                    "applyIterativeLocalizedRewrite",
+                    "skip: no absolute range local=\(change.range.location):\(change.range.length)"
+                )
+                return nil
+            }
+            guard !rangeDamagesRichSlackTokens(absoluteRange: absoluteRange, in: context) else {
+                textoraDiagLog(
+                    "applyIterativeLocalizedRewrite",
+                    "skip: damages rich token absolute=\(absoluteRange.location):\(absoluteRange.length)"
+                )
+                return nil
+            }
+            let expected = change.range.length > 0 ? contextNS.substring(with: change.range) : ""
+            return PlannedChange(
+                range: change.range,
+                absoluteRange: absoluteRange,
+                expectedText: expected,
+                replacement: change.replacement
+            )
+        }
+        guard !planned.isEmpty else { return .failed }
+
+        let shouldUseCountedPhysicalRewrite =
+            prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
+        if shouldUseCountedPhysicalRewrite {
+            let ok = applyFullPhysicalRewriteIfSafe(rewritten, basedOn: context)
+            textoraDiagLog("applyIterativeLocalizedRewrite", "full physical result=\(ok)")
+            return ok ? .success : .failed
+        }
+
+        var appliedCount = 0
+        for change in planned.reversed() {
+            let ok = applyTrustedClipboardRangePaste(
+                replacement: change.replacement,
+                localRange: change.range,
+                absoluteRange: change.absoluteRange,
+                expectedSelectedText: change.expectedText,
+                basedOn: context
+            )
+            if ok {
+                appliedCount += 1
+                continue
+            }
+            textoraDiagLog(
+                "applyIterativeLocalizedRewrite",
+                "failed local=\(change.range.location):\(change.range.length) replacement=\(textoraDiagPreview(change.replacement))"
+            )
+            continue
+        }
+        textoraDiagLog("applyIterativeLocalizedRewrite", "success count=\(appliedCount)")
+        return appliedCount > 0 ? .success : .failed
+    }
+
+    private func safeIterativeRewriteChanges(
+        original: String,
+        corrected: String
+    ) -> [WordDiff.TextChange] {
+        let changes = WordDiff.changes(original: original, corrected: corrected)
+        guard !changes.isEmpty else { return [] }
+        let originalNS = original as NSString
+        let protectedRanges = rewriteProtectedRanges(in: original)
+        return changes.filter { change in
+            guard change.range.location >= 0,
+                  NSMaxRange(change.range) <= originalNS.length else {
+                return false
+            }
+            if protectedRanges.contains(where: { NSIntersectionRange($0, change.range).length > 0 }) {
+                return false
+            }
+            let originalSpan = change.range.length > 0 ? originalNS.substring(with: change.range) : ""
+            if protectedTokens(in: originalSpan) != protectedTokens(in: change.replacement) {
+                return false
+            }
+            return normalized(originalSpan) != normalized(change.replacement)
+        }
     }
 
     /// True iff a full-field Cmd+A + Cmd+V paste in an Electron-style
@@ -1772,9 +1877,48 @@ final class TextAccessService {
 
     private func richTokenRanges(in text: String) -> [NSRange] {
         let pattern = #"(?i)(?:https?://|www\.)\S+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[@#][\p{L}\p{N}_][\p{L}\p{N}_-]*|\+?\d[\d\s().-]{2,}\d"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
-        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+        var ranges: [NSRange] = []
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            ranges.append(contentsOf: regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range))
+        }
+        ranges.append(contentsOf: emojiRanges(in: text))
+        return ranges.sorted { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.length < rhs.length
+            }
+            return lhs.location < rhs.location
+        }
+    }
+
+    private func rewriteProtectedRanges(in text: String) -> [NSRange] {
+        richTokenRanges(in: text)
+    }
+
+    private func protectedTokens(in text: String) -> [String] {
+        let ns = text as NSString
+        return rewriteProtectedRanges(in: text).map { ns.substring(with: $0) }
+    }
+
+    private func emojiRanges(in text: String) -> [NSRange] {
+        var ranges: [NSRange] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let cluster = text[index..<next]
+            if cluster.unicodeScalars.contains(where: isEmojiScalar) {
+                ranges.append(NSRange(index..<next, in: text))
+            }
+            index = next
+        }
+        return ranges
+    }
+
+    private func isEmojiScalar(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar.properties.isEmojiPresentation { return true }
+        if scalar.value == 0xFE0F || scalar.value == 0x200D { return true }
+        guard scalar.properties.isEmoji else { return false }
+        return !(0x30...0x39).contains(scalar.value)
     }
 
     private func isBrowserBundleID(_ bundleID: String) -> Bool {
@@ -2512,6 +2656,24 @@ final class TextAccessService {
         let safeLength = max(0, min(localRange.length, contextNS.length - safeLocation))
         let safeLocalRange = NSRange(location: safeLocation, length: safeLength)
         let expectedSelectedText = safeLocalRange.length > 0 ? contextNS.substring(with: safeLocalRange) : ""
+        return applyClipboardRangePaste(
+            replacement: replacement,
+            localRange: safeLocalRange,
+            absoluteRange: absoluteRange,
+            expectedSelectedText: expectedSelectedText,
+            basedOn: context,
+            requireSelectionVerification: requireSelectionVerification
+        )
+    }
+
+    private func applyClipboardRangePaste(
+        replacement: String,
+        localRange: NSRange,
+        absoluteRange: NSRange,
+        expectedSelectedText: String,
+        basedOn context: FocusedTextContext,
+        requireSelectionVerification: Bool
+    ) -> Bool {
 
         // Electron/webview composers (Slack, Teams, Discord, …) accept
         // `AXUIElementSetAttributeValue(kAXSelectedTextRangeAttribute)` and
@@ -2652,6 +2814,578 @@ final class TextAccessService {
         restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
         textoraDiagLog("clipboardRangePaste", "exit true (no value readback available)")
         return true
+    }
+
+    private func applyTrustedClipboardRangePaste(
+        replacement: String,
+        localRange: NSRange,
+        absoluteRange: NSRange,
+        expectedSelectedText: String,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        textoraDiagLog(
+            "trustedRangePaste",
+            "enter localRange=\(localRange.location):\(localRange.length) "
+            + "absoluteRange=\(absoluteRange.location):\(absoluteRange.length) "
+            + "expectedSelected=\(textoraDiagPreview(expectedSelectedText)) "
+            + "replacement=\(textoraDiagPreview(replacement))"
+        )
+
+        let target = context.targetElement
+        let originalValue = valueText(of: target)
+        var cfRange = CFRange(location: absoluteRange.location, length: absoluteRange.length)
+        guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else {
+            textoraDiagLog("trustedRangePaste", "abort: AXValueCreate failed")
+            return false
+        }
+        let selectStatus = AXUIElementSetAttributeValue(
+            target,
+            kAXSelectedTextRangeAttribute as CFString,
+            rangeValue
+        )
+        guard selectStatus == .success else {
+            textoraDiagLog("trustedRangePaste", "abort: selectStatus=\(selectStatus.rawValue)")
+            return false
+        }
+        usleep(90_000)
+
+        if replacement.isEmpty {
+            let directStatus = AXUIElementSetAttributeValue(
+                target,
+                kAXSelectedTextAttribute as CFString,
+                "" as CFTypeRef
+            )
+            if directStatus == .success {
+                usleep(120_000)
+                if trustedRangePasteConfirmed(
+                    originalValue: originalValue,
+                    updatedValue: valueText(of: target),
+                    absoluteRange: absoluteRange,
+                    replacement: replacement
+                ) {
+                    textoraDiagLog("trustedRangePaste", "exit true (empty replacement via AX selected text)")
+                    return true
+                }
+                undoUnconfirmedTrustedRangeMutation(
+                    originalValue: originalValue,
+                    currentValue: valueText(of: target),
+                    reason: "AX selected text deletion"
+                )
+                textoraDiagLog("trustedRangePaste", "AX selected text reported success but deletion was not confirmed")
+            }
+            triggerDeleteKey()
+            usleep(140_000)
+            if trustedRangePasteConfirmed(
+                originalValue: originalValue,
+                updatedValue: valueText(of: target),
+                absoluteRange: absoluteRange,
+                replacement: replacement
+            ) {
+                textoraDiagLog("trustedRangePaste", "exit true (empty replacement via Delete)")
+                return true
+            }
+            undoUnconfirmedTrustedRangeMutation(
+                originalValue: originalValue,
+                currentValue: valueText(of: target),
+                reason: "Delete"
+            )
+            textoraDiagLog("trustedRangePaste", "Delete did not confirm deletion; trying physical rewrite fallback")
+            return applyTrustedPhysicalRangeRewrite(
+                replacement: replacement,
+                absoluteRange: absoluteRange,
+                originalValue: originalValue,
+                basedOn: context
+            )
+        }
+
+        let pasteboard = NSPasteboard.general
+        let snapshot = snapshotPasteboard(pasteboard)
+        let baselineChangeCount = pasteboard.changeCount
+        pasteboard.clearContents()
+        pasteboard.setString(replacement, forType: .string)
+        guard triggerPasteShortcut() else {
+            restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            textoraDiagLog("trustedRangePaste", "exit false (triggerPasteShortcut failed)")
+            return false
+        }
+        usleep(240_000)
+        if trustedRangePasteConfirmed(
+            originalValue: originalValue,
+            updatedValue: valueText(of: target),
+            absoluteRange: absoluteRange,
+            replacement: replacement
+        ) {
+            restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            textoraDiagLog("trustedRangePaste", "exit true (paste confirmed)")
+            return true
+        }
+
+        undoUnconfirmedTrustedRangeMutation(
+            originalValue: originalValue,
+            currentValue: valueText(of: target),
+            reason: "paste"
+        )
+        textoraDiagLog("trustedRangePaste", "paste dispatched but not confirmed; trying physical rewrite fallback")
+        let physicalOK = applyTrustedPhysicalRangeRewrite(
+            replacement: replacement,
+            absoluteRange: absoluteRange,
+            originalValue: originalValue,
+            basedOn: context
+        )
+        restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+        textoraDiagLog("trustedRangePaste", "physical fallback result=\(physicalOK)")
+        return physicalOK
+    }
+
+    private func undoUnconfirmedTrustedRangeMutation(
+        originalValue: String?,
+        currentValue: String?,
+        reason: String
+    ) {
+        guard let originalValue, let currentValue, originalValue != currentValue else { return }
+        triggerUndoShortcut()
+        usleep(100_000)
+        textoraDiagLog("trustedRangePaste", "undo triggered after unconfirmed \(reason)")
+    }
+
+    private func applyBatchedCountedPhysicalRewrite(
+        changes: [(range: NSRange, replacement: String)],
+        rewritten: String,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        let sorted = changes.sorted { lhs, rhs in
+            if lhs.range.location == rhs.range.location {
+                return lhs.range.length < rhs.range.length
+            }
+            return lhs.range.location < rhs.range.location
+        }
+        guard !sorted.isEmpty else { return true }
+
+        let target = context.targetElement
+        guard let originalValue = valueText(of: target) else {
+            textoraDiagLog("batchedPhysicalRewrite", "abort: no value readback available")
+            return false
+        }
+        let originalLen = (originalValue as NSString).length
+        var previousEnd = 0
+        var cumulativeDelta = 0
+        var cursorLocation = 0
+        var keystrokeBudget = 0
+
+        for change in sorted {
+            let end = change.range.location + change.range.length
+            guard change.range.location >= previousEnd,
+                  change.range.location >= 0,
+                  change.range.length >= 0,
+                  end <= originalLen else {
+                textoraDiagLog(
+                    "batchedPhysicalRewrite",
+                    "abort: invalid/overlapping range=\(change.range.location):\(change.range.length) "
+                    + "previousEnd=\(previousEnd) originalLen=\(originalLen)"
+                )
+                return false
+            }
+            let currentLocation = change.range.location + cumulativeDelta
+            guard currentLocation >= cursorLocation else {
+                textoraDiagLog(
+                    "batchedPhysicalRewrite",
+                    "abort: currentLocation=\(currentLocation) before cursor=\(cursorLocation)"
+                )
+                return false
+            }
+            keystrokeBudget += currentLocation - cursorLocation + change.range.length
+            cumulativeDelta += (change.replacement as NSString).length - change.range.length
+            cursorLocation = currentLocation + (change.replacement as NSString).length
+            previousEnd = end
+        }
+
+        let maxKeystrokes = 1800
+        guard keystrokeBudget <= maxKeystrokes else {
+            textoraDiagLog(
+                "batchedPhysicalRewrite",
+                "abort: keystrokeBudget=\(keystrokeBudget) > \(maxKeystrokes)"
+            )
+            return false
+        }
+
+        let expectedValue = expectedFullValue(
+            originalValue: originalValue,
+            rewritten: rewritten,
+            basedOn: context,
+            changes: sorted
+        )
+
+        textoraDiagLog(
+            "batchedPhysicalRewrite",
+            "enter bundle=\(context.targetBundleID) changes=\(sorted.count) "
+            + "originalLen=\(originalLen) expectedLen=\((expectedValue as NSString).length) "
+            + "keystrokeBudget=\(keystrokeBudget)"
+        )
+
+        focusTargetAppAndElement(context)
+        usleep(180_000)
+        triggerCmdLeftArrowKey()
+        usleep(80_000)
+        triggerCmdLeftArrowKey()
+        usleep(120_000)
+
+        cumulativeDelta = 0
+        cursorLocation = 0
+        for change in sorted {
+            let currentLocation = change.range.location + cumulativeDelta
+            let moveRightCount = currentLocation - cursorLocation
+            if moveRightCount > 0 {
+                textoraDiagLog(
+                    "batchedPhysicalRewrite",
+                    "moveRight=\(moveRightCount) delete=\(change.range.length) "
+                    + "replacement=\(textoraDiagPreview(change.replacement))"
+                )
+            } else {
+                textoraDiagLog(
+                    "batchedPhysicalRewrite",
+                    "moveRight=0 delete=\(change.range.length) "
+                    + "replacement=\(textoraDiagPreview(change.replacement))"
+                )
+            }
+
+            for _ in 0..<moveRightCount {
+                triggerRightArrowKey()
+            }
+            if moveRightCount > 0 {
+                usleep(UInt32(35_000 + moveRightCount * 120))
+            }
+
+            if change.range.length > 0 {
+                for _ in 0..<change.range.length {
+                    triggerDeleteKey()
+                    usleep(6_000)
+                }
+                usleep(UInt32(45_000 + change.range.length * 220))
+            }
+
+            if !change.replacement.isEmpty {
+                guard triggerUnicodeText(change.replacement) else {
+                    textoraDiagLog("batchedPhysicalRewrite", "abort: unicode typing failed")
+                    return false
+                }
+                usleep(UInt32(70_000 + min(180_000, change.replacement.utf16.count * 2_000)))
+            }
+
+            cumulativeDelta += (change.replacement as NSString).length - change.range.length
+            cursorLocation = currentLocation + (change.replacement as NSString).length
+        }
+
+        guard let updatedValue = valueText(of: target) else {
+            textoraDiagLog("batchedPhysicalRewrite", "exit true (no value readback after typing)")
+            return true
+        }
+        if normalized(updatedValue) == normalized(expectedValue) {
+            textoraDiagLog("batchedPhysicalRewrite", "exit true (confirmed)")
+            return true
+        }
+
+        if originalValue != updatedValue {
+            triggerUndoShortcut()
+            usleep(120_000)
+            textoraDiagLog("batchedPhysicalRewrite", "undo triggered (not confirmed)")
+        }
+        textoraDiagLog(
+            "batchedPhysicalRewrite",
+            "exit false expected=\(textoraDiagPreview(expectedValue)) updated=\(textoraDiagPreview(updatedValue))"
+        )
+        return false
+    }
+
+    private func expectedFullValue(
+        originalValue: String,
+        rewritten: String,
+        basedOn context: FocusedTextContext,
+        changes: [(range: NSRange, replacement: String)]
+    ) -> String {
+        let fullNS = originalValue as NSString
+        let contextRange = fullNS.range(of: context.text)
+        if contextRange.location != NSNotFound {
+            return fullNS.replacingCharacters(in: contextRange, with: rewritten)
+        }
+
+        var result = originalValue
+        for change in changes.sorted(by: { $0.range.location > $1.range.location }) {
+            result = (result as NSString).replacingCharacters(in: change.range, with: change.replacement)
+        }
+        return result
+    }
+
+    private func applyFullPhysicalRewriteIfSafe(
+        _ rewritten: String,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        guard rewriteProtectedRanges(in: context.text).isEmpty,
+              rewriteProtectedRanges(in: rewritten).isEmpty else {
+            textoraDiagLog("fullPhysicalRewrite", "abort: protected token present")
+            return false
+        }
+        let maxCharacters = 1500
+        guard context.text.utf16.count <= maxCharacters,
+              rewritten.utf16.count <= maxCharacters else {
+            textoraDiagLog(
+                "fullPhysicalRewrite",
+                "abort: text too long originalLen=\(context.text.utf16.count) rewrittenLen=\(rewritten.utf16.count)"
+            )
+            return false
+        }
+
+        let target = context.targetElement
+        guard let originalValue = valueText(of: target) else {
+            textoraDiagLog("fullPhysicalRewrite", "abort: no value readback available")
+            return false
+        }
+        guard normalized(originalValue) != normalized(rewritten) else {
+            textoraDiagLog("fullPhysicalRewrite", "exit true (already matches)")
+            return true
+        }
+
+        textoraDiagLog(
+            "fullPhysicalRewrite",
+            "enter bundle=\(context.targetBundleID) originalLen=\(originalValue.utf16.count) rewrittenLen=\(rewritten.utf16.count)"
+        )
+
+        focusTargetAppAndElement(context)
+        usleep(180_000)
+        triggerSelectAllShortcut()
+        usleep(80_000)
+        triggerSelectAllShortcut()
+        usleep(110_000)
+        triggerBackspaceKey()
+        usleep(130_000)
+
+        if !rewritten.isEmpty {
+            guard triggerUnicodeTextInChunks(rewritten) else {
+                textoraDiagLog("fullPhysicalRewrite", "abort: chunked unicode typing failed")
+                return false
+            }
+        }
+        usleep(UInt32(180_000 + min(500_000, rewritten.utf16.count * 1_500)))
+
+        guard let updatedValue = valueText(of: target) else {
+            textoraDiagLog("fullPhysicalRewrite", "exit true (no value readback after typing)")
+            return true
+        }
+        if normalized(updatedValue) == normalized(rewritten) {
+            textoraDiagLog("fullPhysicalRewrite", "exit true (confirmed)")
+            return true
+        }
+
+        if originalValue != updatedValue {
+            triggerUndoShortcut()
+            usleep(120_000)
+            textoraDiagLog("fullPhysicalRewrite", "undo triggered (not confirmed)")
+        }
+        textoraDiagLog(
+            "fullPhysicalRewrite",
+            "exit false expected=\(textoraDiagPreview(rewritten)) updated=\(textoraDiagPreview(updatedValue))"
+        )
+        return false
+    }
+
+    private func applyCountedPhysicalRangeRewrite(
+        replacement: String,
+        absoluteRange: NSRange,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        let target = context.targetElement
+        guard let originalValue = valueText(of: target) else {
+            textoraDiagLog("countedPhysicalRangeRewrite", "abort: no value readback available")
+            return false
+        }
+        let originalLen = (originalValue as NSString).length
+        let absoluteEnd = absoluteRange.location + absoluteRange.length
+        guard absoluteRange.location >= 0,
+              absoluteRange.length >= 0,
+              absoluteEnd <= originalLen else {
+            textoraDiagLog(
+                "countedPhysicalRangeRewrite",
+                "abort: absoluteRange=\(absoluteRange.location):\(absoluteRange.length) originalLen=\(originalLen)"
+            )
+            return false
+        }
+
+        let distanceFromStart = absoluteRange.location
+        let distanceFromEnd = originalLen - absoluteEnd
+        let useStartAnchor = distanceFromStart <= distanceFromEnd
+        let travelDistance = useStartAnchor ? distanceFromStart : distanceFromEnd
+        let totalKeystrokes = travelDistance + absoluteRange.length
+        let maxKeystrokes = 900
+        guard totalKeystrokes <= maxKeystrokes else {
+            textoraDiagLog(
+                "countedPhysicalRangeRewrite",
+                "abort: total keystrokes=\(totalKeystrokes) > \(maxKeystrokes) "
+                + "travel=\(travelDistance) len=\(absoluteRange.length)"
+            )
+            return false
+        }
+
+        textoraDiagLog(
+            "countedPhysicalRangeRewrite",
+            "enter bundle=\(context.targetBundleID) "
+            + "absoluteRange=\(absoluteRange.location):\(absoluteRange.length) "
+            + "originalLen=\(originalLen) anchor=\(useStartAnchor ? "start" : "end") "
+            + "travel=\(travelDistance) replacement=\(textoraDiagPreview(replacement))"
+        )
+
+        focusTargetAppAndElement(context)
+        // Slack may consume the first navigation event while its composer
+        // is being reactivated. Anchor twice; a second Cmd+Left/Right at
+        // the same edge is harmless, but it makes first-press rewrites land.
+        usleep(180_000)
+        if useStartAnchor {
+            triggerCmdLeftArrowKey()
+            usleep(80_000)
+            triggerCmdLeftArrowKey()
+            usleep(110_000)
+            for _ in 0..<distanceFromStart {
+                triggerRightArrowKey()
+            }
+            if distanceFromStart > 0 {
+                usleep(UInt32(50_000 + distanceFromStart * 180))
+            }
+            for _ in 0..<absoluteRange.length {
+                triggerShiftRightArrowKey()
+            }
+        } else {
+            triggerCmdRightArrowKey()
+            usleep(80_000)
+            triggerCmdRightArrowKey()
+            usleep(110_000)
+            for _ in 0..<distanceFromEnd {
+                triggerLeftArrowKey()
+            }
+            if distanceFromEnd > 0 {
+                usleep(UInt32(50_000 + distanceFromEnd * 180))
+            }
+            for _ in 0..<absoluteRange.length {
+                triggerShiftLeftArrowKey()
+            }
+        }
+        usleep(UInt32(80_000 + absoluteRange.length * 250))
+
+        triggerBackspaceKey()
+        usleep(130_000)
+
+        if !replacement.isEmpty {
+            guard triggerUnicodeText(replacement) else {
+                textoraDiagLog("countedPhysicalRangeRewrite", "abort: unicode typing failed")
+                return false
+            }
+            usleep(UInt32(130_000 + min(220_000, replacement.utf16.count * 3_000)))
+        }
+
+        guard let updatedValue = valueText(of: target) else {
+            textoraDiagLog("countedPhysicalRangeRewrite", "exit true (no value readback after typing)")
+            return true
+        }
+        if trustedRangePasteConfirmed(
+            originalValue: originalValue,
+            updatedValue: updatedValue,
+            absoluteRange: absoluteRange,
+            replacement: replacement
+        ) {
+            textoraDiagLog("countedPhysicalRangeRewrite", "exit true (confirmed)")
+            return true
+        }
+
+        if originalValue != updatedValue {
+            triggerUndoShortcut()
+            usleep(100_000)
+            textoraDiagLog("countedPhysicalRangeRewrite", "undo triggered (not confirmed)")
+        }
+        textoraDiagLog(
+            "countedPhysicalRangeRewrite",
+            "exit false expected=\(textoraDiagPreview(replacingText(in: originalValue, range: absoluteRange, with: replacement))) "
+            + "updated=\(textoraDiagPreview(updatedValue))"
+        )
+        return false
+    }
+
+    private func trustedRangePasteConfirmed(
+        originalValue: String?,
+        updatedValue: String?,
+        absoluteRange: NSRange,
+        replacement: String
+    ) -> Bool {
+        guard let originalValue, let updatedValue else {
+            // Some secure fields do not expose readback. If the host accepted
+            // the event, preserve the previous best-effort behaviour.
+            return true
+        }
+        let expectedValue = replacingText(in: originalValue, range: absoluteRange, with: replacement)
+        if updatedValue == expectedValue { return true }
+        if normalized(updatedValue) == normalized(expectedValue),
+           originalValue != updatedValue {
+            return true
+        }
+        guard originalValue != updatedValue else { return false }
+        return pasteLandedAtAnchor(
+            originalValue: originalValue,
+            updatedValue: updatedValue,
+            absoluteRange: absoluteRange,
+            replacement: replacement
+        )
+    }
+
+    private func applyTrustedPhysicalRangeRewrite(
+        replacement: String,
+        absoluteRange: NSRange,
+        originalValue: String?,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        let target = context.targetElement
+        focusTargetAppAndElement(context)
+
+        var cfRange = CFRange(location: absoluteRange.location, length: absoluteRange.length)
+        guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else {
+            textoraDiagLog("trustedRangePaste", "physical fallback abort: AXValueCreate failed")
+            return false
+        }
+        let selectStatus = AXUIElementSetAttributeValue(
+            target,
+            kAXSelectedTextRangeAttribute as CFString,
+            rangeValue
+        )
+        guard selectStatus == .success else {
+            textoraDiagLog("trustedRangePaste", "physical fallback abort: selectStatus=\(selectStatus.rawValue)")
+            return false
+        }
+        usleep(90_000)
+
+        triggerBackspaceKey()
+        usleep(120_000)
+
+        if !replacement.isEmpty {
+            if triggerUnicodeText(replacement) {
+                usleep(UInt32(120_000 + min(160_000, replacement.utf16.count * 2_000)))
+            } else {
+                textoraDiagLog("trustedRangePaste", "physical fallback abort: unicode typing failed")
+                return false
+            }
+        }
+
+        let updatedValue = valueText(of: target)
+        if trustedRangePasteConfirmed(
+            originalValue: originalValue,
+            updatedValue: updatedValue,
+            absoluteRange: absoluteRange,
+            replacement: replacement
+        ) {
+            textoraDiagLog("trustedRangePaste", "physical fallback confirmed")
+            return true
+        }
+
+        if let originalValue, let updatedValue, originalValue != updatedValue {
+            triggerUndoShortcut()
+            usleep(90_000)
+            textoraDiagLog("trustedRangePaste", "physical fallback undo triggered (not confirmed)")
+        }
+        return false
     }
 
     /// Verify that a paste actually replaced `absoluteRange` with
@@ -2839,7 +3573,11 @@ final class TextAccessService {
             + "preferredLocal=\(preferredLocalRange.location):\(preferredLocalRange.length) "
             + "safePreferred=\(safePreferred.location):\(safePreferred.length)"
         )
-        guard NSIntersectionRange(envelope.originalRange, safePreferred).length > 0 else {
+        let intersectsPreferred = NSIntersectionRange(envelope.originalRange, safePreferred).length > 0
+        let insertionInsidePreferred = envelope.originalRange.length == 0
+            && envelope.originalRange.location >= safePreferred.location
+            && envelope.originalRange.location <= safePreferred.location + safePreferred.length
+        guard intersectsPreferred || insertionInsidePreferred else {
             textoraDiagLog("localizedPatch", "reject: envelope does not intersect preferred local range")
             return nil
         }
@@ -3375,8 +4113,34 @@ final class TextAccessService {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedWindow: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(systemWide, kAXFocusedWindowAttribute as CFString, &focusedWindow)
-        guard status == .success, let focusedWindow else { return nil }
-        return (focusedWindow as! AXUIElement)
+        let systemWindow = (status == .success && focusedWindow != nil) ? (focusedWindow as! AXUIElement) : nil
+        guard let elementWindow = focusedWindowElementFromFocusedElement() else {
+            return systemWindow
+        }
+        guard let systemWindow else { return elementWindow }
+
+        let elementBundle = bundleID(for: elementWindow)
+        let systemBundle = bundleID(for: systemWindow)
+        if elementBundle == "com.google.Chrome" || isBrowserBundleID(elementBundle ?? "") {
+            return elementWindow
+        }
+        return elementBundle == systemBundle ? systemWindow : elementWindow
+    }
+
+    private func focusedWindowElementFromFocusedElement() -> AXUIElement? {
+        guard var current = queryFocusedUIElementFromSystem() else { return nil }
+        if let directWindow = axElement(of: current, attribute: "AXWindow") {
+            return directWindow
+        }
+        for _ in 0..<24 {
+            let role = axString(of: current, attribute: kAXRoleAttribute) ?? ""
+            if role == "AXWindow" {
+                return current
+            }
+            guard let parent = axElement(of: current, attribute: kAXParentAttribute as String) else { break }
+            current = parent
+        }
+        return nil
     }
 
     private func bundleID(for element: AXUIElement) -> String? {
@@ -3389,7 +4153,14 @@ final class TextAccessService {
         mainCGWindowCaptureInfo(for: pid)?.rect
     }
 
-    private func mainCGWindowCaptureInfo(for pid: pid_t) -> (windowID: CGWindowID, rect: CGRect)? {
+    private func focusedCGWindowFrame(for pid: pid_t, matching reference: CGRect?) -> CGRect? {
+        mainCGWindowCaptureInfo(for: pid, matching: reference)?.rect
+    }
+
+    private func mainCGWindowCaptureInfo(
+        for pid: pid_t,
+        matching reference: CGRect? = nil
+    ) -> (windowID: CGWindowID, rect: CGRect)? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
@@ -3418,10 +4189,24 @@ final class TextAccessService {
             return (CGWindowID(number.uint32Value), normalized, isVisible)
         }
         let visibleCandidates = candidates.filter(\.isVisible)
-        return (visibleCandidates.isEmpty ? candidates : visibleCandidates)
+        let pool = visibleCandidates.isEmpty ? candidates : visibleCandidates
+        if let reference, !reference.isEmpty {
+            return pool.max { lhs, rhs in
+                cgWindowMatchScore(lhs.rect, reference: reference) < cgWindowMatchScore(rhs.rect, reference: reference)
+            }.map { ($0.windowID, $0.rect) }
+        }
+        return pool
             .max { lhs, rhs in
                 (lhs.rect.width * lhs.rect.height) < (rhs.rect.width * rhs.rect.height)
             }.map { ($0.windowID, $0.rect) }
+    }
+
+    private func cgWindowMatchScore(_ rect: CGRect, reference: CGRect) -> CGFloat {
+        let overlap = rect.intersection(reference)
+        let overlapArea = overlap.isNull ? 0 : overlap.width * overlap.height
+        let centerDistance = hypot(rect.midX - reference.midX, rect.midY - reference.midY)
+        let sizeDelta = abs(rect.width - reference.width) + abs(rect.height - reference.height)
+        return overlapArea - centerDistance * 18 - sizeDelta * 4
     }
 
     private func normalizedCGWindowRect(_ raw: CGRect) -> CGRect {
@@ -4107,6 +4892,81 @@ end tell
         zUp?.post(tap: .cghidEventTap)
     }
 
+    private func triggerDeleteKey() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        // Forward delete key.
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x75, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x75, keyDown: false)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func triggerBackspaceKey() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        // Backspace/delete key. More consistently honoured by web composers
+        // for deleting an active selection than the forward-delete key.
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func triggerRightArrowKey() {
+        // 0x7C is the right-arrow virtual key.
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x7C, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x7C, keyDown: false)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func triggerUnicodeText(_ text: String) -> Bool {
+        guard !text.isEmpty else { return true }
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let units = Array(text.utf16)
+        guard !units.isEmpty else { return true }
+
+        return units.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return false }
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            down?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            up?.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+            return down != nil && up != nil
+        }
+    }
+
+    private func triggerUnicodeTextInChunks(_ text: String) -> Bool {
+        guard !text.isEmpty else { return true }
+
+        var chunk = ""
+        var chunkUnits = 0
+        let maxUnitsPerChunk = 8
+
+        func flushChunk() -> Bool {
+            guard !chunk.isEmpty else { return true }
+            let current = chunk
+            chunk = ""
+            chunkUnits = 0
+            guard triggerUnicodeText(current) else { return false }
+            usleep(UInt32(18_000 + min(55_000, current.utf16.count * 4_000)))
+            return true
+        }
+
+        for character in text {
+            let units = String(character).utf16.count
+            if chunkUnits > 0, chunkUnits + units > maxUnitsPerChunk {
+                guard flushChunk() else { return false }
+            }
+            chunk.append(character)
+            chunkUnits += units
+        }
+
+        return flushChunk()
+    }
+
     private func triggerSelectAllShortcut() {
         let source = CGEventSource(stateID: .combinedSessionState)
         // 'a' key = 0x00
@@ -4154,6 +5014,28 @@ end tell
         up?.post(tap: .cghidEventTap)
     }
 
+    private func triggerCmdLeftArrowKey() {
+        // 0x7B is the left-arrow virtual key.
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x7B, keyDown: true)
+        down?.flags = .maskCommand
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x7B, keyDown: false)
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func triggerCmdRightArrowKey() {
+        // 0x7C is the right-arrow virtual key.
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x7C, keyDown: true)
+        down?.flags = .maskCommand
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x7C, keyDown: false)
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
     /// Cmd+Down. Standard macOS "move caret to end of document" shortcut.
     /// Used by `applyCaretAnchoredKeystrokeRangePaste` to reliably anchor
     /// the caret in Electron composers that refuse to honour AX caret
@@ -4164,6 +5046,17 @@ end tell
         let down = CGEvent(keyboardEventSource: source, virtualKey: 0x7D, keyDown: true)
         down?.flags = .maskCommand
         let up = CGEvent(keyboardEventSource: source, virtualKey: 0x7D, keyDown: false)
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    private func triggerCmdUpArrowKey() {
+        // 0x7E is the up-arrow virtual key.
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0x7E, keyDown: true)
+        down?.flags = .maskCommand
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0x7E, keyDown: false)
         up?.flags = .maskCommand
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)

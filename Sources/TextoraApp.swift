@@ -6,6 +6,12 @@ struct TextoraApp: App {
     @StateObject private var coordinator = AppCoordinator.shared
     private let donateURL = "https://github.com/sponsors/MasterHrust"
 
+    init() {
+        UserDefaults.standard.register(defaults: [
+            AppViewModel.SettingsKeys.smartAIEnabled: true
+        ])
+    }
+
     private var menuBarIcon: NSImage {
         // Status bar expects small template images; oversized color PNGs can render incorrectly.
         let base = NSImage(named: "helper-icon") ?? NSImage()

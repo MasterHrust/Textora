@@ -12,6 +12,79 @@ struct AIClient {
         static let customModel = "gpt-4o-mini"
     }
 
+    private func logAIRequest(
+        kind: String,
+        provider: AIProvider,
+        model: String,
+        operation: RewriteOperation?,
+        text: String,
+        promptKind: String
+    ) -> Date {
+        let startedAt = Date()
+        textoraDiagLog(
+            "aiRewrite",
+            "request kind=\(kind) provider=\(provider.rawValue) model=\(model) "
+            + "operation=\(operation?.rawValue ?? "multi") prompt=\(promptKind) "
+            + "textLen=\((text as NSString).length) text=\(textoraDiagPreview(text))"
+        )
+        return startedAt
+    }
+
+    private func fallbackModel(for provider: AIProvider) -> String {
+        switch provider {
+        case .openai:
+            return Defaults.openAIModel
+        case .gemini:
+            return Defaults.geminiModel
+        case .claude:
+            return Defaults.claudeModel
+        case .other:
+            return Defaults.customModel
+        }
+    }
+
+    private func logAIResponse(
+        kind: String,
+        startedAt: Date,
+        output: String
+    ) {
+        textoraDiagLog(
+            "aiRewrite",
+            "response kind=\(kind) durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
+            + "outputLen=\((output as NSString).length) output=\(textoraDiagPreview(output))"
+        )
+    }
+
+    private func logAIResponse(
+        kind: String,
+        startedAt: Date,
+        suggestions: [OverlaySuggestion]
+    ) {
+        let summary = suggestions
+            .map { "\($0.operation.rawValue):\(($0.text as NSString).length)" }
+            .joined(separator: ",")
+        textoraDiagLog(
+            "aiRewrite",
+            "response kind=\(kind) durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
+            + "suggestions=\(summary.isEmpty ? "none" : summary)"
+        )
+    }
+
+    private func logAIResponse(
+        kind: String,
+        startedAt: Date,
+        issues: [OverlayIssue]
+    ) {
+        let summary = issues
+            .map { "\($0.category.rawValue):\($0.localRange.location):\($0.localRange.length)" }
+            .joined(separator: ",")
+        textoraDiagLog(
+            "aiRewrite",
+            "response kind=\(kind) durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
+            + "issues=\(summary.isEmpty ? "none" : summary)"
+        )
+    }
+
     func rewriteText(
         provider: AIProvider,
         model: String,
@@ -19,9 +92,19 @@ struct AIClient {
         text: String,
         operation: RewriteOperation
     ) async throws -> String {
+        let resolvedModel = model.isEmpty ? fallbackModel(for: provider) : model
+        let startedAt = logAIRequest(
+            kind: "manualRewrite",
+            provider: provider,
+            model: resolvedModel,
+            operation: operation,
+            text: text,
+            promptKind: "operationPrompt"
+        )
+        let output: String
         switch provider {
         case .openai:
-            return try await rewriteOpenAI(
+            output = try await rewriteOpenAI(
                 model: model.isEmpty ? Defaults.openAIModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -29,7 +112,7 @@ struct AIClient {
                 systemPromptOverride: nil
             )
         case .gemini:
-            return try await rewriteGemini(
+            output = try await rewriteGemini(
                 model: model.isEmpty ? Defaults.geminiModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -37,7 +120,7 @@ struct AIClient {
                 systemPromptOverride: nil
             )
         case .claude:
-            return try await rewriteClaude(
+            output = try await rewriteClaude(
                 model: model.isEmpty ? Defaults.claudeModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -45,7 +128,7 @@ struct AIClient {
                 systemPromptOverride: nil
             )
         case .other:
-            return try await rewriteOpenAICompatible(
+            output = try await rewriteOpenAICompatible(
                 model: model.isEmpty ? Defaults.customModel : model,
                 token: apiKey,
                 text: text,
@@ -53,6 +136,8 @@ struct AIClient {
                 systemPromptOverride: nil
             )
         }
+        logAIResponse(kind: "manualRewrite", startedAt: startedAt, output: output)
+        return output
     }
 
     func checkAndSuggestIfNeeded(
@@ -61,6 +146,15 @@ struct AIClient {
         apiKey: String,
         text: String
     ) async throws -> String {
+        let resolvedModel = model.isEmpty ? fallbackModel(for: provider) : model
+        let startedAt = logAIRequest(
+            kind: "fixCheck",
+            provider: provider,
+            model: resolvedModel,
+            operation: .fixGrammar,
+            text: text,
+            promptKind: "strictFix"
+        )
         let strictPrompt = """
         You are a precision grammar assistant.
         Correct grammar, spelling, punctuation, word order, and obvious shorthand while preserving intended meaning.
@@ -74,9 +168,10 @@ struct AIClient {
         Return only the final corrected text.
         """
 
+        let output: String
         switch provider {
         case .openai:
-            return try await rewriteOpenAI(
+            output = try await rewriteOpenAI(
                 model: model.isEmpty ? Defaults.openAIModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -84,7 +179,7 @@ struct AIClient {
                 systemPromptOverride: strictPrompt
             )
         case .gemini:
-            return try await rewriteGemini(
+            output = try await rewriteGemini(
                 model: model.isEmpty ? Defaults.geminiModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -92,7 +187,7 @@ struct AIClient {
                 systemPromptOverride: strictPrompt
             )
         case .claude:
-            return try await rewriteClaude(
+            output = try await rewriteClaude(
                 model: model.isEmpty ? Defaults.claudeModel : model,
                 apiKey: apiKey,
                 text: text,
@@ -100,7 +195,7 @@ struct AIClient {
                 systemPromptOverride: strictPrompt
             )
         case .other:
-            return try await rewriteOpenAICompatible(
+            output = try await rewriteOpenAICompatible(
                 model: model.isEmpty ? Defaults.customModel : model,
                 token: apiKey,
                 text: text,
@@ -108,6 +203,8 @@ struct AIClient {
                 systemPromptOverride: strictPrompt
             )
         }
+        logAIResponse(kind: "fixCheck", startedAt: startedAt, output: output)
+        return output
     }
 
     func overlaySuggestions(
@@ -116,6 +213,15 @@ struct AIClient {
         apiKey: String,
         text: String
     ) async throws -> [OverlaySuggestion] {
+        let resolvedModel = model.isEmpty ? fallbackModel(for: provider) : model
+        let startedAt = logAIRequest(
+            kind: "overlaySuggestions",
+            provider: provider,
+            model: resolvedModel,
+            operation: nil,
+            text: text,
+            promptKind: "multiOperationJSON"
+        )
         let prompt = """
         You are Textora's inline suggestion engine.
         Return only a compact JSON object with these exact string keys: "fix", "formal", "shorten", "humanize".
@@ -171,7 +277,9 @@ struct AIClient {
                 systemPromptOverride: prompt
             )
         }
-        return decodeOverlaySuggestions(raw, original: text)
+        let suggestions = decodeOverlaySuggestions(raw, original: text)
+        logAIResponse(kind: "overlaySuggestions", startedAt: startedAt, suggestions: suggestions)
+        return suggestions
     }
 
     /// Structured "auditor" pass: the model returns a list of *localized*
@@ -196,6 +304,15 @@ struct AIClient {
         apiKey: String,
         text: String
     ) async throws -> [OverlayIssue] {
+        let resolvedModel = model.isEmpty ? fallbackModel(for: provider) : model
+        let startedAt = logAIRequest(
+            kind: "auditIssues",
+            provider: provider,
+            model: resolvedModel,
+            operation: nil,
+            text: text,
+            promptKind: "localizedAuditJSON"
+        )
         let prompt = """
         You are Textora's inline auditor. You receive a single user text and must
         return a JSON object with one key, "issues", whose value is an array of
@@ -307,7 +424,9 @@ struct AIClient {
                 systemPromptOverride: prompt
             )
         }
-        return decodeAuditIssues(raw, original: text)
+        let issues = decodeAuditIssues(raw, original: text)
+        logAIResponse(kind: "auditIssues", startedAt: startedAt, issues: issues)
+        return issues
     }
 
     func translateText(
@@ -589,9 +708,34 @@ struct AIClient {
             + #"|[€$£¥₽₴₺₹₸₩]"#
             + #"|\b\d+\s*(?:kg|g|lb|lbs|km|cm|mm|ft|in|mph|kph|oz|ml|l)\b"#
             + #"|°[CF]\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-            .map { ns.substring(with: $0.range) }
+        var tokens: [String] = []
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            tokens.append(contentsOf: regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+                .map { ns.substring(with: $0.range) })
+        }
+        tokens.append(contentsOf: emojiTokens(in: text))
+        return tokens
+    }
+
+    private func emojiTokens(in text: String) -> [String] {
+        var tokens: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let cluster = text[index..<next]
+            if cluster.unicodeScalars.contains(where: isEmojiScalar) {
+                tokens.append(String(cluster))
+            }
+            index = next
+        }
+        return tokens
+    }
+
+    private func isEmojiScalar(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar.properties.isEmojiPresentation { return true }
+        if scalar.value == 0xFE0F || scalar.value == 0x200D { return true }
+        guard scalar.properties.isEmoji else { return false }
+        return !(0x30...0x39).contains(scalar.value)
     }
 
     private func rewriteOpenAI(

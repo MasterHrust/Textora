@@ -46,11 +46,11 @@ enum RewriteOperation: String, CaseIterable, Identifiable {
             Return only the final corrected text.
             """
         case .shorten:
-            return "Shorten the text while preserving key meaning and tone. Keep the original language unchanged. Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
+            return "Shorten the text while preserving key meaning and tone. Also correct grammar, spelling, punctuation, word order, and obvious shorthand when needed. Keep the original language unchanged. Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
         case .makeProfessional:
-            return "Rewrite in a professional, polished tone. Preserve core meaning. Keep the original language unchanged (do not translate). Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
+            return "Rewrite in a professional, polished tone. Also correct grammar, spelling, punctuation, word order, and obvious shorthand when needed. Preserve core meaning. Keep the original language unchanged (do not translate). Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
         case .humanize:
-            return "Rewrite to sound natural, human, and less robotic. Preserve meaning. Keep the original language unchanged. Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
+            return "Rewrite to sound natural, human, and less robotic. Also correct grammar, spelling, punctuation, word order, and obvious shorthand when needed. Preserve meaning. Keep the original language unchanged. Preserve ordered-list markers exactly; never remove or rewrite a leading list number, its dot, or the following space. Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, or code-like tokens. Do not modify currency abbreviations (EUR, USD, GBP, …) or unit symbols (€, $, £, %, kg, km, °C, …). Do not use em dashes. Return only rewritten text."
         }
     }
 }
@@ -63,7 +63,7 @@ struct OverlaySuggestion: Identifiable, Equatable {
 
     var id: String { operation.rawValue }
     var title: String {
-        isRecommended ? "\(operation.rawValue) (Recommended)" : operation.rawValue
+        operation.rawValue
     }
 }
 

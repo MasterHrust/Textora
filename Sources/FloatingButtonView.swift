@@ -31,10 +31,20 @@ struct FloatingButtonView: View {
     let isLoading: Bool
     let isHovered: Bool
     let showsCheckmark: Bool
+    let showsSmartAIBadge: Bool
     var spotlightPulse: Bool = false
 
     @State private var spotlightGlowOpacity: CGFloat = 0
     @State private var spotlightGlowRadius: CGFloat = 6
+
+    private static let helperIcon: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "helper-icon", withExtension: "png") else {
+            return nil
+        }
+        let image = NSImage(contentsOf: url)
+        image?.isTemplate = false
+        return image
+    }()
 
     private let iconSide: CGFloat = 39
     private let outerPad: CGFloat = 6
@@ -52,7 +62,9 @@ struct FloatingButtonView: View {
 
             iconView
                 .frame(width: iconSide, height: iconSide)
+                .background(Circle().fill(Color.white.opacity(0.92)))
                 .clipShape(Circle())
+                .compositingGroup()
                 .scaleEffect(isHovered ? 1.08 : 1.0)
                 .shadow(
                     color: Color.cyan.opacity(isHovered ? 0.26 : Double(spotlightGlowOpacity) * 0.75),
@@ -61,7 +73,7 @@ struct FloatingButtonView: View {
                     y: isHovered ? 5 : 0
                 )
                 .shadow(
-                    color: Color.blue.opacity(isHovered ? 0.18 : Double(spotlightGlowOpacity) * 0.45),
+                    color: Color.blue.opacity(isHovered ? 0.16 : Double(spotlightGlowOpacity) * 0.38),
                     radius: isHovered ? 20 : spotlightGlowRadius * 1.35,
                     x: 0,
                     y: 0
@@ -73,6 +85,12 @@ struct FloatingButtonView: View {
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    if showsSmartAIBadge {
+                        smartAIBadge
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
         }
         .padding(outerPad)
         .frame(width: iconSide + outerPad * 2, height: iconSide + outerPad * 2)
@@ -80,6 +98,7 @@ struct FloatingButtonView: View {
         .help("Rewrite with Textora — drag to move")
         .animation(.interpolatingSpring(stiffness: 310, damping: 16), value: isHovered)
         .animation(.interpolatingSpring(stiffness: 360, damping: 18), value: showsCheckmark)
+        .animation(.interpolatingSpring(stiffness: 360, damping: 18), value: showsSmartAIBadge)
         .task(id: spotlightPulse) {
             guard spotlightPulse else {
                 spotlightGlowOpacity = 0
@@ -106,8 +125,9 @@ struct FloatingButtonView: View {
     private var checkmarkBadge: some View {
         ZStack {
             Circle()
-                .fill(Color(red: 0.08, green: 0.14, blue: 0.10))
+                .fill(Color.white.opacity(0.96))
                 .frame(width: 18, height: 18)
+                .shadow(color: Color.black.opacity(0.18), radius: 2, x: 0, y: 1)
             Circle()
                 .fill(Color.green)
                 .frame(width: 14, height: 14)
@@ -116,6 +136,31 @@ struct FloatingButtonView: View {
                 .foregroundStyle(.white)
         }
         .offset(x: 2, y: 2)
+    }
+
+    private var smartAIBadge: some View {
+        ZStack {
+            Circle()
+                .fill(Color.white.opacity(0.96))
+                .frame(width: 18, height: 18)
+                .shadow(color: Color.black.opacity(0.18), radius: 2, x: 0, y: 1)
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.20, green: 0.62, blue: 1.0),
+                            Color(red: 0.70, green: 0.38, blue: 1.0),
+                            Color(red: 1.0, green: 0.32, blue: 0.62)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .offset(x: 2, y: -2)
+        .help("SmartAI enabled")
+        .accessibilityLabel("SmartAI enabled")
     }
 
     private var spotlightGlowLayer: some View {
@@ -180,11 +225,13 @@ struct FloatingButtonView: View {
 
     @ViewBuilder
     private var iconView: some View {
-        if let url = Bundle.main.url(forResource: "helper-icon", withExtension: "png"),
-           let nsImage = NSImage(contentsOf: url) {
+        if let nsImage = Self.helperIcon {
             Image(nsImage: nsImage)
                 .resizable()
-                .scaledToFill()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFit()
+                .padding(1)
         } else {
             Image(systemName: "sparkles")
                 .font(.system(size: 18, weight: .semibold))
@@ -197,28 +244,39 @@ struct FloatingButtonView: View {
 
 struct FloatingDragHintArrowView: View {
     let direction: FloatingDragHintDirection
-    let isActive: Bool
+    let emphasis: CGFloat
+
+    init(direction: FloatingDragHintDirection, isActive: Bool) {
+        self.direction = direction
+        self.emphasis = isActive ? 1 : 0
+    }
+
+    init(direction: FloatingDragHintDirection, emphasis: CGFloat) {
+        self.direction = direction
+        self.emphasis = min(max(emphasis, 0), 1)
+    }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            let bounce = CGFloat(sin(t * .pi * 2.2)) * 3.0
+            let active = emphasis > 0.01
+            let bounce = CGFloat(sin(t * .pi * 2.2)) * (2.4 + emphasis * 1.3)
             let shift = direction.bounceOffset(amount: bounce)
             Image(systemName: direction.symbolName)
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(.white.opacity(isActive ? 0.80 : 0.48))
+                .font(.system(size: 15 + emphasis * 2.5, weight: .bold))
+                .foregroundStyle(.white.opacity(0.48 + emphasis * 0.34))
                 .frame(width: 32, height: 32)
                 .background(
                     Circle()
-                        .fill(Color.black.opacity(isActive ? 0.30 : 0.18))
+                        .fill(Color.black.opacity(0.18 + emphasis * 0.14))
                 )
                 .overlay(
                     Circle()
-                        .stroke(Color.white.opacity(isActive ? 0.36 : 0.18), lineWidth: 1)
+                        .stroke(Color.white.opacity(0.18 + emphasis * 0.22), lineWidth: 1)
                 )
-                .shadow(color: Color.cyan.opacity(isActive ? 0.30 : 0.14), radius: isActive ? 11 : 7, x: 0, y: 0)
-                .scaleEffect(isActive ? 1.18 : 1.0)
-                .offset(shift)
+                .shadow(color: Color.cyan.opacity(0.14 + emphasis * 0.20), radius: 7 + emphasis * 5, x: 0, y: 0)
+                .scaleEffect(1.0 + emphasis * 0.20)
+                .offset(active ? shift : .zero)
                 .frame(width: 46, height: 46)
         }
         .allowsHitTesting(false)

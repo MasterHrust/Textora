@@ -4,13 +4,13 @@ import SwiftUI
 // MARK: - Design tokens (dark glass popup)
 
 private enum TextoraPopupTheme {
-    static let panelWidth: CGFloat = 360
+    static let panelWidth: CGFloat = 400
     static let cornerRadius: CGFloat = 22
     static let cardCorner: CGFloat = 14
     static let padding: CGFloat = 18
     static let bg = Color(red: 26 / 255, green: 26 / 255, blue: 30 / 255)
     static let cardBg = Color(red: 22 / 255, green: 22 / 255, blue: 26 / 255)
-    static let border = Color.white.opacity(0.12)
+    static let border = Color.white.opacity(0.16)
     static let muted = Color.white.opacity(0.55)
     static let accentStart = Color(red: 62 / 255, green: 123 / 255, blue: 1)
     static let accentEnd = Color(red: 151 / 255, green: 71 / 255, blue: 1)
@@ -22,23 +22,87 @@ private enum TextoraPopupTheme {
 
 // MARK: - Custom segmented operations
 
+struct SmartAIRecommendedBadge: View {
+    var body: some View {
+        Image(systemName: "sparkles")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.48, green: 0.72, blue: 1.0),
+                        Color(red: 0.75, green: 0.38, blue: 1.0),
+                        Color(red: 1.0, green: 0.36, blue: 0.78)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: 15, height: 15)
+            .background(
+                Circle()
+                    .fill(Color.white.opacity(0.10))
+            )
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.22), lineWidth: 0.8)
+            )
+            .shadow(color: Color(red: 0.55, green: 0.48, blue: 1.0).opacity(0.30), radius: 6, x: 0, y: 0)
+            .help("SmartAI Recommended")
+            .accessibilityLabel("SmartAI Recommended")
+    }
+}
+
+private struct OperationReviewBadge: View {
+    let state: InlineRewriteViewModel.OperationReviewState
+
+    @ViewBuilder
+    var body: some View {
+        switch state {
+        case .unknown:
+            EmptyView()
+        case .clean:
+            badge(symbolName: "checkmark", color: TextoraPopupTheme.applyGreen, helpText: "No suggestion")
+        case .hasSuggestion:
+            badge(symbolName: "questionmark", color: Color.orange.opacity(0.95), helpText: "Suggestion available")
+        }
+    }
+
+    private func badge(symbolName: String, color: Color, helpText: String) -> some View {
+        Image(systemName: symbolName)
+            .font(.system(size: 8, weight: .black))
+            .foregroundStyle(.white)
+            .frame(width: 15, height: 15)
+            .background(Circle().fill(color))
+            .overlay(Circle().stroke(Color.white.opacity(0.34), lineWidth: 0.8))
+            .shadow(color: color.opacity(0.25), radius: 5, x: 0, y: 0)
+            .help(helpText)
+            .accessibilityLabel(helpText)
+    }
+}
+
 private struct OperationSegmentBar: View {
     @Binding var selection: RewriteOperation
+    let recommendedOperation: RewriteOperation?
+    let secondaryOperations: Set<RewriteOperation>
+    let operationState: (RewriteOperation) -> InlineRewriteViewModel.OperationReviewState
 
     var body: some View {
         HStack(spacing: 3) {
             ForEach(Array(RewriteOperation.allCases.enumerated()), id: \.element.id) { index, op in
                 let selected = op == selection
+                let isRecommended = op == recommendedOperation
+                let isSecondary = secondaryOperations.contains(op)
+                let reviewState = operationState(op)
                 Button {
                     selection = op
                 } label: {
                     Text(op.rawValue)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13.5, weight: selected || isSecondary || isRecommended ? .bold : .semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                        .foregroundStyle(selected ? .white : TextoraPopupTheme.muted)
+                        .minimumScaleFactor(0.82)
+                        .foregroundStyle(labelColor(operation: op, selected: selected, isSecondary: isSecondary))
                         .padding(.vertical, 7)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 5)
                         .frame(maxWidth: .infinity)
                         .background(
                             Group {
@@ -46,16 +110,30 @@ private struct OperationSegmentBar: View {
                                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                                         .fill(
                                             LinearGradient(
-                                                colors: [TextoraPopupTheme.accentStart, TextoraPopupTheme.accentEnd],
+                                                colors: TextoraSuggestionColors.gradient(for: op),
                                                 startPoint: .leading,
                                                 endPoint: .trailing
                                             )
                                         )
+                                        .shadow(color: TextoraSuggestionColors.color(for: op).opacity(0.38), radius: 8, x: 0, y: 0)
+                                } else if isSecondary {
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(TextoraSuggestionColors.color(for: op).opacity(0.13))
                                 }
                             }
                         )
+                        .overlay(alignment: .topTrailing) {
+                            if isRecommended {
+                                SmartAIRecommendedBadge()
+                                    .offset(x: -7, y: -8)
+                            } else {
+                                OperationReviewBadge(state: reviewState)
+                                    .offset(x: -7, y: -8)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
+                .zIndex((isRecommended || reviewState != .unknown) ? 1 : 0)
 
                 if index < RewriteOperation.allCases.count - 1 {
                     Rectangle()
@@ -74,6 +152,17 @@ private struct OperationSegmentBar: View {
                 .stroke(TextoraPopupTheme.border, lineWidth: 1)
         )
     }
+
+    private func labelColor(
+        operation: RewriteOperation,
+        selected: Bool,
+        isSecondary: Bool
+    ) -> Color {
+        if selected { return .white }
+        if isSecondary { return TextoraSuggestionColors.color(for: operation).opacity(0.95) }
+        if recommendedOperation == nil { return TextoraSuggestionColors.color(for: operation).opacity(0.86) }
+        return TextoraPopupTheme.muted
+    }
 }
 
 // MARK: - Main view
@@ -83,7 +172,8 @@ struct InlineRewriteView: View {
     let onClose: () -> Void
     let onHoverChanged: (Bool) -> Void
     let onActionInvoked: () -> Void
-    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = false
+    let onSuggestionAvailabilityChanged: (Bool) -> Void
+    @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = true
 
     private var showSuggestionCard: Bool {
         !viewModel.noChangesNeeded && !viewModel.rewrittenText.isEmpty
@@ -107,13 +197,15 @@ struct InlineRewriteView: View {
         VStack(alignment: .leading, spacing: 16) {
             headerRow
 
-            OperationSegmentBar(selection: $viewModel.operation)
+            OperationSegmentBar(
+                selection: $viewModel.operation,
+                recommendedOperation: smartAIEnabled ? viewModel.smartBadgeOperation : nil,
+                secondaryOperations: smartAIEnabled && showSuggestionCard ? viewModel.smartSecondaryOperations() : [],
+                operationState: { viewModel.operationReviewState(for: $0) }
+            )
                 .onChange(of: viewModel.operation) { _, _ in
                     viewModel.triggerRewrite(.operationChanged)
                 }
-            if smartAIEnabled {
-                recommendedRow
-            }
 
             suggestionSection
             translationSection
@@ -144,6 +236,27 @@ struct InlineRewriteView: View {
         .preferredColorScheme(.dark)
         .onHover { isHovering in
             onHoverChanged(isHovering)
+        }
+        .onAppear {
+            reportSuggestionAvailability()
+        }
+        .onChange(of: viewModel.rewrittenText) { _, _ in
+            reportSuggestionAvailability()
+        }
+        .onChange(of: viewModel.noChangesNeeded) { _, _ in
+            reportSuggestionAvailability()
+        }
+        .onChange(of: viewModel.isLoading) { _, _ in
+            reportSuggestionAvailability()
+        }
+    }
+
+    private func reportSuggestionAvailability() {
+        guard !viewModel.isLoading else { return }
+        if showSuggestionCard {
+            onSuggestionAvailabilityChanged(true)
+        } else if viewModel.noChangesNeeded {
+            onSuggestionAvailabilityChanged(false)
         }
     }
 
@@ -182,19 +295,35 @@ struct InlineRewriteView: View {
                         Image(systemName: smartAIEnabled ? "sparkles" : "sparkle")
                             .font(.system(size: 10, weight: .bold))
                         Text("Smart AI")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 11, weight: .bold))
                     }
                     .foregroundStyle(smartAIEnabled ? .white : TextoraPopupTheme.muted)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(
-                        Capsule()
-                            .fill(smartAIEnabled ? Color.white.opacity(0.14) : Color.white.opacity(0.07))
+                        Capsule().fill(
+                            smartAIEnabled
+                            ? LinearGradient(
+                                colors: [
+                                    Color(red: 0.12, green: 0.60, blue: 1.0),
+                                    Color(red: 0.62, green: 0.30, blue: 1.0),
+                                    Color(red: 1.0, green: 0.32, blue: 0.72)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            : LinearGradient(
+                                colors: [Color.white.opacity(0.07), Color.white.opacity(0.07)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
                     )
                     .overlay(
                         Capsule()
-                            .stroke(Color.white.opacity(smartAIEnabled ? 0.20 : 0.10), lineWidth: 1)
+                            .stroke(Color.white.opacity(smartAIEnabled ? 0.42 : 0.10), lineWidth: 1)
                     )
+                    .shadow(color: Color(red: 0.35, green: 0.70, blue: 1.0).opacity(smartAIEnabled ? 0.34 : 0), radius: 10, x: 0, y: 0)
                 }
                 .buttonStyle(.plain)
                 .help(smartAIEnabled ? "Smart AI recommendations enabled" : "Use last selected mode first")
@@ -215,12 +344,11 @@ struct InlineRewriteView: View {
 
     private var recommendedRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 10, weight: .semibold))
-            Text("\(viewModel.operation.rawValue) (Recommended)")
+            SmartAIRecommendedBadge()
+            Text(viewModel.smartRecommendedOperation().rawValue)
                 .font(.caption2.weight(.semibold))
         }
-        .foregroundStyle(TextoraPopupTheme.muted)
+        .foregroundStyle(TextoraSuggestionColors.color(for: viewModel.smartRecommendedOperation()).opacity(0.88))
         .padding(.top, -8)
     }
 
@@ -252,7 +380,7 @@ struct InlineRewriteView: View {
                             .font(.system(size: 24, weight: .bold))
                             .foregroundStyle(TextoraPopupTheme.applyGreen)
                     }
-                    Text("Looks good — no changes needed")
+                    Text("Looks good - no changes needed")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
@@ -376,7 +504,6 @@ struct InlineRewriteView: View {
                 .disabled(!actionsEnabled)
 
                 Button {
-                    onActionInvoked()
                     viewModel.copyResult()
                     onClose()
                 } label: {
@@ -400,14 +527,12 @@ struct InlineRewriteView: View {
     private var popupBackground: some View {
         ZStack {
             RoundedRectangle(cornerRadius: TextoraPopupTheme.cornerRadius, style: .continuous)
-                .fill(TextoraPopupTheme.bg.opacity(0.92))
-            RoundedRectangle(cornerRadius: TextoraPopupTheme.cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .opacity(0.55)
+                .fill(TextoraPopupTheme.bg)
             RoundedRectangle(cornerRadius: TextoraPopupTheme.cornerRadius, style: .continuous)
                 .stroke(TextoraPopupTheme.border, lineWidth: 1)
         }
-        .shadow(color: .black.opacity(0.45), radius: 28, x: 0, y: 14)
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.30), radius: 22, x: 0, y: 10)
     }
 }
 
@@ -503,8 +628,8 @@ private struct DiffTextView: View {
     let original: String
     let rewritten: String
 
-    private static let removedColor = Color.red.opacity(0.9)
-    private static let addedColor = TextoraPopupTheme.applyGreen
+    private static let removedColor = Color(red: 1.0, green: 0.50, blue: 0.55)
+    private static let addedColor = Color(red: 0.58, green: 0.90, blue: 0.68)
 
     var body: some View {
         buildText(from: TextDiff.computeSegments(original: original, rewritten: rewritten))
@@ -517,9 +642,14 @@ private struct DiffTextView: View {
             case .unchanged(let s):
                 result = result + Text(s).foregroundStyle(.white)
             case .removed(let s):
-                result = result + Text(s).foregroundStyle(Self.removedColor).strikethrough(true, color: Self.removedColor)
+                result = result + Text(s)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Self.removedColor)
+                    .strikethrough(true, color: Self.removedColor)
             case .added(let s):
-                result = result + Text(s).foregroundStyle(Self.addedColor)
+                result = result + Text(s)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Self.addedColor)
             }
         }
         return result

@@ -3,6 +3,12 @@ import Foundation
 
 @MainActor
 final class InlineRewriteViewModel: ObservableObject {
+    enum OperationReviewState: Equatable {
+        case unknown
+        case clean
+        case hasSuggestion
+    }
+
     @Published var operation: RewriteOperation {
         didSet {
             if shouldPersistOperationChanges {
@@ -21,6 +27,8 @@ final class InlineRewriteViewModel: ObservableObject {
     @Published var translatedText: String = ""
     @Published var isTranslating: Bool = false
     @Published var translateErrorText: String = ""
+    @Published private(set) var operationReviewStates: [RewriteOperation: OperationReviewState] = [:]
+    @Published private(set) var smartBadgeOperation: RewriteOperation?
     @Published var needsMailManualCapture: Bool = false {
         didSet {
             if needsMailManualCapture {
@@ -39,6 +47,7 @@ final class InlineRewriteViewModel: ObservableObject {
     private var rewriteRequestID: Int = 0
     private var translateTask: Task<Void, Never>?
     private var translateRequestID: Int = 0
+    private var cachedRewriteSuggestions: [RewriteOperation: String] = [:]
     private var mailAutoCaptureTask: Task<Void, Never>?
     private var mailSelectionStableSince: Date?
     private var suppressNextOperationTriggeredRewrite = false
@@ -50,6 +59,16 @@ final class InlineRewriteViewModel: ObservableObject {
     private struct RewriteScope {
         let text: String
         let range: NSRange
+    }
+
+    private func clearCachedReviewState() {
+        cachedRewriteSuggestions.removeAll()
+        operationReviewStates.removeAll()
+        smartBadgeOperation = nil
+    }
+
+    func operationReviewState(for operation: RewriteOperation) -> OperationReviewState {
+        operationReviewStates[operation] ?? .unknown
     }
 
     private func stopMailAutoCaptureWatcher() {
@@ -157,9 +176,11 @@ final class InlineRewriteViewModel: ObservableObject {
             lastContext = nil
             originalText = ""
             rewrittenText = ""
+            clearCachedReviewState()
             translatedText = ""
             translateErrorText = ""
             isTranslating = false
+            isLoading = false
             noChangesNeeded = false
             applyErrorText = ""
             errorText = "No suitable editable field found"
@@ -169,9 +190,11 @@ final class InlineRewriteViewModel: ObservableObject {
             lastContext = nil
             originalText = ""
             rewrittenText = ""
+            clearCachedReviewState()
             translatedText = ""
             translateErrorText = ""
             isTranslating = false
+            isLoading = false
             noChangesNeeded = false
             applyErrorText = ""
             errorText = "No editable text to rewrite"
@@ -180,8 +203,10 @@ final class InlineRewriteViewModel: ObservableObject {
         lastContext = scopedContext
         originalText = scopedContext.text
         rewrittenText = ""
+        clearCachedReviewState()
         translatedText = ""
         translateErrorText = ""
+        isLoading = false
         errorText = ""
         applyErrorText = ""
         noChangesNeeded = false
@@ -197,9 +222,11 @@ final class InlineRewriteViewModel: ObservableObject {
             lastContext = nil
             originalText = ""
             rewrittenText = ""
+            clearCachedReviewState()
             translatedText = ""
             translateErrorText = ""
             isTranslating = false
+            isLoading = false
             noChangesNeeded = false
             applyErrorText = ""
             errorText = "No selected text found"
@@ -208,8 +235,10 @@ final class InlineRewriteViewModel: ObservableObject {
         lastContext = context
         originalText = context.text
         rewrittenText = ""
+        clearCachedReviewState()
         translatedText = ""
         translateErrorText = ""
+        isLoading = false
         errorText = ""
         applyErrorText = ""
         noChangesNeeded = false
@@ -225,9 +254,11 @@ final class InlineRewriteViewModel: ObservableObject {
             lastContext = scopedContext
             originalText = scopedContext.text
             rewrittenText = ""
+            clearCachedReviewState()
             translatedText = ""
             translateErrorText = ""
             isTranslating = false
+            isLoading = false
             noChangesNeeded = false
             applyErrorText = ""
             errorText = ""
@@ -270,9 +301,11 @@ final class InlineRewriteViewModel: ObservableObject {
         lastContext = nil
         originalText = ""
         rewrittenText = ""
+        clearCachedReviewState()
         translatedText = ""
         translateErrorText = ""
         isTranslating = false
+        isLoading = false
         noChangesNeeded = false
         applyErrorText = ""
         if isMailFrontmost {
@@ -291,9 +324,11 @@ final class InlineRewriteViewModel: ObservableObject {
             lastContext = scopedContext
             originalText = scopedContext.text
             rewrittenText = ""
+            clearCachedReviewState()
             translatedText = ""
             translateErrorText = ""
             isTranslating = false
+            isLoading = false
             noChangesNeeded = false
             applyErrorText = ""
             errorText = ""
@@ -317,11 +352,35 @@ final class InlineRewriteViewModel: ObservableObject {
     func setPrefilled(
         context: TextAccessService.FocusedTextContext,
         suggestion: String,
-        operation: RewriteOperation
+        operation: RewriteOperation,
+        suggestionOptions: [OverlaySuggestion] = []
     ) {
         lastContext = context
         originalText = context.text
         rewrittenText = suggestion
+        let knownSuggestions: [OverlaySuggestion] = {
+            if !suggestionOptions.isEmpty { return suggestionOptions }
+            let trimmed = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return [] }
+            return [OverlaySuggestion(operation: operation, text: suggestion)]
+        }()
+        cachedRewriteSuggestions = Dictionary(
+            uniqueKeysWithValues: knownSuggestions.map { ($0.operation, $0.text) }
+        )
+        if suggestionOptions.isEmpty {
+            operationReviewStates = knownSuggestions.isEmpty ? [:] : [operation: .hasSuggestion]
+        } else {
+            operationReviewStates = Dictionary(
+                uniqueKeysWithValues: RewriteOperation.allCases.map { ($0, .clean) }
+            )
+            for option in knownSuggestions {
+                operationReviewStates[option.operation] = .hasSuggestion
+            }
+        }
+        let recommended = knownSuggestions.first(where: { $0.isRecommended })?.operation
+        smartBadgeOperation = operationReviewStates[recommended ?? operation] == .hasSuggestion
+            ? (recommended ?? operation)
+            : nil
         translatedText = ""
         translateErrorText = ""
         isTranslating = false
@@ -333,16 +392,67 @@ final class InlineRewriteViewModel: ObservableObject {
         updateNoChangesNeededFlag()
     }
 
+    func setNoChanges(
+        context: TextAccessService.FocusedTextContext,
+        operation: RewriteOperation
+    ) {
+        lastContext = context
+        originalText = context.text
+        rewrittenText = ""
+        clearCachedReviewState()
+        operationReviewStates = Dictionary(
+            uniqueKeysWithValues: RewriteOperation.allCases.map { ($0, .clean) }
+        )
+        translatedText = ""
+        translateErrorText = ""
+        isTranslating = false
+        self.operation = operation
+        errorText = ""
+        applyErrorText = ""
+        isLoading = false
+        noChangesNeeded = !context.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        suppressNextOperationTriggeredRewrite = true
+    }
+
+    func setProcessing(context: TextAccessService.FocusedTextContext) {
+        lastContext = context
+        originalText = context.text
+        rewrittenText = ""
+        clearCachedReviewState()
+        translatedText = ""
+        translateErrorText = ""
+        isTranslating = false
+        errorText = ""
+        applyErrorText = ""
+        noChangesNeeded = false
+        isLoading = true
+        suppressNextOperationTriggeredRewrite = true
+    }
+
     func prepareOperationForMarkerWindow() {
         let nextOperation: RewriteOperation
         if UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.smartAIEnabled) {
-            nextOperation = recommendedOperation(for: originalText)
+            nextOperation = smartRecommendedOperation()
         } else {
             let raw = UserDefaults.standard.string(forKey: Self.lastOperationKey)
                 ?? RewriteOperation.fixGrammar.rawValue
             nextOperation = Self.migrateOperation(from: raw) ?? .fixGrammar
         }
         setOperation(nextOperation, persist: false)
+    }
+
+    func smartRecommendedOperation() -> RewriteOperation {
+        recommendedOperation(for: originalText)
+    }
+
+    func smartSecondaryOperations() -> Set<RewriteOperation> {
+        let primary = recommendedOperation(for: originalText)
+        let cleaned = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard primary != .fixGrammar,
+              hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned) else {
+            return []
+        }
+        return [.fixGrammar]
     }
 
     private func setOperation(_ nextOperation: RewriteOperation, persist: Bool) {
@@ -445,26 +555,55 @@ final class InlineRewriteViewModel: ObservableObject {
         applyErrorText = ""
         rewrittenText = ""
         noChangesNeeded = false
+        textoraDiagLog(
+            "aiRewrite",
+            "caller=popupRewrite smartAI=\(UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.smartAIEnabled)) "
+            + "operation=\(operation.rawValue) provider=\(provider.rawValue) model=\(model) "
+            + "text=\(textoraDiagPreview(text))"
+        )
         if operation == .fixGrammar {
             let localMixedScriptFix = fixMixedLatinCyrillicWords(in: text)
             if normalized(localMixedScriptFix) != normalized(text) {
                 rewrittenText = localMixedScriptFix
+                cachedRewriteSuggestions[operation] = localMixedScriptFix
+                operationReviewStates[operation] = .hasSuggestion
                 isLoading = false
                 updateNoChangesNeededFlag()
                 return
             }
         }
         do {
-            let newText = try await aiClient.rewriteText(
-                provider: provider,
-                model: model,
-                apiKey: key,
-                text: text,
-                operation: operation
-            )
+            let newText: String
+            if operation == .fixGrammar {
+                newText = try await aiClient.checkAndSuggestIfNeeded(
+                    provider: provider,
+                    model: model,
+                    apiKey: key,
+                    text: text
+                )
+            } else {
+                newText = try await aiClient.rewriteText(
+                    provider: provider,
+                    model: model,
+                    apiKey: key,
+                    text: text,
+                    operation: operation
+                )
+            }
             guard requestID == rewriteRequestID else { return }
             rewrittenText = newText
             updateNoChangesNeededFlag()
+            let trimmedNewText = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedNewText.isEmpty, !noChangesNeeded {
+                cachedRewriteSuggestions[operation] = newText
+                operationReviewStates[operation] = .hasSuggestion
+            } else {
+                cachedRewriteSuggestions.removeValue(forKey: operation)
+                operationReviewStates[operation] = .clean
+                if smartBadgeOperation == operation {
+                    smartBadgeOperation = nil
+                }
+            }
         } catch is CancellationError {
             // Expected when user quickly re-triggers rewrite; keep UI stable.
             guard requestID == rewriteRequestID else { return }
@@ -485,12 +624,28 @@ final class InlineRewriteViewModel: ObservableObject {
     }
 
     func triggerRewrite(_ trigger: RewriteTrigger = .manual) {
-        if trigger == .popupOpened, suppressNextOperationTriggeredRewrite {
+        if suppressNextOperationTriggeredRewrite,
+           trigger == .popupOpened || trigger == .operationChanged {
             suppressNextOperationTriggeredRewrite = false
             return
         }
         suppressNextOperationTriggeredRewrite = false
         if lastContext == nil, !loadFromBestAvailable(minLength: 1) {
+            return
+        }
+        if trigger == .operationChanged,
+           let cached = cachedRewriteSuggestions[operation],
+           !cached.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rewriteTask?.cancel()
+            isLoading = false
+            errorText = ""
+            applyErrorText = ""
+            rewrittenText = cached
+            updateNoChangesNeededFlag()
+            operationReviewStates[operation] = noChangesNeeded ? .clean : .hasSuggestion
+            if noChangesNeeded, smartBadgeOperation == operation {
+                smartBadgeOperation = nil
+            }
             return
         }
         rewriteTask?.cancel()
@@ -667,9 +822,31 @@ final class InlineRewriteViewModel: ObservableObject {
             case .clipboardArmed:
                 self.applyErrorText = "Исправление в буфере — нажмите ⌘V"
             case .failed, .unsupportedTarget:
-                self.applyErrorText = "Could not apply automatically in this field."
+                self.applyErrorText = ""
             }
         }
+    }
+
+    private func preferredLocalRangeForPointApply(original: String, corrected: String) -> NSRange? {
+        let originalNS = original as NSString
+        let correctedNS = corrected as NSString
+        guard originalNS.length > 0 || correctedNS.length > 0 else { return nil }
+        let limit = min(originalNS.length, correctedNS.length)
+        var prefix = 0
+        while prefix < limit, originalNS.character(at: prefix) == correctedNS.character(at: prefix) {
+            prefix += 1
+        }
+        if prefix == originalNS.length, prefix == correctedNS.length {
+            return nil
+        }
+        var suffix = 0
+        while suffix < originalNS.length - prefix,
+              suffix < correctedNS.length - prefix,
+              originalNS.character(at: originalNS.length - 1 - suffix) == correctedNS.character(at: correctedNS.length - 1 - suffix) {
+            suffix += 1
+        }
+        let length = max(0, originalNS.length - prefix - suffix)
+        return NSRange(location: min(prefix, originalNS.length), length: length)
     }
 
     func copyResult() {
@@ -687,10 +864,10 @@ final class InlineRewriteViewModel: ObservableObject {
     private func updateNoChangesNeededFlag() {
         let trimmed = rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            noChangesNeeded = false
+            noChangesNeeded = !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             return
         }
-        let unchangedByNormalization = normalized(trimmed) == normalized(originalText)
+        let unchangedByNormalization = normalizedForNoChanges(trimmed) == normalizedForNoChanges(originalText)
         // For Fix mode, do not show "no changes needed" if local spell checker still
         // sees a typo in the original text (AI sometimes returns input unchanged).
         if operation == .fixGrammar,
@@ -705,19 +882,12 @@ final class InlineRewriteViewModel: ObservableObject {
     private func recommendedOperation(for text: String) -> RewriteOperation {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return .fixGrammar }
-        if hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned) {
-            return .fixGrammar
-        }
-        if looksOverloaded(cleaned) {
-            return .shorten
-        }
-        if looksFormal(cleaned) {
-            return .makeProfessional
-        }
-        if looksPlain(cleaned) {
-            return .humanize
-        }
-        return .fixGrammar
+        let hasTextIssues = hasLocalSpellingIssues(cleaned) || containsMixedLatinCyrillicWord(cleaned)
+        if hasTextIssues { return .fixGrammar }
+        if looksOverloaded(cleaned) { return .shorten }
+        if looksFormal(cleaned) { return .makeProfessional }
+        if looksPlain(cleaned) { return .humanize }
+        return .makeProfessional
     }
 
     private func looksFormal(_ text: String) -> Bool {
@@ -725,6 +895,7 @@ final class InlineRewriteViewModel: ObservableObject {
         let cues = [
             "dear ", "kindly", "regards", "sincerely", "appreciate", "would like",
             "please find", "i am writing", "could you please", "thank you for",
+            "following up", "as discussed", "regarding", "replacement logic",
             "уважа", "пожалуйста", "благодар", "с уважением", "прошу", "не могли бы"
         ]
         return cues.contains { lower.contains($0) }
@@ -756,11 +927,11 @@ final class InlineRewriteViewModel: ObservableObject {
     ) -> TextAccessService.FocusedTextContext? {
         // Explicit selection should stay exact. This keeps selected-text translation/rewrite predictable.
         guard !context.usesSelection else { return context }
-        guard let scope = rewriteScope(in: context.text) else { return nil }
-        let fullLength = (context.text as NSString).length
-        if scope.range.location == 0, scope.range.length == fullLength {
-            return context
-        }
+        let ns = context.text as NSString
+        let trimmed = trimmedRange(NSRange(location: 0, length: ns.length), in: ns)
+        guard trimmed.length > 0 else { return nil }
+        if trimmed.location == 0, trimmed.length == ns.length { return context }
+        let scope = RewriteScope(text: ns.substring(with: trimmed), range: trimmed)
         return TextAccessService.FocusedTextContext(
             text: scope.text,
             frame: context.frame,
@@ -846,8 +1017,38 @@ final class InlineRewriteViewModel: ObservableObject {
         let ns = text as NSString
         guard ns.length > 0 else { return [] }
         let pattern = #"(?i)(?:https?://|www\.)\S+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[@#][\p{L}\p{N}_][\p{L}\p{N}_-]*|\+?\d[\d\s().-]{2,}\d|\b\d+(?:[.,:/-]\d+)*\b|\b[\w.-]+\.(?:com|net|org|io|dev|app|ai|co|ru|ua|by|de|fr|es|it|pl|nl|uk)\b\S*"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range)
+        var ranges: [NSRange] = []
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            ranges.append(contentsOf: regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map(\.range))
+        }
+        ranges.append(contentsOf: emojiRanges(in: text))
+        return ranges.sorted { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.length < rhs.length
+            }
+            return lhs.location < rhs.location
+        }
+    }
+
+    private func emojiRanges(in text: String) -> [NSRange] {
+        var ranges: [NSRange] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let cluster = text[index..<next]
+            if cluster.unicodeScalars.contains(where: isEmojiScalar) {
+                ranges.append(NSRange(index..<next, in: text))
+            }
+            index = next
+        }
+        return ranges
+    }
+
+    private func isEmojiScalar(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar.properties.isEmojiPresentation { return true }
+        if scalar.value == 0xFE0F || scalar.value == 0x200D { return true }
+        guard scalar.properties.isEmoji else { return false }
+        return !(0x30...0x39).contains(scalar.value)
     }
 
     private func trimmedRange(_ range: NSRange, in text: NSString) -> NSRange {
@@ -888,6 +1089,24 @@ final class InlineRewriteViewModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .lowercased()
+    }
+
+    private func normalizedForNoChanges(_ text: String) -> String {
+        let folded = String(text.unicodeScalars.compactMap { scalar -> Character? in
+            switch scalar.value {
+            case 0xFFFC, 0x200B, 0x200C, 0x200D, 0x2060:
+                return nil
+            case 0x2018, 0x2019, 0x201B, 0x2032:
+                return "'"
+            case 0x201C, 0x201D, 0x201F, 0x2033:
+                return "\""
+            case 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2212:
+                return "-"
+            default:
+                return Character(scalar)
+            }
+        })
+        return normalized(folded)
     }
 
     private func hasLocalSpellingIssues(_ text: String) -> Bool {

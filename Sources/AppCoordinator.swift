@@ -42,7 +42,11 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.handleRewritePopupHoverChanged(hovering)
         }
         rewritePanel.onActionInvoked = { [weak self] in
+            self?.floatingHelper?.refreshAfterExternalRewriteApplied()
             self?.hideFloatingPanelsIfNeeded()
+        }
+        rewritePanel.onSuggestionAvailabilityChanged = { [weak self] hasSuggestion in
+            self?.floatingHelper?.markRewritePopupSuggestionAvailability(hasSuggestion)
         }
         consentPrompt.onAllow = { [weak self] in
             self?.handleConsentAllow()
@@ -59,7 +63,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if floatingHelper == nil {
             floatingHelper = FloatingHelperController(
                 onRewriteTap: { [weak self] frame in
-                self?.rewritePanel.show(near: frame)
+                    self?.showRewritePopupFromFloatingState(frame: frame)
                 },
                 onFloatingHoverChanged: { [weak self] hovering, frame in
                     self?.handleFloatingHoverChanged(hovering: hovering, frame: frame)
@@ -67,6 +71,29 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             )
             floatingHelper?.onStatusChange = { [weak self] status in
                 self?.helperStatus = status
+            }
+            floatingHelper?.onEvaluationCompleted = { [weak self] in
+                guard let self,
+                      self.rewritePanel.isVisible,
+                      let frame = self.floatingHelper?.currentFrame,
+                      !frame.isEmpty else { return }
+                self.showRewritePopupFromFloatingState(frame: frame, requestIfMissing: false)
+            }
+            floatingHelper?.onEvaluationStarted = { [weak self] in
+                guard let self,
+                      self.rewritePanel.isVisible,
+                      let frame = self.floatingHelper?.currentFrame,
+                      !frame.isEmpty,
+                      let context = self.floatingHelper?.currentFocusedContextForPopup() else { return }
+                self.rewritePanel.showProcessing(near: frame, context: context)
+            }
+            floatingHelper?.onFocusedTextContentChanged = { [weak self] context in
+                guard let self,
+                      self.rewritePanel.isVisible,
+                      let frame = self.floatingHelper?.currentFrame,
+                      !frame.isEmpty,
+                      let context else { return }
+                self.rewritePanel.showProcessing(near: frame, context: context)
             }
         }
 
@@ -165,7 +192,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             case .allowed:
                 isConsentPromptHovered = false
                 consentPrompt.hide()
-                rewritePanel.show(near: frame, triggerRewrite: true)
+                showRewritePopupFromFloatingState(frame: frame)
                 floatingHelper?.setKeepBelowWindow(rewritePanel.window)
             case .denied:
                 rewritePanel.hide()
@@ -182,6 +209,32 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
         scheduleHideFloatingPanelsIfNeeded()
+    }
+
+    private func showRewritePopupFromFloatingState(frame: CGRect, requestIfMissing: Bool = true) {
+        guard let floatingHelper else {
+            rewritePanel.show(near: frame, triggerRewrite: false)
+            return
+        }
+        if let result = floatingHelper.cachedPopupResultForCurrentFocus() {
+            rewritePanel.showWithSuggestion(
+                near: frame,
+                context: result.context,
+                suggestion: result.suggestion,
+                operation: result.operation,
+                suggestionOptions: result.suggestionOptions,
+                isNoIssues: result.isNoIssues
+            )
+            return
+        }
+        if let context = floatingHelper.currentFocusedContextForPopup(), floatingHelper.isCurrentlyEvaluating || requestIfMissing {
+            rewritePanel.showProcessing(near: frame, context: context)
+        } else {
+            rewritePanel.show(near: frame, triggerRewrite: false)
+        }
+        if requestIfMissing {
+            floatingHelper.requestEvaluationForCurrentFocusIfNeeded()
+        }
     }
 
     private func handleRewritePopupHoverChanged(_ hovering: Bool) {
@@ -248,7 +301,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         textAccess.setAppConsentStatus(.allowed, for: bundleID)
         consentPrompt.hide()
         if let frame = floatingHelper?.currentFrame, !frame.isEmpty {
-            rewritePanel.show(near: frame, triggerRewrite: true)
+            showRewritePopupFromFloatingState(frame: frame)
         }
     }
 
