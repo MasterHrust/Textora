@@ -50,7 +50,7 @@ final class InlineRewriteViewModel: ObservableObject {
     private var cachedRewriteSuggestions: [RewriteOperation: String] = [:]
     private var mailAutoCaptureTask: Task<Void, Never>?
     private var mailSelectionStableSince: Date?
-    private var suppressNextOperationTriggeredRewrite = false
+    private var suppressedProgrammaticOperationChange: RewriteOperation?
     private var shouldPersistOperationChanges = true
     private static let lastOperationKey = "inlineRewrite.lastOperation"
     private static let lastTranslateLanguageKey = "inlineTranslate.lastTargetLanguage"
@@ -384,11 +384,11 @@ final class InlineRewriteViewModel: ObservableObject {
         translatedText = ""
         translateErrorText = ""
         isTranslating = false
+        suppressedProgrammaticOperationChange = operation
         self.operation = operation
         errorText = ""
         applyErrorText = ""
         isLoading = false
-        suppressNextOperationTriggeredRewrite = true
         updateNoChangesNeededFlag()
     }
 
@@ -406,12 +406,12 @@ final class InlineRewriteViewModel: ObservableObject {
         translatedText = ""
         translateErrorText = ""
         isTranslating = false
+        suppressedProgrammaticOperationChange = operation
         self.operation = operation
         errorText = ""
         applyErrorText = ""
         isLoading = false
         noChangesNeeded = !context.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        suppressNextOperationTriggeredRewrite = true
     }
 
     func setProcessing(context: TextAccessService.FocusedTextContext) {
@@ -426,7 +426,6 @@ final class InlineRewriteViewModel: ObservableObject {
         applyErrorText = ""
         noChangesNeeded = false
         isLoading = true
-        suppressNextOperationTriggeredRewrite = true
     }
 
     func prepareOperationForMarkerWindow() {
@@ -457,6 +456,9 @@ final class InlineRewriteViewModel: ObservableObject {
 
     private func setOperation(_ nextOperation: RewriteOperation, persist: Bool) {
         guard operation != nextOperation else { return }
+        if !persist {
+            suppressedProgrammaticOperationChange = nextOperation
+        }
         shouldPersistOperationChanges = persist
         operation = nextOperation
         shouldPersistOperationChanges = true
@@ -624,13 +626,28 @@ final class InlineRewriteViewModel: ObservableObject {
     }
 
     func triggerRewrite(_ trigger: RewriteTrigger = .manual) {
-        if suppressNextOperationTriggeredRewrite,
-           trigger == .popupOpened || trigger == .operationChanged {
-            suppressNextOperationTriggeredRewrite = false
+        if trigger == .operationChanged, let suppressed = suppressedProgrammaticOperationChange {
+            if operation == suppressed {
+                suppressedProgrammaticOperationChange = nil
+                return
+            }
+            suppressedProgrammaticOperationChange = nil
+        }
+        if lastContext == nil, !loadFromBestAvailable(minLength: 1) {
             return
         }
-        suppressNextOperationTriggeredRewrite = false
-        if lastContext == nil, !loadFromBestAvailable(minLength: 1) {
+        if trigger == .operationChanged,
+           operationReviewStates[operation] == .clean,
+           !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rewriteTask?.cancel()
+            isLoading = false
+            errorText = ""
+            applyErrorText = ""
+            rewrittenText = ""
+            noChangesNeeded = true
+            if smartBadgeOperation == operation {
+                smartBadgeOperation = nil
+            }
             return
         }
         if trigger == .operationChanged,

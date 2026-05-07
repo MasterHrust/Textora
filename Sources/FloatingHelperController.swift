@@ -100,6 +100,7 @@ final class FloatingHelperController {
     private var lastActivityAt = Date()
     private let idleDelay: TimeInterval = 1.0
     private let sentenceDelay: TimeInterval = 1.0
+    private var suppressAutoEvaluationUntil: Date?
     /// Debounces AI auto-check by focused **text** (caret moves change `focusedTextSignature` but not this segment).
     private var lastCheckedValueSegment: String?
     /// Avoid `orderFrontRegardless` on every 200ms tick; set true when panel is hidden or z-order policy changes.
@@ -827,9 +828,23 @@ final class FloatingHelperController {
             if newValue != oldValue {
                 let preservingLocalBatch = !latestIssues.isEmpty
                     && (localBatchMutationGraceUntil.map { Date() <= $0 } ?? false)
+                let suppressingPostApply = suppressAutoEvaluationUntil.map { Date() <= $0 } ?? false
                 lastActivityAt = Date()
                 latestSignature = nil
-                if preservingLocalBatch {
+                if suppressingPostApply {
+                    lastCheckedValueSegment = newValue
+                    latestSignature = signature
+                    latestIssueRange = nil
+                    latestIssues = []
+                    hoveredIssueID = nil
+                    hoveredIssueIDs = []
+                    latestSuggestion = ""
+                    latestSuggestionOptions = []
+                    latestContext = nil
+                    suggestionState = .looksGood
+                    updateRingColor()
+                    postStatus("Post-apply text accepted; auto-check suppressed briefly")
+                } else if preservingLocalBatch {
                     lastCheckedValueSegment = newValue
                     postStatus("Keeping local suggestion batch after apply")
                 } else {
@@ -891,6 +906,12 @@ final class FloatingHelperController {
 
         let elapsed = Date().timeIntervalSince(lastActivityAt)
         let sentenceEnd = hasSentenceEnding()
+        if let until = suppressAutoEvaluationUntil, Date() <= until {
+            lastCheckedValueSegment = valueSeg
+            latestSignature = signature
+        } else {
+            suppressAutoEvaluationUntil = nil
+        }
         if !valueRaw.isEmpty,
            (elapsed >= idleDelay || (elapsed >= sentenceDelay && sentenceEnd)),
            lastCheckedValueSegment != valueSeg,
@@ -1345,6 +1366,7 @@ final class FloatingHelperController {
     }
 
     func refreshAfterExternalRewriteApplied() {
+        suppressAutoEvaluationUntil = Date().addingTimeInterval(12)
         if let signature = textService.focusedTextSignature(), !signature.isEmpty {
             lastCheckedValueSegment = valueSegment(ofFocusedSignature: signature)
             latestSignature = signature
