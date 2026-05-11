@@ -6,6 +6,18 @@ final class AppViewModel: ObservableObject {
     enum SettingsKeys {
         static let detailedCorrectionsEnabled = "overlay.detailedCorrections.enabled"
         static let smartAIEnabled = "overlay.smartAI.enabled"
+        static let easySwitchEnabled = EasySwitchSettings.Keys.enabled
+        static let easySwitchAutoCorrectWrongLayout = EasySwitchSettings.Keys.autoCorrectWrongLayout
+        static let easySwitchAutoCorrectTypos = EasySwitchSettings.Keys.autoCorrectTypos
+        static let easySwitchChangesKeyboardLayout = EasySwitchSettings.Keys.changesKeyboardLayout
+        static let easySwitchMinimumWordLength = EasySwitchSettings.Keys.minimumWordLength
+        static let easySwitchConfidenceThreshold = EasySwitchSettings.Keys.confidenceThreshold
+        static let easySwitchDifferenceThreshold = EasySwitchSettings.Keys.differenceThreshold
+        static let easySwitchEnglishEnabled = EasySwitchSettings.Keys.englishEnabled
+        static let easySwitchRussianEnabled = EasySwitchSettings.Keys.russianEnabled
+        static let easySwitchShowCorrectionNotification = EasySwitchSettings.Keys.showCorrectionNotification
+        static let easySwitchPlaySoundOnCorrection = EasySwitchSettings.Keys.playSoundOnCorrection
+        static let easySwitchPrivacyMode = EasySwitchSettings.Keys.privacyMode
     }
 
     private enum OnboardingDefaults {
@@ -41,6 +53,19 @@ final class AppViewModel: ObservableObject {
     @Published var appConsentRows: [AppConsentRow] = []
     @Published var hasAccessibilityPermission: Bool = false
     @Published var detailedCorrectionsEnabled: Bool = false
+    @Published var easySwitchEnabled: Bool = false
+    @Published var easySwitchAutoCorrectWrongLayout: Bool = true
+    @Published var easySwitchAutoCorrectTypos: Bool = true
+    @Published var easySwitchChangesKeyboardLayout: Bool = false
+    @Published var easySwitchMinimumWordLength: Int = 3
+    @Published var easySwitchConfidenceThreshold: Double = 0.65
+    @Published var easySwitchDifferenceThreshold: Double = 0.35
+    @Published var easySwitchEnglishEnabled: Bool = true
+    @Published var easySwitchRussianEnabled: Bool = true
+    @Published var easySwitchShowCorrectionNotification: Bool = true
+    @Published var easySwitchPlaySoundOnCorrection: Bool = false
+    @Published var easySwitchPrivacyMode: Bool = false
+    @Published var easySwitchWhitelistText: String = ""
     @Published var onboardingStep: Int = 1
     @Published var onboardingErrorText: String = ""
     @Published var isOnboardingBusy: Bool = false
@@ -60,6 +85,7 @@ final class AppViewModel: ObservableObject {
     func reloadFromUserDefaults() {
         isReloadingFromDefaults = true
         defer { isReloadingFromDefaults = false }
+        EasySwitchSettings.registerDefaults()
         provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
         model = UserDefaults.standard.string(forKey: "model") ?? defaultModel(for: provider)
         openAIKey = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
@@ -68,6 +94,19 @@ final class AppViewModel: ObservableObject {
         customToken = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
         customOpenAIBaseURL = UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? ""
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
+        easySwitchEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchEnabled)
+        easySwitchAutoCorrectWrongLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
+        easySwitchAutoCorrectTypos = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectTypos)
+        easySwitchChangesKeyboardLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
+        easySwitchMinimumWordLength = max(1, UserDefaults.standard.integer(forKey: SettingsKeys.easySwitchMinimumWordLength))
+        easySwitchConfidenceThreshold = UserDefaults.standard.double(forKey: SettingsKeys.easySwitchConfidenceThreshold)
+        easySwitchDifferenceThreshold = UserDefaults.standard.double(forKey: SettingsKeys.easySwitchDifferenceThreshold)
+        easySwitchEnglishEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchEnglishEnabled)
+        easySwitchRussianEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchRussianEnabled)
+        easySwitchShowCorrectionNotification = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchShowCorrectionNotification)
+        easySwitchPlaySoundOnCorrection = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchPlaySoundOnCorrection)
+        easySwitchPrivacyMode = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchPrivacyMode)
+        easySwitchWhitelistText = (UserDefaults.standard.stringArray(forKey: "easySwitch.userDictionary.whitelist") ?? []).joined(separator: ", ")
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
     }
@@ -144,6 +183,24 @@ final class AppViewModel: ObservableObject {
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
         )
         UserDefaults.standard.set(detailedCorrectionsEnabled, forKey: SettingsKeys.detailedCorrectionsEnabled)
+        UserDefaults.standard.set(easySwitchEnabled, forKey: SettingsKeys.easySwitchEnabled)
+        UserDefaults.standard.set(easySwitchAutoCorrectWrongLayout, forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
+        UserDefaults.standard.set(easySwitchAutoCorrectTypos, forKey: SettingsKeys.easySwitchAutoCorrectTypos)
+        UserDefaults.standard.set(easySwitchChangesKeyboardLayout, forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
+        UserDefaults.standard.set(max(1, easySwitchMinimumWordLength), forKey: SettingsKeys.easySwitchMinimumWordLength)
+        UserDefaults.standard.set(easySwitchConfidenceThreshold, forKey: SettingsKeys.easySwitchConfidenceThreshold)
+        UserDefaults.standard.set(easySwitchDifferenceThreshold, forKey: SettingsKeys.easySwitchDifferenceThreshold)
+        UserDefaults.standard.set(easySwitchEnglishEnabled, forKey: SettingsKeys.easySwitchEnglishEnabled)
+        UserDefaults.standard.set(easySwitchRussianEnabled, forKey: SettingsKeys.easySwitchRussianEnabled)
+        UserDefaults.standard.set(easySwitchShowCorrectionNotification, forKey: SettingsKeys.easySwitchShowCorrectionNotification)
+        UserDefaults.standard.set(easySwitchPlaySoundOnCorrection, forKey: SettingsKeys.easySwitchPlaySoundOnCorrection)
+        UserDefaults.standard.set(easySwitchPrivacyMode, forKey: SettingsKeys.easySwitchPrivacyMode)
+        let whitelist = easySwitchWhitelistText
+            .split { $0.isWhitespace || $0 == "," || $0 == ";" || $0 == "\n" }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        UserDefaults.standard.set(Array(Set(whitelist)).sorted(), forKey: "easySwitch.userDictionary.whitelist")
+        NotificationCenter.default.post(name: EasySwitchManager.settingsDidChangeNotification, object: nil)
         KeychainHelper.saveAll(
             openAI: openAIKey,
             gemini: geminiKey,
@@ -154,6 +211,32 @@ final class AppViewModel: ObservableObject {
 
     var shouldShowOnboarding: Bool {
         !isOnboardingComplete && !UserDefaults.standard.bool(forKey: OnboardingDefaults.skippedKey)
+    }
+
+    var settingsAutosaveToken: String {
+        [
+            provider.rawValue,
+            model,
+            openAIKey,
+            geminiKey,
+            claudeKey,
+            customToken,
+            customOpenAIBaseURL,
+            String(detailedCorrectionsEnabled),
+            String(easySwitchEnabled),
+            String(easySwitchAutoCorrectWrongLayout),
+            String(easySwitchAutoCorrectTypos),
+            String(easySwitchChangesKeyboardLayout),
+            String(easySwitchMinimumWordLength),
+            String(format: "%.3f", easySwitchConfidenceThreshold),
+            String(format: "%.3f", easySwitchDifferenceThreshold),
+            String(easySwitchEnglishEnabled),
+            String(easySwitchRussianEnabled),
+            easySwitchWhitelistText,
+            String(easySwitchShowCorrectionNotification),
+            String(easySwitchPlaySoundOnCorrection),
+            String(easySwitchPrivacyMode)
+        ].joined(separator: "\u{1F}")
     }
 
     func skipOnboardingForNow() {

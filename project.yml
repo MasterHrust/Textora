@@ -16,4 +16,19 @@ targets:
       base:
         INFOPLIST_FILE: Sources/Info.plist
     scheme:
-      testTargets: []
+      testTargets:
+        - TextoraTests
+  TextoraTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TextoraTests
+      - path: Sources/EasySwitch
+        excludes:
+          - EasySwitchManager.swift
+    dependencies:
+      - target: Textora
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.textora.tests
+        GENERATE_INFOPLIST_FILE: YES

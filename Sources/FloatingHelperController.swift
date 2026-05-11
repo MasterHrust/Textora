@@ -171,10 +171,6 @@ final class FloatingHelperController {
     private var hoverHideTask: DispatchWorkItem?
     /// 34pt × 1.5 — easier to see and drag.
     private static let floatingPanelSide: CGFloat = 51
-    /// One-time “find me” ring (5s after the floating icon first appears — not at cold launch).
-    private var spotlightHighlightActive = false
-    private static let spotlightShownKey = "floatingHelper.spotlightShown"
-    private var spotlightDismissWorkItem: DispatchWorkItem?
     private var visibilityDropTask: DispatchWorkItem?
     private let visibilityDropDelay: TimeInterval = 0.45
     private var detailedCorrectionsEnabled: Bool {
@@ -369,7 +365,6 @@ final class FloatingHelperController {
 
     func start() {
         if panel == nil {
-            spotlightHighlightActive = !UserDefaults.standard.bool(forKey: Self.spotlightShownKey)
             createPanel()
         }
         if markerPanel == nil {
@@ -439,8 +434,7 @@ final class FloatingHelperController {
                 isLoading: isEvaluating,
                 isHovered: isFloatingHovered,
                 showsCheckmark: shouldShowLooksGoodBadge,
-                showsSmartAIBadge: smartAIEnabled,
-                spotlightPulse: spotlightHighlightActive
+                showsSmartAIBadge: smartAIEnabled
             )
         )
         let panel = DraggableFloatingPanel(
@@ -461,13 +455,15 @@ final class FloatingHelperController {
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.clear.cgColor
         content.layer?.isOpaque = false
+        content.layer?.cornerRadius = Self.floatingPanelSide / 2
+        content.layer?.masksToBounds = true
         panel.contentView = content
         panel.orderOut(nil)
 
         panel.onHoverChanged = { [weak self] hovering in
             guard let self else { return }
             self.isFloatingHovered = hovering
-            self.panel?.animator().alphaValue = hovering ? 1.0 : 0.62
+            self.panel?.alphaValue = 1.0
             self.updateRingColor()
             self.onFloatingHoverChanged(hovering, self.floatingBubbleFrameForRewritePopup())
         }
@@ -585,13 +581,17 @@ final class FloatingHelperController {
                 return
             }
             self.resetOverlayStateIfFocusSurfaceChanged()
-            if self.textService.selectedTextSignalAnyFocus()?.hasSelection == true {
-                self.applyFloatingHelperLayoutForCurrentFocus()
-                return
-            }
             if self.textService.isCurrentFocusInTransientPopupOrMenu() {
                 self.postStatus("Ignoring transient popup/menu focus")
-                self.hideFloatingHelperImmediately()
+                if self.panel?.isVisible == true {
+                    self.bringToFrontOrBelowIfNeeded()
+                } else {
+                    self.hideFloatingHelperImmediately()
+                }
+                return
+            }
+            if self.textService.selectedTextSignalAnyFocus()?.hasSelection == true {
+                self.applyFloatingHelperLayoutForCurrentFocus()
                 return
             }
             if self.textService.shouldHardIgnoreCurrentFocusedInput() {
@@ -766,7 +766,6 @@ final class FloatingHelperController {
             )
             postStatus("Showing helper (selection) x:\(Int(nextFrame.minX)) y:\(Int(nextFrame.minY))")
             bringToFrontOrBelowIfNeeded()
-            scheduleSpotlightDismissIfNeeded()
             return
         }
 
@@ -924,7 +923,6 @@ final class FloatingHelperController {
             "Showing helper at x:\(Int(nextFrame.minX)) y:\(Int(nextFrame.minY)) marker-anchor=\(markerAnchor.rawValue)"
         )
         bringToFrontOrBelowIfNeeded()
-        scheduleSpotlightDismissIfNeeded()
     }
 
     private func computeAutoBubbleFrame(fieldFrame: CGRect, windowFrame: CGRect?, caretFrame: CGRect?) -> CGRect {
@@ -1233,7 +1231,6 @@ final class FloatingHelperController {
                 : "Showing helper (anchor: focused window)"
         )
         bringToFrontOrBelowIfNeeded()
-        scheduleSpotlightDismissIfNeeded()
         return true
     }
 
@@ -1337,20 +1334,6 @@ final class FloatingHelperController {
         hoveredIssueIDs = []
         updateRingColor()
         hideMarkerAndCard()
-    }
-
-    private func scheduleSpotlightDismissIfNeeded() {
-        guard spotlightHighlightActive else { return }
-        guard spotlightDismissWorkItem == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.spotlightHighlightActive = false
-            UserDefaults.standard.set(true, forKey: Self.spotlightShownKey)
-            self.spotlightDismissWorkItem = nil
-            self.updateRingColor()
-        }
-        spotlightDismissWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
 
     func showDebugBubbleAtMouse() {
@@ -3757,8 +3740,7 @@ final class FloatingHelperController {
             isLoading: isEvaluating,
             isHovered: isFloatingHovered,
             showsCheckmark: shouldShowLooksGoodBadge,
-            showsSmartAIBadge: smartAIEnabled,
-            spotlightPulse: spotlightHighlightActive
+            showsSmartAIBadge: smartAIEnabled
         )
         guard let hosting = panel.contentView as? NSHostingView<FloatingButtonView> else { return }
         hosting.rootView = root

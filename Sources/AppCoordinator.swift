@@ -17,6 +17,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var accessibilityWizardWindow: NSWindow?
     private let consentPrompt = AppConsentPromptController()
     private let textAccess = TextAccessService()
+    private let easySwitch = EasySwitchManager()
+    private var easySwitchSettingsObserver: NSObjectProtocol?
     private var isHelperHovered = false
     private var isRewritePopupHovered = false
     private var isConsentPromptHovered = false
@@ -30,6 +32,13 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         super.init()
     }
 
+    deinit {
+        if let easySwitchSettingsObserver {
+            NotificationCenter.default.removeObserver(easySwitchSettingsObserver)
+        }
+        easySwitch.stop()
+    }
+
     /// Call only from `NSApplicationDelegate.applicationDidFinishLaunching`.
     func startAfterApplicationReady() {
         guard !didRunLaunchFlow else { return }
@@ -38,6 +47,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func start() {
+        installEasySwitchSettingsObserverIfNeeded()
         rewritePanel.onHoverChanged = { [weak self] hovering in
             self?.handleRewritePopupHoverChanged(hovering)
         }
@@ -99,17 +109,43 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
+        configureEasySwitch()
         if !hasAnyConfiguredKey() {
             shouldOpenAccessibilityAfterOnboarding = true
             showOnboardingWindow()
             return
         }
         if !textAccess.hasAccessibilityPermission() {
+            configureEasySwitch()
             showAccessibilityWizardDeferred()
             return
         }
+        configureEasySwitch()
         floatingHelper?.start()
         showOnboardingIfNeededOnLaunch()
+    }
+
+    private func installEasySwitchSettingsObserverIfNeeded() {
+        guard easySwitchSettingsObserver == nil else { return }
+        easySwitchSettingsObserver = NotificationCenter.default.addObserver(
+            forName: EasySwitchManager.settingsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.configureEasySwitch()
+            }
+        }
+    }
+
+    private func configureEasySwitch() {
+        let isEnabled = UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.easySwitchEnabled)
+        guard isEnabled, textAccess.hasAccessibilityPermission() else {
+            easySwitch.stop()
+            return
+        }
+        easySwitch.reloadSettings()
+        easySwitch.start()
     }
 
     /// One run-loop cycle + short delay so MenuBarExtra and LSUIElement finish activation.
@@ -158,6 +194,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         accessibilityWizardWindow = nil
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
+        configureEasySwitch()
         floatingHelper?.start()
         showOnboardingIfNeededOnLaunch(afterAccessibility: true)
     }
@@ -167,6 +204,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             accessibilityWizardWindow = nil
             KeychainHelper.migrateIfNeeded()
             KeychainHelper.warmUpCache()
+            configureEasySwitch()
             floatingHelper?.start()
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
             return

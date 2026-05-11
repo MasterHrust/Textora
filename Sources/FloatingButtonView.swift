@@ -32,10 +32,6 @@ struct FloatingButtonView: View {
     let isHovered: Bool
     let showsCheckmark: Bool
     let showsSmartAIBadge: Bool
-    var spotlightPulse: Bool = false
-
-    @State private var spotlightGlowOpacity: CGFloat = 0
-    @State private var spotlightGlowRadius: CGFloat = 6
 
     private static let helperIcon: NSImage? = {
         guard let url = Bundle.main.url(forResource: "helper-icon", withExtension: "png") else {
@@ -56,10 +52,6 @@ struct FloatingButtonView: View {
 
     var body: some View {
         ZStack {
-            if spotlightPulse {
-                spotlightGlowLayer
-            }
-
             iconView
                 .frame(width: iconSide, height: iconSide)
                 .background(Circle().fill(Color.white.opacity(0.92)))
@@ -67,14 +59,14 @@ struct FloatingButtonView: View {
                 .compositingGroup()
                 .scaleEffect(isHovered ? 1.08 : 1.0)
                 .shadow(
-                    color: Color.cyan.opacity(isHovered ? 0.26 : Double(spotlightGlowOpacity) * 0.75),
-                    radius: isHovered ? 12 : spotlightGlowRadius,
+                    color: Color.cyan.opacity(isHovered ? 0.26 : 0),
+                    radius: isHovered ? 12 : 0,
                     x: 0,
                     y: isHovered ? 5 : 0
                 )
                 .shadow(
-                    color: Color.blue.opacity(isHovered ? 0.16 : Double(spotlightGlowOpacity) * 0.38),
-                    radius: isHovered ? 20 : spotlightGlowRadius * 1.35,
+                    color: Color.blue.opacity(isHovered ? 0.16 : 0),
+                    radius: isHovered ? 20 : 0,
                     x: 0,
                     y: 0
                 )
@@ -94,32 +86,12 @@ struct FloatingButtonView: View {
         }
         .padding(outerPad)
         .frame(width: iconSide + outerPad * 2, height: iconSide + outerPad * 2)
-        .contentShape(Rectangle())
+        .clipShape(Circle())
+        .contentShape(Circle())
         .help("Rewrite with Textora — drag to move")
         .animation(.interpolatingSpring(stiffness: 310, damping: 16), value: isHovered)
         .animation(.interpolatingSpring(stiffness: 360, damping: 18), value: showsCheckmark)
         .animation(.interpolatingSpring(stiffness: 360, damping: 18), value: showsSmartAIBadge)
-        .task(id: spotlightPulse) {
-            guard spotlightPulse else {
-                spotlightGlowOpacity = 0
-                spotlightGlowRadius = 6
-                return
-            }
-            while !Task.isCancelled {
-                withAnimation(.easeOut(duration: 0.09)) {
-                    spotlightGlowOpacity = 1
-                    spotlightGlowRadius = 16
-                }
-                try? await Task.sleep(nanoseconds: 95_000_000)
-                withAnimation(.easeIn(duration: 0.22)) {
-                    spotlightGlowOpacity = 0.08
-                    spotlightGlowRadius = 5
-                }
-                try? await Task.sleep(nanoseconds: 320_000_000)
-            }
-            spotlightGlowOpacity = 0
-            spotlightGlowRadius = 6
-        }
     }
 
     private var checkmarkBadge: some View {
@@ -161,26 +133,6 @@ struct FloatingButtonView: View {
         .offset(x: 2, y: -2)
         .help("SmartAI enabled")
         .accessibilityLabel("SmartAI enabled")
-    }
-
-    private var spotlightGlowLayer: some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: [
-                        Color.cyan.opacity(0.55),
-                        Color.blue.opacity(0.22),
-                        Color.clear
-                    ],
-                    center: .center,
-                    startRadius: 2,
-                    endRadius: 32
-                )
-            )
-            .frame(width: iconSide + 28, height: iconSide + 28)
-            .opacity(Double(spotlightGlowOpacity))
-            .blur(radius: 3)
-            .allowsHitTesting(false)
     }
 
     @ViewBuilder

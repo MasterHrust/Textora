@@ -425,6 +425,9 @@ final class TextAccessService {
     }
 
     private func queryFocusedWindowFrameFromSystem() -> CGRect? {
+        if let browserFrame = frontmostBrowserCGWindowFrame() {
+            return browserFrame
+        }
         if isGoogleDocsFrontmost(),
            let focusedWindow = queryFocusedWindowElementFromSystem() {
             let axFrame = elementFrame(of: focusedWindow)
@@ -461,6 +464,19 @@ final class TextAccessService {
             return cgFrame
         }
         return axFrame
+    }
+
+    private func frontmostBrowserCGWindowFrame() -> CGRect? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let bundleID = app.bundleIdentifier,
+              isBrowserBundleID(bundleID) else {
+            return nil
+        }
+        let pid = app.processIdentifier
+        let axFrame = queryFocusedWindowElementFromSystem().flatMap { elementFrame(of: $0) }
+        return focusedCGWindowFrame(for: pid, matching: axFrame)
+            ?? frontmostCGWindowFrame(for: pid)
+            ?? mainCGWindowFrame(for: pid)
     }
 
     func isCurrentFocusOwnedBy(bundleID expectedBundleID: String) -> Bool {
@@ -2577,11 +2593,59 @@ final class TextAccessService {
             textoraDiagLog("reconstructedFullValuePaste", "exit false (triggerPasteShortcut failed)")
             return false
         }
-        usleep(190_000)
-
+        let confirmed = waitForReconstructedPasteConfirmation(
+            target: context.targetElement,
+            originalValue: full,
+            expectedValue: reconstructed,
+            timeout: isElectronLikeHost ? 1.25 : 0.65
+        )
         restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
-        textoraDiagLog("reconstructedFullValuePaste", "exit true")
+        guard confirmed else {
+            if let current = valueText(of: context.targetElement),
+               normalized(current) != normalized(full),
+               normalized(current) != normalized(reconstructed) {
+                triggerUndoShortcut()
+                usleep(90_000)
+                textoraDiagLog(
+                    "reconstructedFullValuePaste",
+                    "undo triggered after unconfirmed paste current=\(textoraDiagPreview(current))"
+                )
+            }
+            textoraDiagLog("reconstructedFullValuePaste", "exit false (paste not confirmed)")
+            return false
+        }
+        textoraDiagLog("reconstructedFullValuePaste", "exit true (confirmed)")
         return true
+    }
+
+    private func waitForReconstructedPasteConfirmation(
+        target: AXUIElement,
+        originalValue: String,
+        expectedValue: String,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastObserved: String?
+        repeat {
+            usleep(45_000)
+            guard let current = valueText(of: target) else {
+                textoraDiagLog("reconstructedFullValuePaste", "confirm unavailable: no value readback")
+                return true
+            }
+            lastObserved = current
+            if normalized(current) == normalized(expectedValue) {
+                textoraDiagLog("reconstructedFullValuePaste", "confirm exact expected value")
+                return true
+            }
+        } while Date() < deadline
+
+        textoraDiagLog(
+            "reconstructedFullValuePaste",
+            "confirm timeout original=\(textoraDiagPreview(originalValue)) "
+            + "expected=\(textoraDiagPreview(expectedValue)) "
+            + "observed=\(textoraDiagPreview(lastObserved ?? "nil"))"
+        )
+        return false
     }
 
     /// Build an HTML *fragment* (no `<html>`/`<body>` wrapper) that puts
@@ -4157,15 +4221,41 @@ final class TextAccessService {
         mainCGWindowCaptureInfo(for: pid, matching: reference)?.rect
     }
 
+    private func frontmostCGWindowFrame(for pid: pid_t) -> CGRect? {
+        frontmostCGWindowCaptureInfo(for: pid)?.rect
+    }
+
+    private func frontmostCGWindowCaptureInfo(for pid: pid_t) -> (windowID: CGWindowID, rect: CGRect)? {
+        let candidates = cgWindowCaptureCandidates(for: pid)
+        return (candidates.first(where: \.isVisible) ?? candidates.first).map { ($0.windowID, $0.rect) }
+    }
+
     private func mainCGWindowCaptureInfo(
         for pid: pid_t,
         matching reference: CGRect? = nil
     ) -> (windowID: CGWindowID, rect: CGRect)? {
+        let candidates = cgWindowCaptureCandidates(for: pid)
+        let visibleCandidates = candidates.filter(\.isVisible)
+        let pool = visibleCandidates.isEmpty ? candidates : visibleCandidates
+        if let reference, !reference.isEmpty {
+            return pool.max { lhs, rhs in
+                cgWindowMatchScore(lhs.rect, reference: reference) < cgWindowMatchScore(rhs.rect, reference: reference)
+            }.map { ($0.windowID, $0.rect) }
+        }
+        return pool
+            .max { lhs, rhs in
+                (lhs.rect.width * lhs.rect.height) < (rhs.rect.width * rhs.rect.height)
+            }.map { ($0.windowID, $0.rect) }
+    }
+
+    private func cgWindowCaptureCandidates(
+        for pid: pid_t
+    ) -> [(windowID: CGWindowID, rect: CGRect, isVisible: Bool)] {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let rawList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+            return []
         }
-        let candidates: [(windowID: CGWindowID, rect: CGRect, isVisible: Bool)] = rawList.compactMap { info in
+        return rawList.compactMap { info in
             guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid else {
                 return nil
             }
@@ -4188,17 +4278,6 @@ final class TextAccessService {
             }
             return (CGWindowID(number.uint32Value), normalized, isVisible)
         }
-        let visibleCandidates = candidates.filter(\.isVisible)
-        let pool = visibleCandidates.isEmpty ? candidates : visibleCandidates
-        if let reference, !reference.isEmpty {
-            return pool.max { lhs, rhs in
-                cgWindowMatchScore(lhs.rect, reference: reference) < cgWindowMatchScore(rhs.rect, reference: reference)
-            }.map { ($0.windowID, $0.rect) }
-        }
-        return pool
-            .max { lhs, rhs in
-                (lhs.rect.width * lhs.rect.height) < (rhs.rect.width * rhs.rect.height)
-            }.map { ($0.windowID, $0.rect) }
     }
 
     private func cgWindowMatchScore(_ rect: CGRect, reference: CGRect) -> CGFloat {

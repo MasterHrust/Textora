@@ -10,133 +10,151 @@ struct ContentView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Settings")
-                    .font(.headline)
-                Text("Textora is free and works with your own AI key")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Provider", selection: $viewModel.provider) {
-                    ForEach(AIProvider.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                TextField("Model", text: $viewModel.model)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                switch viewModel.provider {
-                case .openai:
-                    SecureField("OpenAI API key", text: $viewModel.openAIKey)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .gemini:
-                    SecureField("Gemini API key", text: $viewModel.geminiKey)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .claude:
-                    SecureField("Claude API key", text: $viewModel.claudeKey)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .other:
-                    TextField("API base URL (OpenAI-compatible)", text: $viewModel.customOpenAIBaseURL)
-                        .textContentType(.URL)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    SecureField("API token", text: $viewModel.customToken)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                providerSetupHelp
-
-                Toggle("Detailed corrections", isOn: $viewModel.detailedCorrectionsEnabled)
-                    .toggleStyle(.checkbox)
-
-                Button("Save settings") {
-                    viewModel.saveSettings()
-                }
-
-                Divider().padding(.vertical, 4)
-
-                donateSection
-
-                Divider().padding(.vertical, 4)
-
-                Text("App Permissions")
-                    .font(.headline)
-                Text("Manage apps you previously allowed/denied.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(viewModel.hasAccessibilityPermission ? Color.green : Color.red)
-                        .frame(width: 8, height: 8)
-                    Text(viewModel.hasAccessibilityPermission
-                         ? "Accessibility granted"
-                         : "Accessibility is required for floating helper and text replacement")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if !viewModel.hasAccessibilityPermission {
-                        Button("Allow Accessibility") {
-                            viewModel.requestAccessibilityPermission()
-                        }
-                    } else {
-                        Button("Re-check") {
-                            viewModel.refreshAccessibilityPermissionStatus()
-                        }
-                    }
-                }
-
-                if viewModel.appConsentRows.isEmpty {
-                    Text("No app decisions yet.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(viewModel.appConsentRows) { row in
-                        HStack(alignment: .center, spacing: 10) {
-                            Text(row.bundleID)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(width: bundleIDTextWidth, alignment: .leading)
-                            Picker("", selection: Binding(
-                                get: { row.status },
-                                set: { newStatus in
-                                    viewModel.setConsentStatus(for: row.bundleID, status: newStatus)
-                                }
-                            )) {
-                                Text("Allow").tag(TextAccessService.AppConsentStatus.allowed)
-                                Text("Deny").tag(TextAccessService.AppConsentStatus.denied)
-                                Text("Ask").tag(TextAccessService.AppConsentStatus.unknown)
-                            }
-                            .labelsHidden()
-                            .frame(width: actionPickerWidth)
-                            Button("Reset") {
-                                viewModel.removeConsent(for: row.bundleID)
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                }
-
-                HStack {
-                    Button("Refresh list") {
-                        viewModel.refreshAppConsents()
-                    }
-                    Spacer()
-                }
-            }
-            .padding(12)
+            settingsContent
         }
         .frame(width: 520, height: 520)
         .onAppear {
             viewModel.refreshAccessibilityPermissionStatus()
             viewModel.refreshAppConsents()
         }
-        .onChange(of: viewModel.provider) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.model) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.openAIKey) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.geminiKey) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.claudeKey) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.customToken) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.customOpenAIBaseURL) { _, _ in viewModel.debouncedSave() }
-        .onChange(of: viewModel.detailedCorrectionsEnabled) { _, _ in viewModel.debouncedSave() }
+        .onChange(of: viewModel.settingsAutosaveToken) { _, _ in
+            viewModel.debouncedSave()
+        }
+    }
+
+    private var settingsContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            providerSection
+            Toggle("Detailed corrections", isOn: $viewModel.detailedCorrectionsEnabled)
+                .toggleStyle(.checkbox)
+            Divider().padding(.vertical, 4)
+            easySwitchSection
+            Button("Save settings") {
+                viewModel.saveSettings()
+            }
+            Divider().padding(.vertical, 4)
+            donateSection
+            Divider().padding(.vertical, 4)
+            appPermissionsSection
+        }
+        .padding(12)
+    }
+
+    private var providerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Settings")
+                .font(.headline)
+            Text("Textora is free and works with your own AI key")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Provider", selection: $viewModel.provider) {
+                ForEach(AIProvider.allCases) { provider in
+                    Text(provider.displayName).tag(provider)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            TextField("Model", text: $viewModel.model)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            credentialFields
+            providerSetupHelp
+        }
+    }
+
+    @ViewBuilder
+    private var credentialFields: some View {
+        switch viewModel.provider {
+        case .openai:
+            SecureField("OpenAI API key", text: $viewModel.openAIKey)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .gemini:
+            SecureField("Gemini API key", text: $viewModel.geminiKey)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .claude:
+            SecureField("Claude API key", text: $viewModel.claudeKey)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .other:
+            TextField("API base URL (OpenAI-compatible)", text: $viewModel.customOpenAIBaseURL)
+                .textContentType(.URL)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            SecureField("API token", text: $viewModel.customToken)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var appPermissionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("App Permissions")
+                .font(.headline)
+            Text("Manage apps you previously allowed/denied.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            accessibilityRow
+            appConsentRows
+            HStack {
+                Button("Refresh list") {
+                    viewModel.refreshAppConsents()
+                }
+                Spacer()
+            }
+        }
+    }
+
+    private var accessibilityRow: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(viewModel.hasAccessibilityPermission ? Color.green : Color.red)
+                .frame(width: 8, height: 8)
+            Text(viewModel.hasAccessibilityPermission
+                 ? "Accessibility granted"
+                 : "Accessibility is required for floating helper and text replacement")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if !viewModel.hasAccessibilityPermission {
+                Button("Allow Accessibility") {
+                    viewModel.requestAccessibilityPermission()
+                }
+            } else {
+                Button("Re-check") {
+                    viewModel.refreshAccessibilityPermissionStatus()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var appConsentRows: some View {
+        if viewModel.appConsentRows.isEmpty {
+            Text("No app decisions yet.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(viewModel.appConsentRows) { row in
+                HStack(alignment: .center, spacing: 10) {
+                    Text(row.bundleID)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(width: bundleIDTextWidth, alignment: .leading)
+                    Picker("", selection: Binding(
+                        get: { row.status },
+                        set: { newStatus in
+                            viewModel.setConsentStatus(for: row.bundleID, status: newStatus)
+                        }
+                    )) {
+                        Text("Allow").tag(TextAccessService.AppConsentStatus.allowed)
+                        Text("Deny").tag(TextAccessService.AppConsentStatus.denied)
+                        Text("Ask").tag(TextAccessService.AppConsentStatus.unknown)
+                    }
+                    .labelsHidden()
+                    .frame(width: actionPickerWidth)
+                    Button("Reset") {
+                        viewModel.removeConsent(for: row.bundleID)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
     }
 
     private var donateSection: some View {
@@ -150,6 +168,60 @@ struct ContentView: View {
                 guard let url = URL(string: donateURL) else { return }
                 NSWorkspace.shared.open(url)
             }
+        }
+    }
+
+    private var easySwitchSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("EasySwitch")
+                .font(.headline)
+            Text("EasySwitch works fully on-device.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Enable EasySwitch", isOn: $viewModel.easySwitchEnabled)
+                .toggleStyle(.checkbox)
+            Toggle("Auto-correct wrong keyboard layout", isOn: $viewModel.easySwitchAutoCorrectWrongLayout)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
+            Toggle("Correct small typos from dictionaries", isOn: $viewModel.easySwitchAutoCorrectTypos)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
+            Toggle("Switch keyboard layout after correction", isOn: $viewModel.easySwitchChangesKeyboardLayout)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
+            Stepper(
+                "Minimum word length: \(viewModel.easySwitchMinimumWordLength)",
+                value: $viewModel.easySwitchMinimumWordLength,
+                in: 1...12
+            )
+            .disabled(!viewModel.easySwitchEnabled)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Confidence threshold: \(viewModel.easySwitchConfidenceThreshold, specifier: "%.2f")")
+                    .font(.caption)
+                Slider(value: $viewModel.easySwitchConfidenceThreshold, in: 0.4...0.95, step: 0.05)
+                Text("Difference threshold: \(viewModel.easySwitchDifferenceThreshold, specifier: "%.2f")")
+                    .font(.caption)
+                Slider(value: $viewModel.easySwitchDifferenceThreshold, in: 0.1...0.7, step: 0.05)
+            }
+            .disabled(!viewModel.easySwitchEnabled)
+            HStack(spacing: 14) {
+                Toggle("English", isOn: $viewModel.easySwitchEnglishEnabled)
+                    .toggleStyle(.checkbox)
+                Toggle("Russian", isOn: $viewModel.easySwitchRussianEnabled)
+                    .toggleStyle(.checkbox)
+            }
+            .disabled(!viewModel.easySwitchEnabled)
+            TextField("Ignored / whitelist words, comma-separated", text: $viewModel.easySwitchWhitelistText)
+                .disabled(!viewModel.easySwitchEnabled)
+            Toggle("Show correction notification", isOn: $viewModel.easySwitchShowCorrectionNotification)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
+            Toggle("Play sound on correction", isOn: $viewModel.easySwitchPlaySoundOnCorrection)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
+            Toggle("Privacy mode for EasySwitch logs", isOn: $viewModel.easySwitchPrivacyMode)
+                .toggleStyle(.checkbox)
+                .disabled(!viewModel.easySwitchEnabled)
         }
     }
 
