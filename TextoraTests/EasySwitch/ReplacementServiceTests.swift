@@ -33,7 +33,7 @@ final class ReplacementServiceTests: XCTestCase {
         XCTAssertEqual(typed, ["привет "])
     }
 
-    func testUndoRestoresOriginalAndAddsTemporaryIgnore() {
+    func testUndoRestoresOriginalAndAddsPersistentIgnore() {
         let defaults = UserDefaults(suiteName: "Textora.EasySwitch.ReplacementServiceUndoTests.\(UUID().uuidString)")!
         let dictionary = UserDictionary(defaults: defaults)
         var typed: [String] = []
@@ -65,5 +65,6 @@ final class ReplacementServiceTests: XCTestCase {
 
         XCTAssertEqual(typed, ["привет ", "ghbdtn "])
         XCTAssertTrue(dictionary.isWhitelisted("ghbdtn"))
+        XCTAssertTrue(dictionary.ignoredWords.contains("ghbdtn"))
     }
 }

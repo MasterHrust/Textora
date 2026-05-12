@@ -88,7 +88,7 @@ final class ReplacementService {
         if !inserted {
             eventSink.pasteText(restored)
         }
-        userDictionary.addTemporaryIgnore(lastReplacement.original)
+        userDictionary.addPersistentIgnore(lastReplacement.original)
         self.lastReplacement = nil
         clearReplacingSoon(completion: completion)
         return true

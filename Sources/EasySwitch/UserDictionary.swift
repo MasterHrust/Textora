@@ -44,10 +44,26 @@ final class UserDictionary {
         sessionIgnoredWords.insert(normalized(word))
     }
 
+    func addPersistentIgnore(_ word: String) {
+        let key = normalized(word)
+        guard !key.isEmpty else { return }
+        var words = ignoredWords
+        words.insert(key)
+        ignoredWords = words
+        sessionIgnoredWords.insert(key)
+    }
+
     func addLearnedCorrection(original: String, replacement: String) {
         var corrections = learnedCorrections
         corrections[normalized(original)] = replacement
         learnedCorrections = corrections
+    }
+
+    func protectedWords() -> Set<String> {
+        whitelistWords
+            .union(customWords)
+            .union(ignoredWords)
+            .union(sessionIgnoredWords)
     }
 
     private func loadSet(_ key: String) -> Set<String> {

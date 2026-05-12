@@ -79,8 +79,28 @@ final class DecisionEngineTests: XCTestCase {
     }
 
     func testShortRussianInformalWordsAndFragmentsDoNotAutocorrect() {
-        for word in ["плиз", "йста"] {
+        for word in ["плиз", "пасиб", "спс", "канеш", "щас", "чё", "всм", "йста"] {
             let decision = engine.decision(for: word, currentLanguage: .russian, settings: settings)
+            XCTAssertEqual(decision.action, .skip, word)
+        }
+    }
+
+    func testRussianTextingTsyaShortcutDoesNotAutocorrect() {
+        let engine = EasySwitchDecisionEngine(
+            scorer: LanguageScorer(
+                englishWords: [],
+                russianWords: [],
+                russianKnownWords: ["нравиться", "нравится"]
+            ),
+            userDictionary: userDictionary
+        )
+        let decision = engine.decision(for: "нравица", currentLanguage: .russian, settings: settings)
+        XCTAssertEqual(decision.action, .skip)
+    }
+
+    func testEnglishInternetSlangDoesNotSwitchOrAutocorrect() {
+        for word in ["brb", "afaik", "ofc", "wdym", "tldr", "iykyk"] {
+            let decision = engine.decision(for: word, currentLanguage: .english, settings: settings)
             XCTAssertEqual(decision.action, .skip, word)
         }
     }
@@ -90,6 +110,39 @@ final class DecisionEngineTests: XCTestCase {
         XCTAssertEqual(decision.action, .replace)
         XCTAssertEqual(decision.kind, .spelling)
         XCTAssertEqual(decision.converted, "пожалуйста")
+    }
+
+    func testRussianEndingCompletionUsesPrefixOnly() {
+        let decision = engine.decision(for: "пожалуйст", currentLanguage: .russian, settings: settings)
+        XCTAssertEqual(decision.action, .replace)
+        XCTAssertEqual(decision.kind, .spelling)
+        XCTAssertEqual(decision.converted, "пожалуйста")
+    }
+
+    func testRussianCompletionDoesNotAddReflexiveSuffix() {
+        let engine = EasySwitchDecisionEngine(
+            scorer: LanguageScorer(
+                englishWords: [],
+                russianWords: [],
+                russianKnownWords: ["подумаю", "подумаюсь"]
+            ),
+            userDictionary: userDictionary
+        )
+        let decision = engine.decision(for: "подумаю", currentLanguage: .russian, settings: settings)
+        XCTAssertEqual(decision.action, .skip)
+    }
+
+    func testRussianNameLikeWordDoesNotRewriteByMultipleInternalLetters() {
+        let engine = EasySwitchDecisionEngine(
+            scorer: LanguageScorer(
+                englishWords: [],
+                russianWords: ["андреева"],
+                russianKnownWords: ["андреева"]
+            ),
+            userDictionary: userDictionary
+        )
+        let decision = engine.decision(for: "Андреаса", currentLanguage: .russian, settings: settings)
+        XCTAssertEqual(decision.action, .skip)
     }
 
     func testSmallEnglishTypoUsesDictionaryCorrection() {

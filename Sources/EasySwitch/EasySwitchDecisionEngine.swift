@@ -53,6 +53,9 @@ final class EasySwitchDecisionEngine {
         guard !shouldExclude(word, userDictionary: userDictionary) else {
             return skip(word, converted: fallbackConverted, sourceLanguage, targetLanguage, "excluded")
         }
+        guard !scorer.isProtectedInformalWord(word, language: sourceLanguage) else {
+            return skip(word, converted: fallbackConverted, sourceLanguage, targetLanguage, "protected informal word")
+        }
 
         if settings.autoCorrectWrongLayout,
            let layoutDecision = layoutDecision(for: word, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, settings: settings) {
@@ -116,13 +119,17 @@ final class EasySwitchDecisionEngine {
         let minimumSpellingLength = sourceLanguage == .russian ? 5 : 4
         guard word.count >= minimumSpellingLength else { return nil }
 
+        if let completionDecision = suffixCompletionDecision(for: word, sourceLanguage: sourceLanguage) {
+            return completionDecision
+        }
+
         let maxDistance = word.count >= 6 ? 2 : 1
         guard !scorer.containsWord(word, language: sourceLanguage),
               let corrected = scorer.nearestWord(to: word, language: sourceLanguage, maxDistance: maxDistance),
               corrected.lowercased() != word.lowercased() else {
             return nil
         }
-        guard corrected.count + 1 >= word.count else { return nil }
+        guard isSafeSpellingReplacement(word, corrected: corrected, language: sourceLanguage) else { return nil }
         guard !looksLikePluralOrVerbFormBeingShortened(word, corrected: corrected, language: sourceLanguage) else { return nil }
 
         return EasySwitchDecision(
@@ -136,6 +143,72 @@ final class EasySwitchDecisionEngine {
             sourceLanguage: sourceLanguage,
             targetLanguage: sourceLanguage
         )
+    }
+
+    private func suffixCompletionDecision(
+        for word: String,
+        sourceLanguage: EasySwitchLanguage
+    ) -> EasySwitchDecision? {
+        let lower = word.lowercased()
+        let exactKnown = scorer.containsWord(word, language: sourceLanguage)
+        let allowedKnownFragments: Set<String> = sourceLanguage == .russian
+            ? ["пожалуйс", "пожалуйст"]
+            : []
+
+        guard !exactKnown || allowedKnownFragments.contains(lower) else { return nil }
+        guard let completed = scorer.completionCandidate(forPrefix: word, language: sourceLanguage),
+              completed.lowercased() != lower else {
+            return nil
+        }
+        guard !addsRussianReflexiveSuffix(lower, completed: completed.lowercased(), language: sourceLanguage) else {
+            return nil
+        }
+
+        return EasySwitchDecision(
+            action: .replace,
+            kind: .spelling,
+            original: word,
+            converted: completed,
+            originalScore: scorer.score(word, language: sourceLanguage),
+            convertedScore: scorer.score(completed, language: sourceLanguage),
+            reason: "safe suffix completion",
+            sourceLanguage: sourceLanguage,
+            targetLanguage: sourceLanguage
+        )
+    }
+
+    private func addsRussianReflexiveSuffix(
+        _ word: String,
+        completed: String,
+        language: EasySwitchLanguage
+    ) -> Bool {
+        guard language == .russian, completed.hasPrefix(word) else { return false }
+        let suffix = String(completed.dropFirst(word.count))
+        return ["ся", "сь", "тся", "ться"].contains(suffix)
+    }
+
+    private func isSafeSpellingReplacement(
+        _ word: String,
+        corrected: String,
+        language: EasySwitchLanguage
+    ) -> Bool {
+        let lower = word.lowercased()
+        let correctedLower = corrected.lowercased()
+
+        if language == .russian, correctedLower.count < lower.count {
+            return false
+        }
+        if correctedLower.count < lower.count {
+            return lower.hasPrefix("i") && String(lower.dropFirst()) == correctedLower
+        }
+
+        if lower.count == correctedLower.count {
+            let mismatches = zip(lower, correctedLower).reduce(0) { $0 + ($1.0 == $1.1 ? 0 : 1) }
+            guard mismatches <= 1 else { return false }
+            return lower.count >= (language == .russian ? 7 : 5)
+        }
+
+        return correctedLower.count - lower.count <= 2
     }
 
     private func looksLikePluralOrVerbFormBeingShortened(

@@ -7,11 +7,15 @@ final class LanguageScorer {
     private let russianKnownWords: [String]
     private let englishWordsByLength: [Int: [String]]
     private let russianWordsByLength: [Int: [String]]
+    private let englishProtectedWords: Set<String>
+    private let russianProtectedWords: Set<String>
 
     init(
         englishWords: Set<String> = LanguageScorer.loadWords(resource: "common_en_words", fallback: LanguageScorer.fallbackEnglishWords),
         russianWords: Set<String> = LanguageScorer.loadWords(resource: "common_ru_words", fallback: LanguageScorer.fallbackRussianWords),
-        russianKnownWords: Set<String>? = nil
+        russianKnownWords: Set<String>? = nil,
+        englishProtectedWords: Set<String> = LanguageScorer.fallbackEnglishMessengerSlang,
+        russianProtectedWords: Set<String> = LanguageScorer.fallbackRussianMessengerSlang
     ) {
         self.englishWords = englishWords
         self.russianWords = russianWords
@@ -20,6 +24,8 @@ final class LanguageScorer {
             ?? LanguageScorer.loadWordList(resource: "common_ru_forms", fallback: russianWords)
         self.englishWordsByLength = LanguageScorer.wordsByLength(englishWords)
         self.russianWordsByLength = LanguageScorer.wordsByLength(russianWords)
+        self.englishProtectedWords = englishProtectedWords
+        self.russianProtectedWords = russianProtectedWords
     }
 
     func score(_ word: String, language: EasySwitchLanguage) -> Double {
@@ -44,6 +50,22 @@ final class LanguageScorer {
 
     func containsWord(_ word: String, language: EasySwitchLanguage) -> Bool {
         containsWord(word.lowercased(), language: language, exactCase: false)
+    }
+
+    func isProtectedInformalWord(_ word: String, language: EasySwitchLanguage) -> Bool {
+        let lower = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return false }
+        let protectedWords = language == .english ? englishProtectedWords : russianProtectedWords
+        if protectedWords.contains(lower) { return true }
+
+        if language == .russian,
+           lower.hasSuffix("ца"),
+           lower.count >= 5 {
+            return containsWord(String(lower.dropLast(2)) + "ться", language: .russian)
+                || containsWord(String(lower.dropLast(2)) + "тся", language: .russian)
+        }
+
+        return false
     }
 
     func nearestWord(to word: String, language: EasySwitchLanguage, maxDistance: Int = 1) -> String? {
@@ -71,6 +93,33 @@ final class LanguageScorer {
         }
 
         guard let bestWord, bestWord != lower else { return nil }
+        return preserveCase(from: word, in: bestWord)
+    }
+
+    func completionCandidate(
+        forPrefix word: String,
+        language: EasySwitchLanguage,
+        maxSuffixLength: Int = 3
+    ) -> String? {
+        let lower = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return nil }
+
+        var bestWord: String?
+        for candidate in knownWords(for: language) {
+            guard candidate.count > lower.count,
+                  candidate.count - lower.count <= maxSuffixLength,
+                  candidate.hasPrefix(lower) else {
+                continue
+            }
+            if bestWord == nil
+                || candidate.count < bestWord!.count
+                || (candidate.count == bestWord!.count && dictionary(for: language).contains(candidate) && !dictionary(for: language).contains(bestWord!))
+                || (candidate.count == bestWord!.count && candidate < bestWord!) {
+                bestWord = candidate
+            }
+        }
+
+        guard let bestWord else { return nil }
         return preserveCase(from: word, in: bestWord)
     }
 
@@ -255,6 +304,27 @@ final class LanguageScorer {
         "для", "должен", "если", "есть", "еще", "здесь", "как", "когда", "кофе", "меня", "можем", "может", "можно",
         "надо", "нам", "нас", "нет", "нужно", "они", "оно", "очень", "пока", "после", "почему", "привет",
         "просто", "работает", "роман", "сейчас", "спасибо", "тебя", "тоже", "тогда", "только", "тут", "уже", "хочу", "чтобы", "это"
+    ]
+
+    private static let fallbackEnglishMessengerSlang: Set<String> = [
+        "aaf", "af", "afaic", "afaict", "afaik", "afair", "afk", "ama", "asap", "asl", "atm", "b4", "bbl", "bbs",
+        "bff", "bfn", "brb", "btw", "cu", "cya", "dgaf", "dm", "dnd", "eli5", "faq", "ffs", "fml", "ftfy", "ftr",
+        "ftw", "fwiw", "fyi", "g2g", "gc", "gg", "gj", "gl", "gm", "gn", "gr8", "gtg", "hbu", "hf", "hmu", "hth",
+        "ianal", "idc", "idgaf", "idk", "ig", "iirc", "ikr", "ily", "imho", "imo", "inb4", "irl", "iykyk", "jk",
+        "kk", "kthx", "l8r", "lfg", "lfm", "lmao", "lmfao", "lmk", "lol", "lulz", "m8", "mfw", "mrw", "ngl",
+        "nm", "nvm", "np", "nsfw", "ofc", "oic", "omg", "omfg", "omw", "op", "ot", "plmk", "pls", "plz", "pm",
+        "pov", "ppl", "qft", "rn", "rofl", "rotfl", "smh", "srsly", "tbh", "tfw", "tldr", "tl;dr", "thx", "til",
+        "ttyl", "ty", "tyt", "u", "ur", "wanna", "gonna", "gotta", "wdym", "wfh", "wrt", "wtf", "wth", "yep",
+        "yeah", "yh", "yolo", "nope", "ok", "okay"
+    ]
+
+    private static let fallbackRussianMessengerSlang: Set<String> = [
+        "ага", "ахах", "ахаха", "бб", "блин", "бля", "бтв", "ваще", "всм", "го", "гоу", "давай", "дратути",
+        "збс", "здрасте", "имхо", "инфа", "канеш", "канешн", "кек", "комп", "крч", "лол", "мб", "мч", "нзч",
+        "низзя", "низя", "норм", "ок", "окей", "омг", "о.с.", "пасиб", "пасиба", "пж", "пжл", "пжлст", "пжст",
+        "плиз", "плз", "пнх", "пон", "пох", "ппц", "прост", "ржу", "ржунимагу", "сорян", "спс", "седня",
+        "сёдня", "скок", "скока", "сток", "стока", "сяб", "сяп", "ток", "тыща", "хз", "хзш", "хорош", "чел",
+        "че", "чё", "чо", "чот", "чёт", "чет", "чтоль", "чзх", "ща", "щас"
     ]
 }
 

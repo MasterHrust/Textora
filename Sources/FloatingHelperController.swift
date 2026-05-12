@@ -1862,7 +1862,18 @@ final class FloatingHelperController {
             }
             return OverlaySuggestion(operation: suggestion.operation, text: trimmed)
         }
-        return orderedUniqueWholeTextSuggestions(filtered, original: text)
+        let ordered = orderedUniqueWholeTextSuggestions(filtered, original: text)
+        if !ordered.isEmpty {
+            return ordered
+        }
+        if let fallback = try await grammarOnlyAISuggestion(for: text, credentials: credentials) {
+            textoraDiagLog(
+                "aiRewrite",
+                "multiSmart empty; fallback strictFix=\(textoraDiagPreview(fallback.text))"
+            )
+            return [fallback]
+        }
+        return []
     }
 
     private func rankedSuggestions(

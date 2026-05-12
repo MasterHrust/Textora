@@ -54,8 +54,6 @@ struct FloatingButtonView: View {
         ZStack {
             iconView
                 .frame(width: iconSide, height: iconSide)
-                .background(Circle().fill(Color.white.opacity(0.92)))
-                .clipShape(Circle())
                 .compositingGroup()
                 .scaleEffect(isHovered ? 1.08 : 1.0)
                 .shadow(

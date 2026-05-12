@@ -1439,6 +1439,14 @@ final class TextAccessService {
             + "needsAtomicPaste=\(needsAtomicPaste) envelopeTouchesRichTokens=\(envelopeWouldTouchRichTokens)"
         )
         if needsAtomicPaste, !envelopeWouldTouchRichTokens {
+            if prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) {
+                if applySingleEnvelopePhysicalRewrite(rewritten, basedOn: context) {
+                    textoraDiagLog("applyRewrittenText", "success via singleEnvelopePhysicalRewrite")
+                    return .success
+                }
+                textoraDiagLog("applyRewrittenText", "singleEnvelopePhysicalRewrite failed for Electron host -> failed")
+                return .failed
+            }
             if applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: context) {
                 textoraDiagLog("applyRewrittenText", "success via singleEnvelopeClipboardRangePaste")
                 return .success
@@ -1485,6 +1493,10 @@ final class TextAccessService {
             textoraDiagLog("applyRewrittenText", "success via reconstructedFullValuePaste")
             return .success
         }
+        if needsAtomicPaste, prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) {
+            textoraDiagLog("applyRewrittenText", "atomic Electron paste failed -> failed (skip unsafe fullReplacement)")
+            return .failed
+        }
         let avoidWholeReplacement = shouldAvoidWholeTextReplacement(rewritten, basedOn: context)
         if avoidWholeReplacement {
             textoraDiagLog("applyRewrittenText", "early-exit: shouldAvoidWholeTextReplacement=true -> failed")
@@ -1518,6 +1530,14 @@ final class TextAccessService {
             in: refreshed
         )
         if refreshedNeedsAtomicPaste, !refreshedEnvelopeWouldTouchRichTokens {
+            if prefersClipboardSelectionPasteReplaceForBundle(refreshed.targetBundleID) {
+                if applySingleEnvelopePhysicalRewrite(rewritten, basedOn: refreshed) {
+                    textoraDiagLog("applyRewrittenText", "success via refreshed singleEnvelopePhysicalRewrite")
+                    return .success
+                }
+                textoraDiagLog("applyRewrittenText", "refreshed singleEnvelopePhysicalRewrite failed for Electron host -> failed")
+                return .failed
+            }
             if applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: refreshed) {
                 textoraDiagLog("applyRewrittenText", "success via refreshed singleEnvelopeClipboardRangePaste")
                 return .success
@@ -1553,6 +1573,10 @@ final class TextAccessService {
            applyReconstructedFullValuePaste(rewritten, basedOn: refreshed) {
             textoraDiagLog("applyRewrittenText", "success via refreshed reconstructedFullValuePaste")
             return .success
+        }
+        if refreshedNeedsAtomicPaste, prefersClipboardSelectionPasteReplaceForBundle(refreshed.targetBundleID) {
+            textoraDiagLog("applyRewrittenText", "refreshed atomic Electron paste failed -> failed (skip unsafe fullReplacement)")
+            return .failed
         }
         let avoidRefreshedWholeReplacement = shouldAvoidWholeTextReplacement(rewritten, basedOn: refreshed)
         if avoidRefreshedWholeReplacement {
@@ -1602,17 +1626,30 @@ final class TextAccessService {
             )
 
             if !damagesRichTokens {
-                let ok = applyClipboardRangePaste(
-                    replacement: patch.replacement,
-                    localRange: patch.range,
-                    basedOn: context,
-                    requireSelectionVerification: isElectronLikeHost
-                )
+                let ok: Bool
+                if isElectronLikeHost, let absolutePatchRange {
+                    ok = applyCountedPhysicalRangeRewrite(
+                        replacement: patch.replacement,
+                        absoluteRange: absolutePatchRange,
+                        basedOn: context
+                    )
+                } else {
+                    ok = applyClipboardRangePaste(
+                        replacement: patch.replacement,
+                        localRange: patch.range,
+                        basedOn: context,
+                        requireSelectionVerification: isElectronLikeHost
+                    )
+                }
                 textoraDiagLog(
                     "applyLocalizedRewrite",
-                    "clipboardRangePaste result=\(ok)"
+                    "\(isElectronLikeHost ? "countedPhysicalRangeRewrite" : "clipboardRangePaste") result=\(ok)"
                 )
                 if ok { return .success }
+                if isElectronLikeHost {
+                    textoraDiagLog("applyLocalizedRewrite", "physical Electron patch failed -> failed")
+                    return .failed
+                }
             } else {
                 let armed = armClipboardForManualPaste(patch.replacement)
                 textoraDiagLog(
@@ -2157,6 +2194,31 @@ final class TextAccessService {
         )
     }
 
+    private func applySingleEnvelopePhysicalRewrite(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
+        guard let envelope = changedEnvelope(original: context.text, corrected: rewritten) else {
+            return true
+        }
+        guard let absoluteRange = absoluteRangeForAtomicPaste(envelope.originalRange, in: context) else {
+            textoraDiagLog(
+                "countedPhysicalRangeRewrite",
+                "envelope abort: no absoluteRange local=\(envelope.originalRange.location):\(envelope.originalRange.length)"
+            )
+            return false
+        }
+        guard !rangeDamagesRichSlackTokens(absoluteRange: absoluteRange, in: context) else {
+            textoraDiagLog(
+                "countedPhysicalRangeRewrite",
+                "envelope abort: damages rich token absolute=\(absoluteRange.location):\(absoluteRange.length)"
+            )
+            return false
+        }
+        return applyCountedPhysicalRangeRewrite(
+            replacement: envelope.replacement,
+            absoluteRange: absoluteRange,
+            basedOn: context
+        )
+    }
+
     /// Convenience wrapper: compute the minimal diff envelope between
     /// `context.text` and `rewritten`, then run `applyKeystrokeSelectionRangePaste`
     /// for that envelope.
@@ -2599,7 +2661,6 @@ final class TextAccessService {
             expectedValue: reconstructed,
             timeout: isElectronLikeHost ? 1.25 : 0.65
         )
-        restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
         guard confirmed else {
             if let current = valueText(of: context.targetElement),
                normalized(current) != normalized(full),
@@ -2611,9 +2672,19 @@ final class TextAccessService {
                     "undo triggered after unconfirmed paste current=\(textoraDiagPreview(current))"
                 )
             }
+            if isElectronLikeHost {
+                pasteboard.clearContents()
+                textoraDiagLog(
+                    "reconstructedFullValuePaste",
+                    "cleared pasteboard after unconfirmed Electron paste"
+                )
+            } else {
+                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            }
             textoraDiagLog("reconstructedFullValuePaste", "exit false (paste not confirmed)")
             return false
         }
+        restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
         textoraDiagLog("reconstructedFullValuePaste", "exit true (confirmed)")
         return true
     }
@@ -2870,7 +2941,15 @@ final class TextAccessService {
                 usleep(90_000)
                 textoraDiagLog("clipboardRangePaste", "undo triggered (value changed but replacement not at anchor)")
             }
-            restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            if isHostWithUnreliableSelectionReadback {
+                pasteboard.clearContents()
+                textoraDiagLog(
+                    "clipboardRangePaste",
+                    "cleared pasteboard after unconfirmed Electron paste"
+                )
+            } else {
+                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            }
             textoraDiagLog("clipboardRangePaste", "exit false (paste not confirmed at anchor)")
             return false
         }
@@ -3297,50 +3376,56 @@ final class TextAccessService {
         )
 
         focusTargetAppAndElement(context)
+        let isElectronLikeHost = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
         // Slack may consume the first navigation event while its composer
-        // is being reactivated. Anchor twice; a second Cmd+Left/Right at
-        // the same edge is harmless, but it makes first-press rewrites land.
-        usleep(180_000)
+        // is being reactivated. Anchor twice for Electron hosts; a second
+        // Cmd+Left/Right at the same edge is harmless, but it makes
+        // first-press rewrites land.
+        usleep(isElectronLikeHost ? 90_000 : 180_000)
         if useStartAnchor {
             triggerCmdLeftArrowKey()
-            usleep(80_000)
-            triggerCmdLeftArrowKey()
-            usleep(110_000)
+            usleep(isElectronLikeHost ? 35_000 : 80_000)
+            if isElectronLikeHost {
+                triggerCmdLeftArrowKey()
+            }
+            usleep(isElectronLikeHost ? 55_000 : 110_000)
             for _ in 0..<distanceFromStart {
                 triggerRightArrowKey()
             }
             if distanceFromStart > 0 {
-                usleep(UInt32(50_000 + distanceFromStart * 180))
+                usleep(UInt32((isElectronLikeHost ? 20_000 : 50_000) + distanceFromStart * (isElectronLikeHost ? 80 : 180)))
             }
             for _ in 0..<absoluteRange.length {
                 triggerShiftRightArrowKey()
             }
         } else {
             triggerCmdRightArrowKey()
-            usleep(80_000)
-            triggerCmdRightArrowKey()
-            usleep(110_000)
+            usleep(isElectronLikeHost ? 35_000 : 80_000)
+            if isElectronLikeHost {
+                triggerCmdRightArrowKey()
+            }
+            usleep(isElectronLikeHost ? 55_000 : 110_000)
             for _ in 0..<distanceFromEnd {
                 triggerLeftArrowKey()
             }
             if distanceFromEnd > 0 {
-                usleep(UInt32(50_000 + distanceFromEnd * 180))
+                usleep(UInt32((isElectronLikeHost ? 20_000 : 50_000) + distanceFromEnd * (isElectronLikeHost ? 80 : 180)))
             }
             for _ in 0..<absoluteRange.length {
                 triggerShiftLeftArrowKey()
             }
         }
-        usleep(UInt32(80_000 + absoluteRange.length * 250))
+        usleep(UInt32((isElectronLikeHost ? 35_000 : 80_000) + absoluteRange.length * (isElectronLikeHost ? 120 : 250)))
 
         triggerBackspaceKey()
-        usleep(130_000)
+        usleep(isElectronLikeHost ? 55_000 : 130_000)
 
         if !replacement.isEmpty {
             guard triggerUnicodeText(replacement) else {
                 textoraDiagLog("countedPhysicalRangeRewrite", "abort: unicode typing failed")
                 return false
             }
-            usleep(UInt32(130_000 + min(220_000, replacement.utf16.count * 3_000)))
+            usleep(UInt32((isElectronLikeHost ? 60_000 : 130_000) + min(isElectronLikeHost ? 120_000 : 220_000, replacement.utf16.count * (isElectronLikeHost ? 1_500 : 3_000))))
         }
 
         guard let updatedValue = valueText(of: target) else {

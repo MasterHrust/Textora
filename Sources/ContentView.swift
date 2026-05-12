@@ -211,8 +211,7 @@ struct ContentView: View {
                     .toggleStyle(.checkbox)
             }
             .disabled(!viewModel.easySwitchEnabled)
-            TextField("Ignored / whitelist words, comma-separated", text: $viewModel.easySwitchWhitelistText)
-                .disabled(!viewModel.easySwitchEnabled)
+            TextField("Protected words for AI and EasySwitch, comma-separated", text: $viewModel.easySwitchWhitelistText)
             Toggle("Show correction notification", isOn: $viewModel.easySwitchShowCorrectionNotification)
                 .toggleStyle(.checkbox)
                 .disabled(!viewModel.easySwitchEnabled)

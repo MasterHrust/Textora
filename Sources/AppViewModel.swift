@@ -106,7 +106,8 @@ final class AppViewModel: ObservableObject {
         easySwitchShowCorrectionNotification = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchShowCorrectionNotification)
         easySwitchPlaySoundOnCorrection = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchPlaySoundOnCorrection)
         easySwitchPrivacyMode = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchPrivacyMode)
-        easySwitchWhitelistText = (UserDefaults.standard.stringArray(forKey: "easySwitch.userDictionary.whitelist") ?? []).joined(separator: ", ")
+        let easySwitchDictionary = UserDictionary()
+        easySwitchWhitelistText = easySwitchDictionary.protectedWords().sorted().joined(separator: ", ")
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
     }
@@ -199,7 +200,9 @@ final class AppViewModel: ObservableObject {
             .split { $0.isWhitespace || $0 == "," || $0 == ";" || $0 == "\n" }
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
-        UserDefaults.standard.set(Array(Set(whitelist)).sorted(), forKey: "easySwitch.userDictionary.whitelist")
+        let protectedWords = Array(Set(whitelist)).sorted()
+        UserDefaults.standard.set(protectedWords, forKey: "easySwitch.userDictionary.whitelist")
+        UserDefaults.standard.set([], forKey: "easySwitch.userDictionary.ignoredWords")
         NotificationCenter.default.post(name: EasySwitchManager.settingsDidChangeNotification, object: nil)
         KeychainHelper.saveAll(
             openAI: openAIKey,

@@ -3,6 +3,7 @@ import Foundation
 struct AIClient {
     /// User-configured base URL for OpenAI-compatible Chat Completions (stored in UserDefaults).
     static let openAICompatibleBaseURLUserDefaultsKey = "openAICompatibleBaseURL"
+    private let userDictionary = UserDictionary()
 
     enum Defaults {
         static let openAIModel = "gpt-5.4-mini"
@@ -713,8 +714,36 @@ struct AIClient {
             tokens.append(contentsOf: regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
                 .map { ns.substring(with: $0.range) })
         }
+        tokens.append(contentsOf: userProtectedTokens(in: text))
+        tokens.append(contentsOf: properNameTokens(in: text))
         tokens.append(contentsOf: emojiTokens(in: text))
         return tokens
+    }
+
+    private func userProtectedTokens(in text: String) -> [String] {
+        let protected = userDictionary.protectedWords()
+        guard !protected.isEmpty else { return [] }
+        let words = lexicalTokens(in: text)
+        return words.filter { protected.contains($0.lowercased()) }
+    }
+
+    private func properNameTokens(in text: String) -> [String] {
+        lexicalTokens(in: text).filter { token in
+            guard token.count >= 3 else { return false }
+            guard let first = token.first, first.isUppercase else { return false }
+            guard token.dropFirst().contains(where: { $0.isLowercase }) else { return false }
+            let lower = token.lowercased()
+            return !Self.commonTitleCaseWords.contains(lower)
+        }
+    }
+
+    private func lexicalTokens(in text: String) -> [String] {
+        let ns = text as NSString
+        guard let regex = try? NSRegularExpression(pattern: #"\b[\p{L}][\p{L}'’-]*\b"#) else {
+            return []
+        }
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range) }
     }
 
     private func emojiTokens(in text: String) -> [String] {
@@ -737,6 +766,11 @@ struct AIClient {
         guard scalar.properties.isEmoji else { return false }
         return !(0x30...0x39).contains(scalar.value)
     }
+
+    private static let commonTitleCaseWords: Set<String> = [
+        "a", "an", "and", "as", "at", "but", "by", "for", "from", "hi", "hello", "hey", "i", "if", "in", "interview",
+        "is", "it", "its", "of", "on", "or", "please", "so", "the", "then", "to", "with", "you", "your"
+    ]
 
     private func rewriteOpenAI(
         model: String,
