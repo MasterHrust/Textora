@@ -6,7 +6,6 @@ struct EasySwitchSettings {
     enum Keys {
         static let enabled = "easySwitch.enabled"
         static let autoCorrectWrongLayout = "easySwitch.autoCorrectWrongLayout"
-        static let autoCorrectTypos = "easySwitch.autoCorrectTypos"
         static let changesKeyboardLayout = "easySwitch.changesKeyboardLayout"
         static let minimumWordLength = "easySwitch.minimumWordLength"
         static let confidenceThreshold = "easySwitch.confidenceThreshold"
@@ -20,7 +19,6 @@ struct EasySwitchSettings {
 
     var enabled: Bool
     var autoCorrectWrongLayout: Bool
-    var autoCorrectTypos: Bool
     var changesKeyboardLayout: Bool
     var minimumWordLength: Int
     var confidenceThreshold: Double
@@ -36,7 +34,6 @@ struct EasySwitchSettings {
         return EasySwitchSettings(
             enabled: defaults.bool(forKey: Keys.enabled),
             autoCorrectWrongLayout: defaults.bool(forKey: Keys.autoCorrectWrongLayout),
-            autoCorrectTypos: defaults.bool(forKey: Keys.autoCorrectTypos),
             changesKeyboardLayout: defaults.bool(forKey: Keys.changesKeyboardLayout),
             minimumWordLength: max(1, defaults.integer(forKey: Keys.minimumWordLength)),
             confidenceThreshold: defaults.double(forKey: Keys.confidenceThreshold),
@@ -52,7 +49,6 @@ struct EasySwitchSettings {
     static func registerDefaults(defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
             Keys.autoCorrectWrongLayout: true,
-            Keys.autoCorrectTypos: true,
             Keys.minimumWordLength: 3,
             Keys.confidenceThreshold: 0.65,
             Keys.differenceThreshold: 0.35,

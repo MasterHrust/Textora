@@ -229,17 +229,20 @@ struct AIClient {
 
         Rules:
         - "fix" corrects grammar, spelling, punctuation, word order, and obvious shorthand while preserving intended meaning. "fix" should use the whole phrase when needed. Example: "Ar u how?" becomes "How are you?"
-        - "formal" rewrites the text in a professional, polished tone, even when grammar is already correct.
-        - "shorten" rewrites the text to be shorter and clearer without losing important meaning.
-        - "humanize" rewrites the text to sound natural and conversational, even when grammar is already correct.
-        - Each of "formal", "shorten", and "humanize" MUST produce a genuinely distinct rewrite that reflects its own operation. Do not copy "fix" into them. Do not make them identical to each other. If the text is already in that style, still produce a natural variant of the style (e.g. a shorter phrasing for "shorten", a warmer phrasing for "humanize").
+        - "formal" rewrites the text in a professional, polished tone only when that is clearly useful.
+        - "shorten" rewrites the text to be shorter and clearer only when the text is actually verbose.
+        - "humanize" rewrites the text to sound natural and conversational only when the text sounds stiff or robotic.
+        - For "formal", "shorten", and "humanize", return the original text when a genuinely useful, meaning-preserving rewrite is not available. Do not invent variants for short fragments.
         - Keep the input language unchanged.
         - Preserve line breaks when possible.
         - Preserve ordered-list markers exactly. Never remove or rewrite a leading list number, the dot after it, or the following separator space (for example, keep "1. " intact).
         - Do not modify URLs, email addresses, phone numbers, standalone numbers, @mentions, #hashtags, code-like tokens, or words that start with @ or #.
+        - Do not replace a correctly spelled common word with a different correctly spelled word unless the surrounding sentence makes the intended word unambiguous. For short fragments, keep the word unchanged.
+        - If the text is a short incomplete clause or fragment (for example starts with "if", "when", "because", "while" and has no main clause), do not guess missing context; keep all keys equal to the original unless there is an obvious spelling typo.
+        - Preserve rare, unknown, domain-specific, transliterated, brand-like, product-like, or intentionally informal words unless the correction is obvious from the same word form. If unsure, keep the word unchanged and only fix punctuation/grammar around it.
         - Do NOT "correct" currency abbreviations or unit symbols. Treat them as protected tokens: EUR, USD, GBP, JPY, CHF, CAD, AUD, CNY, RUB, UAH, etc.; €, $, £, ¥, ₽, ₴; %, ‰, kg, g, lb, km, m, cm, mm, ft, in, mph, kph, °C, °F, …
         - Do not use em dashes; use commas, periods, colons, or a regular hyphen only when needed.
-        - Only "fix" may equal the original (when no grammar/spelling issue exists). For "formal"/"shorten"/"humanize", copy the original into the key only when a truly distinct rewrite is impossible (e.g. a single proper noun).
+        - "fix" must equal the original when no high-confidence grammar/spelling issue exists.
         - No explanations, no markdown, no code block.
         """
 

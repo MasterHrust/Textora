@@ -46,6 +46,7 @@ final class ReplacementService {
         delimiter: String,
         targetKeyboardLayout: EasySwitchKeyboardLayout,
         switchKeyboardLayout: Bool,
+        preferClipboardInsertion: Bool = false,
         completion: @escaping () -> Void
     ) {
         guard !original.isEmpty else {
@@ -65,9 +66,14 @@ final class ReplacementService {
             eventSink.postBackspace()
             usleep(2_000)
         }
-        let inserted = eventSink.typeText(replacement + delimiter)
-        if !inserted {
-            eventSink.pasteText(replacement + delimiter)
+        let insertedText = replacement + delimiter
+        if preferClipboardInsertion {
+            eventSink.pasteText(insertedText)
+        } else {
+            let inserted = eventSink.typeText(insertedText)
+            if !inserted {
+                eventSink.pasteText(insertedText)
+            }
         }
         if switchKeyboardLayout {
             _ = eventSink.selectKeyboardLayout(targetKeyboardLayout)
@@ -95,7 +101,7 @@ final class ReplacementService {
     }
 
     private func clearReplacingSoon(completion: @escaping () -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.isReplacing = false
             completion()
         }

@@ -81,6 +81,8 @@ final class FloatingHelperController {
     private var hoverCardPanel: NSPanel?
     private var timer: Timer?
     private var workspaceActivationObserver: NSObjectProtocol?
+    private var easySwitchBeginObserver: NSObjectProtocol?
+    private var easySwitchEndObserver: NSObjectProtocol?
     private let onRewriteTap: (CGRect) -> Void
     private let onFloatingHoverChanged: (Bool, CGRect) -> Void
     private var lastFrame: CGRect = .zero
@@ -101,6 +103,7 @@ final class FloatingHelperController {
     private let idleDelay: TimeInterval = 1.0
     private let sentenceDelay: TimeInterval = 1.0
     private var suppressAutoEvaluationUntil: Date?
+    private var easySwitchMutationSuppressedUntil: Date?
     /// Debounces AI auto-check by focused **text** (caret moves change `focusedTextSignature` but not this segment).
     private var lastCheckedValueSegment: String?
     /// Avoid `orderFrontRegardless` on every 200ms tick; set true when panel is hidden or z-order policy changes.
@@ -240,6 +243,13 @@ final class FloatingHelperController {
         if let workspaceActivationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
         }
+        if let easySwitchBeginObserver {
+            NotificationCenter.default.removeObserver(easySwitchBeginObserver)
+        }
+        if let easySwitchEndObserver {
+            NotificationCenter.default.removeObserver(easySwitchEndObserver)
+        }
+        timer?.invalidate()
     }
 
     /// Pop-up should anchor to the floating bubble, not the text field / window.
@@ -384,6 +394,7 @@ final class FloatingHelperController {
         RunLoop.main.add(newTimer, forMode: .common)
         timer = newTimer
         installWorkspaceActivationObserverIfNeeded()
+        installEasySwitchMutationObserversIfNeeded()
         updateVisibilityAndPosition()
     }
 
@@ -396,6 +407,28 @@ final class FloatingHelperController {
         ) { [weak self] notification in
             Task { @MainActor [weak self] in
                 self?.handleWorkspaceDidActivate(notification)
+            }
+        }
+    }
+
+    private func installEasySwitchMutationObserversIfNeeded() {
+        guard easySwitchBeginObserver == nil, easySwitchEndObserver == nil else { return }
+        easySwitchBeginObserver = NotificationCenter.default.addObserver(
+            forName: EasySwitchManager.replacementDidBeginNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.beginEasySwitchMutationSuppression()
+            }
+        }
+        easySwitchEndObserver = NotificationCenter.default.addObserver(
+            forName: EasySwitchManager.replacementDidEndNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.extendEasySwitchMutationSuppression()
             }
         }
     }
@@ -425,6 +458,40 @@ final class FloatingHelperController {
             guard let self, !self.isEvaluating, !self.isDragging else { return }
             self.evaluateCurrentText()
         }
+    }
+
+    private func beginEasySwitchMutationSuppression() {
+        easySwitchMutationSuppressedUntil = Date().addingTimeInterval(1.2)
+        resetSuggestionStateForProgrammaticMutation()
+        postStatus("EasySwitch is applying correction")
+    }
+
+    private func extendEasySwitchMutationSuppression() {
+        easySwitchMutationSuppressedUntil = Date().addingTimeInterval(0.75)
+        resetSuggestionStateForProgrammaticMutation()
+        postStatus("EasySwitch correction applied")
+    }
+
+    private func isEasySwitchMutationSuppressed() -> Bool {
+        guard let until = easySwitchMutationSuppressedUntil else { return false }
+        if Date() <= until { return true }
+        easySwitchMutationSuppressedUntil = nil
+        return false
+    }
+
+    private func resetSuggestionStateForProgrammaticMutation() {
+        lastSignature = nil
+        lastCheckedValueSegment = nil
+        latestSignature = nil
+        latestSuggestion = ""
+        latestSuggestionOptions = []
+        latestIssueRange = nil
+        latestIssues = []
+        hoveredIssueID = nil
+        hoveredIssueIDs = []
+        suggestionState = .neutral
+        hideMarkerAndCard()
+        updateRingColor()
     }
 
     private func createPanel() {
@@ -545,6 +612,10 @@ final class FloatingHelperController {
 
     private func updateVisibilityAndPosition() {
         syncRuntimeSettingsIfNeeded()
+        if isEasySwitchMutationSuppressed() {
+            postStatus("Waiting for EasySwitch correction")
+            return
+        }
         guard textService.hasAccessibilityPermission() else {
             postStatus("No accessibility permission")
             cancelScheduledVisibilityDrop()
@@ -1390,6 +1461,10 @@ final class FloatingHelperController {
 
     private func evaluateCurrentText() {
         guard !isEvaluating else { return }
+        guard !isEasySwitchMutationSuppressed() else {
+            textoraDiagLog("aiRewrite", "skip evaluation: EasySwitch mutation in progress")
+            return
+        }
         isEvaluating = true
         updateRingColor()
         onEvaluationStarted?()
@@ -1841,6 +1916,10 @@ final class FloatingHelperController {
         for text: String,
         credentials: AutoCheckCredentials
     ) async throws -> [OverlaySuggestion] {
+        guard shouldUseAIForAutoCheck(text) else {
+            textoraDiagLog("aiRewrite", "multiSmart skipped: low-confidence fragment")
+            return []
+        }
         let candidates = try await aiClient.overlaySuggestions(
             provider: credentials.provider,
             model: credentials.model,
@@ -1943,6 +2022,9 @@ final class FloatingHelperController {
         if hasTextIssues, available.contains(.fixGrammar) {
             return .fixGrammar
         }
+        if isLowConfidenceAutoCheckFragment(cleaned) {
+            return nil
+        }
 
         let preferredOrder: [RewriteOperation]
         if looksOverloaded(cleaned) {
@@ -1987,6 +2069,39 @@ final class FloatingHelperController {
         let words = text.split { !$0.isLetter && !$0.isNumber }
         guard words.count >= 3, words.count <= 28 else { return false }
         return !looksFormal(text) && !looksOverloaded(text)
+    }
+
+    private func shouldUseAIForAutoCheck(_ text: String) -> Bool {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isLowConfidenceAutoCheckFragment(cleaned) else { return false }
+        return true
+    }
+
+    private func isLowConfidenceAutoCheckFragment(_ text: String) -> Bool {
+        let words = wordsForHeuristicChecks(in: text)
+        guard !words.isEmpty else { return true }
+        if words.count <= 3, startsWithDanglingClauseCue(text) {
+            return true
+        }
+        if words.count <= 2, !hasSentenceEndingPunctuation(text) {
+            return true
+        }
+        return false
+    }
+
+    private func startsWithDanglingClauseCue(_ text: String) -> Bool {
+        guard let first = wordsForHeuristicChecks(in: text).first?.lowercased() else { return false }
+        let cues: Set<String> = [
+            "if", "when", "while", "because", "although", "though", "unless",
+            "since", "before", "after", "whether", "once", "как", "если",
+            "когда", "пока", "потому", "хотя"
+        ]
+        return cues.contains(first)
+    }
+
+    private func hasSentenceEndingPunctuation(_ text: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
+        return ".!?…".contains(last)
     }
 
     /// Evaluates a single segment: local spelling, mixed-script fix, then AI.
@@ -2652,8 +2767,236 @@ final class FloatingHelperController {
 
     private func shouldRejectFixSuggestion(original: String, candidate: String) -> Bool {
         isSuspiciousFixSuggestion(original: original, candidate: candidate)
+            || containsUnsafeValidWordSubstitution(original: original, candidate: candidate)
+            || containsUnsafeRussianWordMutation(original: original, candidate: candidate)
             || introducesSuspiciousDuplicatePunctuation(original: original, candidate: candidate)
             || wouldRevertRecentRewrite(original: original, candidate: candidate)
+    }
+
+    private func containsUnsafeValidWordSubstitution(original: String, candidate: String) -> Bool {
+        let originalWords = wordsForHeuristicChecks(in: original)
+        let candidateWords = wordsForHeuristicChecks(in: candidate)
+        guard originalWords.count == candidateWords.count,
+              !originalWords.isEmpty,
+              !hasLocalSpellingIssues(original),
+              !hasLocalSpellingIssues(candidate) else {
+            return false
+        }
+
+        var changed: [(String, String)] = []
+        for (lhs, rhs) in zip(originalWords, candidateWords) {
+            if lhs.caseInsensitiveCompare(rhs) != .orderedSame {
+                changed.append((lhs, rhs))
+            }
+        }
+        guard changed.count == 1, let pair = changed.first else { return false }
+        let lhs = pair.0.trimmingCharacters(in: CharacterSet(charactersIn: "'’"))
+        let rhs = pair.1.trimmingCharacters(in: CharacterSet(charactersIn: "'’"))
+        guard isMostlyLatinWord(lhs), isMostlyLatinWord(rhs) else { return false }
+        guard lhs.count >= 3, rhs.count >= 3 else { return false }
+        if isSafeInflectionChange(original: lhs, candidate: rhs) {
+            return false
+        }
+        if isCaseOnlyChange(lhs, rhs) {
+            return false
+        }
+        textoraDiagLog(
+            "aiRewrite",
+            "reject fix: unsafe valid-word substitution \(textoraDiagPreview(lhs))->\(textoraDiagPreview(rhs))"
+        )
+        return true
+    }
+
+    private func wordsForHeuristicChecks(in text: String) -> [String] {
+        let pattern = #"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’_-]*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = text as NSString
+        return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range) }
+    }
+
+    private func isMostlyLatinWord(_ word: String) -> Bool {
+        let scalars = word.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        guard !scalars.isEmpty else { return false }
+        return scalars.allSatisfy { scalar in
+            (0x0041...0x024F).contains(scalar.value) || (0x1E00...0x1EFF).contains(scalar.value)
+        }
+    }
+
+    private func isSafeInflectionChange(original: String, candidate: String) -> Bool {
+        let lhs = original.lowercased()
+        let rhs = candidate.lowercased()
+        if rhs.hasPrefix(lhs), rhs.count - lhs.count <= 4 {
+            return true
+        }
+        if lhs.hasPrefix(rhs), lhs.count - rhs.count <= 4 {
+            return true
+        }
+        return false
+    }
+
+    private func isCaseOnlyChange(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.lowercased() == rhs.lowercased() && lhs != rhs
+    }
+
+    private func containsUnsafeRussianWordMutation(original: String, candidate: String) -> Bool {
+        let originalWords = cyrillicWords(in: original).filter { $0.count >= 6 }
+        guard !originalWords.isEmpty else { return false }
+        let candidateWords = cyrillicWords(in: candidate)
+        let candidateSet = Set(candidateWords.map { $0.lowercased() })
+
+        for originalWord in originalWords {
+            let lower = originalWord.lowercased()
+            guard !candidateSet.contains(lower) else { continue }
+
+            let nearest = candidateWords
+                .filter { abs($0.count - lower.count) <= 2 }
+                .min { lhs, rhs in
+                    russianWordEditDistance(lower, lhs.lowercased(), maxDistance: 3)
+                        < russianWordEditDistance(lower, rhs.lowercased(), maxDistance: 3)
+                }
+
+            guard let nearest else { return true }
+            if !isSafeRussianWordCorrection(from: lower, to: nearest.lowercased()) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func cyrillicWords(in text: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        for scalar in text.unicodeScalars {
+            if isCyrillicLetter(scalar) {
+                current.unicodeScalars.append(scalar)
+            } else if !current.isEmpty {
+                words.append(current)
+                current.removeAll(keepingCapacity: true)
+            }
+        }
+        if !current.isEmpty {
+            words.append(current)
+        }
+        return words
+    }
+
+    private func isSafeRussianWordCorrection(from original: String, to corrected: String) -> Bool {
+        guard original != corrected else { return true }
+        guard abs(original.count - corrected.count) <= 2 else { return false }
+        let edits = russianWordEdits(from: original, to: corrected, maxDistance: 2)
+        guard !edits.isEmpty, edits.count <= 2 else { return false }
+        return edits.allSatisfy { edit in
+            switch edit {
+            case .insert, .delete, .transpose:
+                return true
+            case let .substitute(lhs, rhs):
+                return isRussianVowel(lhs) && isRussianVowel(rhs)
+                    || (lhs == "е" && rhs == "ё")
+                    || (lhs == "ё" && rhs == "е")
+            }
+        }
+    }
+
+    private enum RussianWordEdit {
+        case insert(Character)
+        case delete(Character)
+        case substitute(Character, Character)
+        case transpose(Character, Character)
+    }
+
+    private func russianWordEdits(
+        from original: String,
+        to corrected: String,
+        maxDistance: Int
+    ) -> [RussianWordEdit] {
+        let source = Array(original)
+        let target = Array(corrected)
+        var edits: [RussianWordEdit] = []
+        var sourceIndex = 0
+        var targetIndex = 0
+
+        while sourceIndex < source.count || targetIndex < target.count {
+            if sourceIndex < source.count,
+               targetIndex < target.count,
+               source[sourceIndex] == target[targetIndex] {
+                sourceIndex += 1
+                targetIndex += 1
+                continue
+            }
+
+            if sourceIndex + 1 < source.count,
+               targetIndex + 1 < target.count,
+               source[sourceIndex] == target[targetIndex + 1],
+               source[sourceIndex + 1] == target[targetIndex] {
+                edits.append(.transpose(source[sourceIndex], source[sourceIndex + 1]))
+                sourceIndex += 2
+                targetIndex += 2
+            } else if sourceIndex + 1 < source.count,
+                      targetIndex < target.count,
+                      source[sourceIndex + 1] == target[targetIndex] {
+                edits.append(.delete(source[sourceIndex]))
+                sourceIndex += 1
+            } else if sourceIndex < source.count,
+                      targetIndex + 1 < target.count,
+                      source[sourceIndex] == target[targetIndex + 1] {
+                edits.append(.insert(target[targetIndex]))
+                targetIndex += 1
+            } else if sourceIndex < source.count,
+                      targetIndex < target.count {
+                edits.append(.substitute(source[sourceIndex], target[targetIndex]))
+                sourceIndex += 1
+                targetIndex += 1
+            } else if sourceIndex < source.count {
+                edits.append(.delete(source[sourceIndex]))
+                sourceIndex += 1
+            } else if targetIndex < target.count {
+                edits.append(.insert(target[targetIndex]))
+                targetIndex += 1
+            }
+
+            if edits.count > maxDistance {
+                return edits
+            }
+        }
+        return edits
+    }
+
+    private func russianWordEditDistance(_ lhs: String, _ rhs: String, maxDistance: Int) -> Int {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        if abs(left.count - right.count) > maxDistance {
+            return maxDistance + 1
+        }
+        var previous = Array(0...right.count)
+        var current = Array(repeating: 0, count: right.count + 1)
+        for leftIndex in 1...left.count {
+            current[0] = leftIndex
+            var rowMinimum = current[0]
+            for rightIndex in 1...right.count {
+                let substitutionCost = left[leftIndex - 1] == right[rightIndex - 1] ? 0 : 1
+                current[rightIndex] = min(
+                    previous[rightIndex] + 1,
+                    current[rightIndex - 1] + 1,
+                    previous[rightIndex - 1] + substitutionCost
+                )
+                rowMinimum = min(rowMinimum, current[rightIndex])
+            }
+            if rowMinimum > maxDistance {
+                return maxDistance + 1
+            }
+            swap(&previous, &current)
+        }
+        return previous[right.count]
+    }
+
+    private func isCyrillicLetter(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.letters.contains(scalar)
+            && ((0x0400...0x04FF).contains(scalar.value) || (0x0500...0x052F).contains(scalar.value))
+    }
+
+    private func isRussianVowel(_ character: Character) -> Bool {
+        ["а", "е", "ё", "и", "о", "у", "ы", "э", "ю", "я"].contains(character)
     }
 
     private func isReasonableStyleIssue(original: String, candidate: String) -> Bool {
@@ -2661,6 +3004,9 @@ final class FloatingHelperController {
         let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else { return false }
         guard normalized(trimmedOriginal) != normalized(trimmedCandidate) else { return false }
+        if containsUnsafeRussianWordMutation(original: trimmedOriginal, candidate: trimmedCandidate) {
+            return false
+        }
         if stripsToSameAlphanumericCore(trimmedOriginal, trimmedCandidate) {
             return false
         }

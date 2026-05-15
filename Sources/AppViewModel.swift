@@ -8,7 +8,6 @@ final class AppViewModel: ObservableObject {
         static let smartAIEnabled = "overlay.smartAI.enabled"
         static let easySwitchEnabled = EasySwitchSettings.Keys.enabled
         static let easySwitchAutoCorrectWrongLayout = EasySwitchSettings.Keys.autoCorrectWrongLayout
-        static let easySwitchAutoCorrectTypos = EasySwitchSettings.Keys.autoCorrectTypos
         static let easySwitchChangesKeyboardLayout = EasySwitchSettings.Keys.changesKeyboardLayout
         static let easySwitchMinimumWordLength = EasySwitchSettings.Keys.minimumWordLength
         static let easySwitchConfidenceThreshold = EasySwitchSettings.Keys.confidenceThreshold
@@ -55,7 +54,6 @@ final class AppViewModel: ObservableObject {
     @Published var detailedCorrectionsEnabled: Bool = false
     @Published var easySwitchEnabled: Bool = false
     @Published var easySwitchAutoCorrectWrongLayout: Bool = true
-    @Published var easySwitchAutoCorrectTypos: Bool = true
     @Published var easySwitchChangesKeyboardLayout: Bool = false
     @Published var easySwitchMinimumWordLength: Int = 3
     @Published var easySwitchConfidenceThreshold: Double = 0.65
@@ -96,7 +94,6 @@ final class AppViewModel: ObservableObject {
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
         easySwitchEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchEnabled)
         easySwitchAutoCorrectWrongLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
-        easySwitchAutoCorrectTypos = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectTypos)
         easySwitchChangesKeyboardLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
         easySwitchMinimumWordLength = max(1, UserDefaults.standard.integer(forKey: SettingsKeys.easySwitchMinimumWordLength))
         easySwitchConfidenceThreshold = UserDefaults.standard.double(forKey: SettingsKeys.easySwitchConfidenceThreshold)
@@ -186,7 +183,6 @@ final class AppViewModel: ObservableObject {
         UserDefaults.standard.set(detailedCorrectionsEnabled, forKey: SettingsKeys.detailedCorrectionsEnabled)
         UserDefaults.standard.set(easySwitchEnabled, forKey: SettingsKeys.easySwitchEnabled)
         UserDefaults.standard.set(easySwitchAutoCorrectWrongLayout, forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
-        UserDefaults.standard.set(easySwitchAutoCorrectTypos, forKey: SettingsKeys.easySwitchAutoCorrectTypos)
         UserDefaults.standard.set(easySwitchChangesKeyboardLayout, forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
         UserDefaults.standard.set(max(1, easySwitchMinimumWordLength), forKey: SettingsKeys.easySwitchMinimumWordLength)
         UserDefaults.standard.set(easySwitchConfidenceThreshold, forKey: SettingsKeys.easySwitchConfidenceThreshold)
@@ -228,7 +224,6 @@ final class AppViewModel: ObservableObject {
             String(detailedCorrectionsEnabled),
             String(easySwitchEnabled),
             String(easySwitchAutoCorrectWrongLayout),
-            String(easySwitchAutoCorrectTypos),
             String(easySwitchChangesKeyboardLayout),
             String(easySwitchMinimumWordLength),
             String(format: "%.3f", easySwitchConfidenceThreshold),

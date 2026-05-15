@@ -5,6 +5,8 @@ import UserNotifications
 
 final class EasySwitchManager {
     static let settingsDidChangeNotification = EasySwitchSettings.settingsDidChangeNotification
+    static let replacementDidBeginNotification = Notification.Name("EasySwitch.replacementDidBegin")
+    static let replacementDidEndNotification = Notification.Name("EasySwitch.replacementDidEnd")
 
     private let textService = TextAccessService()
     private let wordBuffer = WordBuffer()
@@ -29,13 +31,14 @@ final class EasySwitchManager {
         settings = EasySwitchSettings.current()
     }
 
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         reloadSettings()
         lock.lock()
         if eventTap != nil {
             enabled = true
             lock.unlock()
-            return
+            return true
         }
         enabled = true
         lock.unlock()
@@ -51,13 +54,15 @@ final class EasySwitchManager {
             userInfo: refcon
         ) else {
             lock.withLock { enabled = false }
-            return
+            textoraDiagLog("easySwitch", "start failed reason=eventTapCreate")
+            return false
         }
 
         guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
             CFMachPortInvalidate(tap)
             lock.withLock { enabled = false }
-            return
+            textoraDiagLog("easySwitch", "start failed reason=runLoopSourceCreate")
+            return false
         }
 
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
@@ -66,6 +71,8 @@ final class EasySwitchManager {
             eventTap = tap
             runLoopSource = source
         }
+        textoraDiagLog("easySwitch", "start succeeded")
+        return true
     }
 
     func stop() {
@@ -183,17 +190,20 @@ final class EasySwitchManager {
         userDictionary.addLearnedCorrection(original: decision.original, replacement: decision.converted)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            NotificationCenter.default.post(name: Self.replacementDidBeginNotification, object: nil)
             self.replacementService.replacePreviousWord(
                 original: decision.original,
                 replacement: decision.converted,
                 delimiter: boundary.delimiter,
                 targetKeyboardLayout: self.targetKeyboardLayout(for: decision),
-                switchKeyboardLayout: decision.kind == .layout && self.settings.changesKeyboardLayout
+                switchKeyboardLayout: decision.kind == .layout && self.settings.changesKeyboardLayout,
+                preferClipboardInsertion: true
             ) { [weak self] in
                 self?.lock.withLock {
                     self?.wordBuffer.clear()
                     self?.suppressInputUntil = Date().addingTimeInterval(0.25)
                 }
+                NotificationCenter.default.post(name: Self.replacementDidEndNotification, object: nil)
                 self?.showNotificationIfNeeded(original: decision.original, replacement: decision.converted)
             }
         }
@@ -286,7 +296,7 @@ final class EasySwitchManager {
 
     private func isSafeToApplyAutomaticCorrection() -> Bool {
         guard textService.hasAccessibilityPermission() else { return false }
-        guard textService.hasFocusedEditableElement() else { return false }
+        guard textService.hasAllowedFocusedEditableElement() else { return false }
         guard !textService.shouldHardIgnoreCurrentFocusedInput() else { return false }
         return true
     }

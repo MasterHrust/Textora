@@ -43,18 +43,12 @@ final class DecisionEngineTests: XCTestCase {
         XCTAssertEqual(engine.decision(for: "Google", currentLanguage: .english, settings: settings).action, .skip)
     }
 
-    func testSmallRussianTypoUsesDictionaryCorrection() {
-        let decision = engine.decision(for: "Првет", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "Привет")
-    }
-
-    func testLongRussianTypoAllowsTwoEdits() {
-        let decision = engine.decision(for: "билшое", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "большое")
+    func testTyposDoNotUseDictionaryCorrection() {
+        for (word, language) in [("Првет", EasySwitchLanguage.russian), ("respons", .english)] {
+            let decision = engine.decision(for: word, currentLanguage: language, settings: settings)
+            XCTAssertEqual(decision.action, .skip, word)
+            XCTAssertEqual(decision.kind, .none, word)
+        }
     }
 
     func testValidRussianWordNearAnotherDictionaryWordDoesNotChange() {
@@ -62,15 +56,6 @@ final class DecisionEngineTests: XCTestCase {
             let decision = engine.decision(for: word, currentLanguage: .russian, settings: settings)
             XCTAssertEqual(decision.action, .skip, word)
         }
-    }
-
-    func testRussianWordDoesNotShrinkToShorterNearbyDictionaryWord() {
-        let engine = EasySwitchDecisionEngine(
-            scorer: LanguageScorer(englishWords: [], russianWords: ["дела"], russianKnownWords: ["дела"]),
-            userDictionary: userDictionary
-        )
-        let decision = engine.decision(for: "сделай", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .skip)
     }
 
     func testThreeLetterSlangDoesNotAutocorrectToNearbyDictionaryWord() {
@@ -85,97 +70,11 @@ final class DecisionEngineTests: XCTestCase {
         }
     }
 
-    func testRussianTextingTsyaShortcutDoesNotAutocorrect() {
-        let engine = EasySwitchDecisionEngine(
-            scorer: LanguageScorer(
-                englishWords: [],
-                russianWords: [],
-                russianKnownWords: ["нравиться", "нравится"]
-            ),
-            userDictionary: userDictionary
-        )
-        let decision = engine.decision(for: "нравица", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .skip)
-    }
-
     func testEnglishInternetSlangDoesNotSwitchOrAutocorrect() {
         for word in ["brb", "afaik", "ofc", "wdym", "tldr", "iykyk"] {
             let decision = engine.decision(for: word, currentLanguage: .english, settings: settings)
             XCTAssertEqual(decision.action, .skip, word)
         }
-    }
-
-    func testLongRussianTypoStillUsesDictionaryCorrection() {
-        let decision = engine.decision(for: "пожалйста", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "пожалуйста")
-    }
-
-    func testRussianEndingCompletionUsesPrefixOnly() {
-        let decision = engine.decision(for: "пожалуйст", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "пожалуйста")
-    }
-
-    func testRussianCompletionDoesNotAddReflexiveSuffix() {
-        let engine = EasySwitchDecisionEngine(
-            scorer: LanguageScorer(
-                englishWords: [],
-                russianWords: [],
-                russianKnownWords: ["подумаю", "подумаюсь"]
-            ),
-            userDictionary: userDictionary
-        )
-        let decision = engine.decision(for: "подумаю", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .skip)
-    }
-
-    func testRussianNameLikeWordDoesNotRewriteByMultipleInternalLetters() {
-        let engine = EasySwitchDecisionEngine(
-            scorer: LanguageScorer(
-                englishWords: [],
-                russianWords: ["андреева"],
-                russianKnownWords: ["андреева"]
-            ),
-            userDictionary: userDictionary
-        )
-        let decision = engine.decision(for: "Андреаса", currentLanguage: .russian, settings: settings)
-        XCTAssertEqual(decision.action, .skip)
-    }
-
-    func testSmallEnglishTypoUsesDictionaryCorrection() {
-        let decision = engine.decision(for: "iwant", currentLanguage: .english, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "want")
-    }
-
-    func testEnglishMissingLastLetterUsesDictionaryCorrection() {
-        let decision = engine.decision(for: "respons", currentLanguage: .english, settings: settings)
-        XCTAssertEqual(decision.action, .replace)
-        XCTAssertEqual(decision.kind, .spelling)
-        XCTAssertEqual(decision.converted, "response")
-    }
-
-    func testEnglishPluralLikeWordDoesNotShrinkToSingularCandidate() {
-        let engine = EasySwitchDecisionEngine(
-            scorer: LanguageScorer(
-                englishWords: ["misplay"],
-                russianWords: [],
-                russianKnownWords: []
-            ),
-            userDictionary: userDictionary
-        )
-        let decision = engine.decision(for: "displays", currentLanguage: .english, settings: settings)
-        XCTAssertEqual(decision.action, .skip)
-    }
-
-    func testTypoCorrectionCanBeDisabledSeparately() {
-        defaults.set(false, forKey: EasySwitchSettings.Keys.autoCorrectTypos)
-        settings = EasySwitchSettings.current(defaults: defaults)
-        XCTAssertEqual(engine.decision(for: "Првет", currentLanguage: .russian, settings: settings).action, .skip)
     }
 
     func testExcludedTokensDoNotSwitch() {

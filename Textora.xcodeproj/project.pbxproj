@@ -74,9 +74,9 @@
 		47980A73A856D69377F18964 /* ReplacementService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplacementService.swift; sourceTree = "<group>"; };
 		4C160135B317CD7416B58514 /* DecisionEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionEngineTests.swift; sourceTree = "<group>"; };
 		58521F6930CFB7E7B24BC752 /* TextoraTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TextoraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteViewModel.swift; sourceTree = "<group>"; };
 		5E2B06A1A4D24B21B2E4F871 /* common_ru_forms.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = common_ru_forms.txt; sourceTree = "<group>"; };
 		5E2B06A3A4D24B21B2E4F871 /* LICENSE_common_ru_forms.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE_common_ru_forms.txt; sourceTree = "<group>"; };
-		5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteViewModel.swift; sourceTree = "<group>"; };
 		641D1A2A1ED1C3F6CC370219 /* TextoraAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextoraAppDelegate.swift; sourceTree = "<group>"; };
 		691BD7E2D55CD14AA7B983F8 /* helper-icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "helper-icon.png"; sourceTree = "<group>"; };
 		72CDDF25FD6A0084CE6C9149 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -360,6 +360,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
 				INFOPLIST_FILE = Sources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -436,6 +437,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.textora.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -450,13 +452,29 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				AUTOMATION_APPLE_EVENTS = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEAD_CODE_STRIPPING = YES;
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = 35Q2T38T7Q;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				INFOPLIST_FILE = Sources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -517,7 +535,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = YES;
+				ONLY_ACTIVE_ARCH = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = com.textora.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

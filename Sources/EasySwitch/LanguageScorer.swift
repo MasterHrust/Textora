@@ -198,6 +198,7 @@ final class LanguageScorer {
         }
 
         var previous = Array(0...right.count)
+        var previousPrevious = previous
         var current = Array(repeating: 0, count: right.count + 1)
 
         for leftIndex in 1...left.count {
@@ -210,11 +211,18 @@ final class LanguageScorer {
                     current[rightIndex - 1] + 1,
                     previous[rightIndex - 1] + substitutionCost
                 )
+                if leftIndex > 1,
+                   rightIndex > 1,
+                   left[leftIndex - 1] == right[rightIndex - 2],
+                   left[leftIndex - 2] == right[rightIndex - 1] {
+                    current[rightIndex] = min(current[rightIndex], previousPrevious[rightIndex - 2] + 1)
+                }
                 rowMinimum = min(rowMinimum, current[rightIndex])
             }
             if rowMinimum > maxDistance {
                 return maxDistance + 1
             }
+            previousPrevious = previous
             swap(&previous, &current)
         }
 

@@ -19,6 +19,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private let textAccess = TextAccessService()
     private let easySwitch = EasySwitchManager()
     private var easySwitchSettingsObserver: NSObjectProtocol?
+    private var easySwitchStartRetryTask: DispatchWorkItem?
+    private var easySwitchStartRetryCount = 0
     private var isHelperHovered = false
     private var isRewritePopupHovered = false
     private var isConsentPromptHovered = false
@@ -139,13 +141,47 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func configureEasySwitch() {
+        EasySwitchSettings.registerDefaults()
         let isEnabled = UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.easySwitchEnabled)
         guard isEnabled, textAccess.hasAccessibilityPermission() else {
+            cancelEasySwitchStartRetry()
             easySwitch.stop()
             return
         }
         easySwitch.reloadSettings()
-        easySwitch.start()
+        if easySwitch.start() {
+            cancelEasySwitchStartRetry()
+        } else {
+            scheduleEasySwitchStartRetry()
+        }
+    }
+
+    private func scheduleEasySwitchStartRetry() {
+        guard easySwitchStartRetryTask == nil else { return }
+        guard easySwitchStartRetryCount < 6 else {
+            textoraDiagLog("easySwitch", "start retry abandoned attempts=\(easySwitchStartRetryCount)")
+            return
+        }
+        easySwitchStartRetryCount += 1
+        let delay = min(8.0, pow(2.0, Double(easySwitchStartRetryCount - 1)) * 0.5)
+        let task = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.easySwitchStartRetryTask = nil
+                self?.configureEasySwitch()
+            }
+        }
+        easySwitchStartRetryTask = task
+        textoraDiagLog(
+            "easySwitch",
+            "start retry scheduled attempt=\(easySwitchStartRetryCount) delay=\(String(format: "%.1f", delay))"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    private func cancelEasySwitchStartRetry() {
+        easySwitchStartRetryTask?.cancel()
+        easySwitchStartRetryTask = nil
+        easySwitchStartRetryCount = 0
     }
 
     /// One run-loop cycle + short delay so MenuBarExtra and LSUIElement finish activation.

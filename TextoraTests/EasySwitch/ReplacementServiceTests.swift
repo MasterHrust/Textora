@@ -33,6 +33,39 @@ final class ReplacementServiceTests: XCTestCase {
         XCTAssertEqual(typed, ["привет "])
     }
 
+    func testReplacementCanPreferClipboardInsertionForElectronHosts() {
+        let defaults = UserDefaults(suiteName: "Textora.EasySwitch.ReplacementServiceClipboardTests.\(UUID().uuidString)")!
+        var backspaces = 0
+        var typed: [String] = []
+        var pasted: [String] = []
+        let service = ReplacementService(
+            userDictionary: UserDictionary(defaults: defaults),
+            eventSink: .init(
+                postBackspace: { backspaces += 1 },
+                typeText: { typed.append($0); return true },
+                pasteText: { pasted.append($0) },
+                selectKeyboardLayout: { _ in true }
+            )
+        )
+
+        let expectation = expectation(description: "replacement completed")
+        service.replacePreviousWord(
+            original: "Руддщ",
+            replacement: "Hello",
+            delimiter: " ",
+            targetKeyboardLayout: .english,
+            switchKeyboardLayout: false,
+            preferClipboardInsertion: true
+        ) {
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(backspaces, 5)
+        XCTAssertEqual(typed, [])
+        XCTAssertEqual(pasted, ["Hello "])
+    }
+
     func testUndoRestoresOriginalAndAddsPersistentIgnore() {
         let defaults = UserDefaults(suiteName: "Textora.EasySwitch.ReplacementServiceUndoTests.\(UUID().uuidString)")!
         let dictionary = UserDictionary(defaults: defaults)

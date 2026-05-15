@@ -2,8 +2,9 @@ import Foundation
 import Security
 
 enum KeychainHelper {
-    private static let service = "io.fixness.app"
+    private static let service = Bundle.main.bundleIdentifier ?? "com.textora.app"
     private static let account = "apiTokens"
+    private static let legacyService = "io.fixness.app"
 
     private static var cache: [String: String] = [:]
     private static var cacheLoaded = false
@@ -56,7 +57,10 @@ enum KeychainHelper {
         let migrated = UserDefaults.standard.bool(forKey: "tokens.dp.migrated")
         guard !migrated else { return }
 
-        // 1. Old single-blob entry in the legacy file-based keychain (v2).
+        #if DEBUG
+        // 1. Old single-blob entry in the legacy keychain (v2).
+        // Development-only: release builds must not import tokens from
+        // another app/service name.
         if let dict = readLegacyBlob() {
             for (k, v) in dict where !v.isEmpty {
                 cache[k] = v
@@ -71,8 +75,9 @@ enum KeychainHelper {
                 deleteLegacyEntry(key: key)
             }
         }
+        #endif
 
-        // 3. Very old UserDefaults storage.
+        // 3. Very old UserDefaults storage for the current bundle.
         for key in [openAIKeyAccount, geminiKeyAccount, claudeKeyAccount, customTokenAccount] {
             if let val = UserDefaults.standard.string(forKey: key), !val.isEmpty {
                 if (cache[key] ?? "").isEmpty { cache[key] = val }
@@ -81,12 +86,16 @@ enum KeychainHelper {
         }
 
         // 4. Intermediate file-based storage (tokens.json).
+        #if DEBUG
         if let fileTokens = readFromFile() {
             for (k, v) in fileTokens where !v.isEmpty {
                 if (cache[k] ?? "").isEmpty { cache[k] = v }
             }
             removeTokensFile()
         }
+        #else
+        removeTokensFile()
+        #endif
 
         if cache.values.contains(where: { !$0.isEmpty }) {
             persistCache()
@@ -126,8 +135,12 @@ enum KeychainHelper {
            let dict = try? JSONDecoder().decode([String: String].self, from: data) {
             return dict
         }
-        // Data Protection Keychain unavailable — try file fallback.
+        #if DEBUG
+        // Data Protection Keychain unavailable in unsigned/dev builds — try file fallback.
         return readFromFile()
+        #else
+        return nil
+        #endif
     }
 
     private static func persistCache() {
@@ -144,9 +157,13 @@ enum KeychainHelper {
         if addStatus == errSecSuccess {
             removeTokensFile()
         } else {
+            #if DEBUG
             // Data Protection Keychain write failed (missing entitlement / unsigned build).
-            // Persist to Application Support file so tokens survive restart.
+            // Persist to Application Support file in dev only so tokens survive restart.
             writeToFile(nonEmpty)
+            #else
+            removeTokensFile()
+            #endif
         }
     }
 
@@ -162,7 +179,7 @@ enum KeychainHelper {
     private static func readLegacyBlob() -> [String: String]? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: legacyService,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -176,7 +193,7 @@ enum KeychainHelper {
     private static func deleteLegacyBlob() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: legacyService,
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
@@ -185,7 +202,7 @@ enum KeychainHelper {
     private static func readLegacyEntry(key: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: legacyService,
             kSecAttrAccount as String: key,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -199,7 +216,7 @@ enum KeychainHelper {
     private static func deleteLegacyEntry(key: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: legacyService,
             kSecAttrAccount as String: key
         ]
         SecItemDelete(query as CFDictionary)
@@ -210,7 +227,7 @@ enum KeychainHelper {
     private static var tokensFileURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return appSupport
-            .appendingPathComponent("io.fixness.app", isDirectory: true)
+            .appendingPathComponent(service, isDirectory: true)
             .appendingPathComponent("tokens.json")
     }
 
