@@ -361,6 +361,7 @@ final class TextAccessService {
     private var coalesceMemoWindowFrame: CGRect?
     private var googleDocsContextCache: (createdAt: Date, maxLength: Int, context: FocusedTextContext?)?
     private var googleDocsFrontmostCache: (createdAt: Date, isDocs: Bool)?
+    private var googleSheetsFrontmostCache: (createdAt: Date, isSheets: Bool)?
     private var lastGoogleDocsDebugSignature: String?
     private let transientPopupRoles: Set<String> = [
         "AXComboBox",
@@ -424,6 +425,19 @@ final class TextAccessService {
         return queryFocusedWindowFrameFromSystem()
     }
 
+    func floatingHelperAnchorWindowFrame() -> CGRect? {
+        if let frame = focusedWindowFrame(),
+           isUsableFloatingHelperWindowFrame(frame) {
+            return frame
+        }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let pid = app.processIdentifier
+        return frontmostCGWindowFrame(for: pid, requireMainAppWindow: true)
+            ?? mainCGWindowFrame(for: pid, requireMainAppWindow: true)
+            ?? frontmostCGWindowFrame(for: pid)
+            ?? mainCGWindowFrame(for: pid)
+    }
+
     private func queryFocusedWindowFrameFromSystem() -> CGRect? {
         if let browserFrame = frontmostBrowserCGWindowFrame() {
             return browserFrame
@@ -474,9 +488,13 @@ final class TextAccessService {
         }
         let pid = app.processIdentifier
         let axFrame = queryFocusedWindowElementFromSystem().flatMap { elementFrame(of: $0) }
-        return focusedCGWindowFrame(for: pid, matching: axFrame)
+        if let axFrame,
+           !isSmallDetachedPopupFrame(axFrame),
+           let focused = focusedCGWindowFrame(for: pid, matching: axFrame, requireMainBrowserWindow: true) {
+            return focused
+        }
+        return frontmostCGWindowFrame(for: pid, requireMainBrowserWindow: true)
             ?? frontmostCGWindowFrame(for: pid)
-            ?? mainCGWindowFrame(for: pid)
     }
 
     func isCurrentFocusOwnedBy(bundleID expectedBundleID: String) -> Bool {
@@ -1033,6 +1051,13 @@ final class TextAccessService {
     }
 
     private func readClipboardAfterCopyIfSelectionLikely() -> String? {
+        if isGoogleSheetsFrontmost() {
+            let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
+            guard isActiveCellEditor else {
+                textoraDiagLog("clipboardProbe", "blocked in Google Sheets outside active cell editor")
+                return nil
+            }
+        }
         guard !isCopyProbeInProgress else { return nil }
         // Guard against rapid-fire copy probes that can freeze app menus.
         if Date().timeIntervalSince(lastCopyProbeAt) < 0.35 {
@@ -1094,6 +1119,7 @@ final class TextAccessService {
     /// without necessarily reading the selected text (e.g. before per-app consent is granted).
     func selectedTextSignalAnyFocus() -> SelectedTextSignal? {
         guard let start = focusedElement() else { return nil }
+        if isGoogleSheetsFrontmost(), !isGoogleSheetsTextEditFocus(start) { return nil }
         // Walk ancestors: Electron/WebView may report selection on a parent, not the deepest focus leaf.
         var element: AXUIElement? = start
         var depth = 0
@@ -1341,6 +1367,7 @@ final class TextAccessService {
     /// Hard-stop cases for helper visibility regardless of consent flow.
     func shouldHardIgnoreCurrentFocusedInput() -> Bool {
         guard let element = focusedElement() else { return false }
+        if isGoogleSheetsFrontmost(), !isGoogleSheetsTextEditFocus(element) { return true }
         if isSecureInputField(element) { return true }
         if isCurrentFocusInTransientPopupOrMenu() { return true }
         if hasSensitiveFieldHint(element) { return true }
@@ -1456,13 +1483,20 @@ final class TextAccessService {
             + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
             + "needsAtomicPaste=\(needsAtomicPaste) envelopeTouchesRichTokens=\(envelopeWouldTouchRichTokens)"
         )
+        if isBrowserBundleID(context.targetBundleID) {
+            return applyBrowserRewrittenText(
+                rewritten,
+                basedOn: context,
+                envelopeWouldTouchRichTokens: envelopeWouldTouchRichTokens
+            )
+        }
         if needsAtomicPaste, !envelopeWouldTouchRichTokens {
             if prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) {
                 if applySingleEnvelopePhysicalRewrite(rewritten, basedOn: context) {
                     textoraDiagLog("applyRewrittenText", "success via singleEnvelopePhysicalRewrite")
                     return .success
                 }
-                textoraDiagLog("applyRewrittenText", "singleEnvelopePhysicalRewrite failed for Electron host -> failed (skip cmd-a/c/v fallbacks)")
+                textoraDiagLog("applyRewrittenText", "singleEnvelopePhysicalRewrite failed for Electron/WebView host -> failed")
                 return .failed
             }
             if applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: context) {
@@ -1550,7 +1584,7 @@ final class TextAccessService {
                     textoraDiagLog("applyRewrittenText", "success via refreshed singleEnvelopePhysicalRewrite")
                     return .success
                 }
-                textoraDiagLog("applyRewrittenText", "refreshed singleEnvelopePhysicalRewrite failed for Electron host -> failed (skip cmd-a/c/v fallbacks)")
+                textoraDiagLog("applyRewrittenText", "refreshed singleEnvelopePhysicalRewrite failed for Electron/WebView host -> failed")
                 return .failed
             }
             if applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: refreshed) {
@@ -1606,6 +1640,88 @@ final class TextAccessService {
         }
         textoraDiagLog("applyRewrittenText", "exhausted all strategies -> failed")
         return .failed
+    }
+
+    // MARK: - Browser Rewrite Apply
+
+    /// Browser editors (Gmail, web mail, docs-like composers) expose AX
+    /// ranges that can drift from the physical DOM caret. Keep them out of
+    /// the general Electron path: no caret-backspace rewrite, no Cmd+A full
+    /// replacement. The primary browser strategy is the same physical
+    /// retyping path: select the changed range, then type the replacement
+    /// over that selection without touching the pasteboard.
+    private func applyBrowserRewrittenText(
+        _ rewritten: String,
+        basedOn context: FocusedTextContext,
+        envelopeWouldTouchRichTokens: Bool
+    ) -> ApplyResult {
+        textoraDiagLog(
+            "applyBrowserRewrittenText",
+            "enter bundle=\(context.targetBundleID) usesSelection=\(context.usesSelection) "
+            + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
+            + "envelopeTouchesRichTokens=\(envelopeWouldTouchRichTokens)"
+        )
+
+        if applyBrowserRewriteStrategies(
+            rewritten,
+            basedOn: context,
+            envelopeWouldTouchRichTokens: envelopeWouldTouchRichTokens
+        ) {
+            return .success
+        }
+
+        guard let fresh = focusedElement(), isEditable(element: fresh) else {
+            textoraDiagLog("applyBrowserRewrittenText", "no editable fresh element -> failed")
+            return .failed
+        }
+        let refreshed = FocusedTextContext(
+            text: context.text,
+            frame: context.frame,
+            usesSelection: context.usesSelection,
+            selectedRange: context.selectedRange,
+            targetElement: fresh,
+            targetAppPID: context.targetAppPID,
+            targetBundleID: context.targetBundleID,
+            anchor: context.anchor,
+            textFragments: context.textFragments
+        )
+        focusTargetAppAndElement(refreshed)
+        textoraDiagLog("applyBrowserRewrittenText", "retrying with refreshed element")
+        if applyBrowserRewriteStrategies(
+            rewritten,
+            basedOn: refreshed,
+            envelopeWouldTouchRichTokens: envelopeWouldTouchRichTokens
+        ) {
+            return .success
+        }
+
+        textoraDiagLog("applyBrowserRewrittenText", "exhausted browser strategies -> failed")
+        return .failed
+    }
+
+    private func applyBrowserRewriteStrategies(
+        _ rewritten: String,
+        basedOn context: FocusedTextContext,
+        envelopeWouldTouchRichTokens: Bool
+    ) -> Bool {
+        guard normalized(rewritten) != normalized(context.text) else {
+            textoraDiagLog("applyBrowserRewrittenText", "no-op: rewritten equals original")
+            return true
+        }
+
+        if !envelopeWouldTouchRichTokens,
+           applySingleEnvelopePhysicalRewrite(rewritten, basedOn: context) {
+            textoraDiagLog("applyBrowserRewrittenText", "success via singleEnvelopePhysicalRewrite")
+            return true
+        }
+
+        if context.usesSelection,
+           applySelectedTextDirect(rewritten, basedOn: context) {
+            textoraDiagLog("applyBrowserRewrittenText", "success via selectedTextDirect")
+            return true
+        }
+
+        return false
     }
 
     func applyLocalizedRewrite(
@@ -2244,7 +2360,7 @@ final class TextAccessService {
             return false
         }
         if prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID) {
-            return applyCaretBackspacePhysicalRewrite(
+            return applyCaretAnchoredPhysicalRangeRewrite(
                 replacement: envelope.replacement,
                 localRange: envelope.originalRange,
                 absoluteRange: absoluteRange,
@@ -3506,6 +3622,118 @@ final class TextAccessService {
         return false
     }
 
+    private func applyCaretAnchoredPhysicalRangeRewrite(
+        replacement: String,
+        localRange: NSRange,
+        absoluteRange: NSRange,
+        basedOn context: FocusedTextContext
+    ) -> Bool {
+        let target = context.targetElement
+        guard let originalValue = valueText(of: target) else {
+            textoraDiagLog("caretAnchoredPhysicalRewrite", "abort: no value readback available")
+            return false
+        }
+        let originalLen = (originalValue as NSString).length
+        let absoluteEnd = absoluteRange.location + absoluteRange.length
+        guard absoluteRange.location >= 0,
+              absoluteRange.length >= 0,
+              absoluteEnd <= originalLen else {
+            textoraDiagLog(
+                "caretAnchoredPhysicalRewrite",
+                "abort: absoluteRange=\(absoluteRange.location):\(absoluteRange.length) originalLen=\(originalLen)"
+            )
+            return false
+        }
+
+        let rightDistance = originalLen - absoluteEnd
+        let totalKeystrokes = rightDistance + absoluteRange.length
+        let maxKeystrokes = 900
+        guard totalKeystrokes <= maxKeystrokes else {
+            textoraDiagLog(
+                "caretAnchoredPhysicalRewrite",
+                "abort: total keystrokes=\(totalKeystrokes) > \(maxKeystrokes) "
+                + "right=\(rightDistance) len=\(absoluteRange.length)"
+            )
+            return false
+        }
+
+        textoraDiagLog(
+            "caretAnchoredPhysicalRewrite",
+            "enter bundle=\(context.targetBundleID) localRange=\(localRange.location):\(localRange.length) "
+            + "absoluteRange=\(absoluteRange.location):\(absoluteRange.length) originalLen=\(originalLen) "
+            + "rightDistance=\(rightDistance) replacement=\(textoraDiagPreview(replacement))"
+        )
+
+        focusTargetAppAndElement(context)
+        usleep(110_000)
+
+        triggerCmdDownArrowKey()
+        usleep(45_000)
+        triggerCmdDownArrowKey()
+        usleep(75_000)
+
+        for _ in 0..<rightDistance {
+            triggerLeftArrowKey()
+        }
+        if rightDistance > 0 {
+            usleep(UInt32(35_000 + min(160_000, rightDistance * 500)))
+        }
+
+        for _ in 0..<absoluteRange.length {
+            triggerShiftLeftArrowKey()
+        }
+        if absoluteRange.length > 0 {
+            usleep(UInt32(55_000 + min(180_000, absoluteRange.length * 900)))
+        }
+
+        let undoCount: Int
+        if replacement.isEmpty {
+            guard absoluteRange.length > 0 else {
+                textoraDiagLog("caretAnchoredPhysicalRewrite", "no-op empty replacement for empty range")
+                return true
+            }
+            triggerBackspaceKey()
+            undoCount = 1
+            usleep(85_000)
+        } else {
+            let typedEvents = triggerUnicodeTextForReplacement(replacement)
+            guard typedEvents > 0 else {
+                textoraDiagLog("caretAnchoredPhysicalRewrite", "abort: unicode replacement typing failed")
+                return false
+            }
+            undoCount = typedEvents
+            usleep(UInt32(120_000 + min(260_000, replacement.utf16.count * 1_600)))
+        }
+
+        guard let updatedValue = valueText(of: target) else {
+            textoraDiagLog("caretAnchoredPhysicalRewrite", "exit true (no value readback after typing)")
+            return true
+        }
+        if trustedRangePasteConfirmed(
+            originalValue: originalValue,
+            updatedValue: updatedValue,
+            absoluteRange: absoluteRange,
+            replacement: replacement
+        ) {
+            textoraDiagLog("caretAnchoredPhysicalRewrite", "exit true (confirmed)")
+            return true
+        }
+
+        if originalValue != updatedValue {
+            for _ in 0..<max(1, undoCount) {
+                triggerUndoShortcut()
+                usleep(65_000)
+            }
+            textoraDiagLog("caretAnchoredPhysicalRewrite", "undo triggered \(max(1, undoCount))x (not confirmed)")
+        }
+        textoraDiagLog(
+            "caretAnchoredPhysicalRewrite",
+            "exit false expected=\(textoraDiagPreview(replacingText(in: originalValue, range: absoluteRange, with: replacement))) "
+            + "updated=\(textoraDiagPreview(updatedValue))"
+        )
+        return false
+    }
+
     private func applyCaretBackspacePhysicalRewrite(
         replacement: String,
         localRange: NSRange,
@@ -4678,24 +4906,68 @@ final class TextAccessService {
         mainCGWindowCaptureInfo(for: pid)?.rect
     }
 
-    private func focusedCGWindowFrame(for pid: pid_t, matching reference: CGRect?) -> CGRect? {
-        mainCGWindowCaptureInfo(for: pid, matching: reference)?.rect
+    private func mainCGWindowFrame(
+        for pid: pid_t,
+        requireMainAppWindow: Bool
+    ) -> CGRect? {
+        mainCGWindowCaptureInfo(
+            for: pid,
+            requireMainAppWindow: requireMainAppWindow
+        )?.rect
     }
 
-    private func frontmostCGWindowFrame(for pid: pid_t) -> CGRect? {
-        frontmostCGWindowCaptureInfo(for: pid)?.rect
+    private func focusedCGWindowFrame(
+        for pid: pid_t,
+        matching reference: CGRect?,
+        requireMainBrowserWindow: Bool = false
+    ) -> CGRect? {
+        mainCGWindowCaptureInfo(
+            for: pid,
+            matching: reference,
+            requireMainBrowserWindow: requireMainBrowserWindow
+        )?.rect
     }
 
-    private func frontmostCGWindowCaptureInfo(for pid: pid_t) -> (windowID: CGWindowID, rect: CGRect)? {
-        let candidates = cgWindowCaptureCandidates(for: pid)
+    private func frontmostCGWindowFrame(
+        for pid: pid_t,
+        requireMainAppWindow: Bool = false,
+        requireMainBrowserWindow: Bool = false
+    ) -> CGRect? {
+        frontmostCGWindowCaptureInfo(
+            for: pid,
+            requireMainAppWindow: requireMainAppWindow,
+            requireMainBrowserWindow: requireMainBrowserWindow
+        )?.rect
+    }
+
+    private func frontmostCGWindowCaptureInfo(
+        for pid: pid_t,
+        requireMainAppWindow: Bool = false,
+        requireMainBrowserWindow: Bool = false
+    ) -> (windowID: CGWindowID, rect: CGRect)? {
+        var candidates = cgWindowCaptureCandidates(for: pid)
+        if requireMainAppWindow {
+            candidates = candidates.filter { isMainAppWindowFrame($0.rect) }
+        }
+        if requireMainBrowserWindow {
+            candidates = candidates.filter { isMainBrowserWindowFrame($0.rect) }
+        }
         return (candidates.first(where: \.isVisible) ?? candidates.first).map { ($0.windowID, $0.rect) }
     }
 
     private func mainCGWindowCaptureInfo(
         for pid: pid_t,
-        matching reference: CGRect? = nil
+        matching reference: CGRect? = nil,
+        requireMainAppWindow: Bool = false,
+        requireMainBrowserWindow: Bool = false
     ) -> (windowID: CGWindowID, rect: CGRect)? {
-        let candidates = cgWindowCaptureCandidates(for: pid)
+        var candidates = cgWindowCaptureCandidates(for: pid)
+        if requireMainAppWindow {
+            candidates = candidates.filter { isMainAppWindowFrame($0.rect) }
+        }
+        if requireMainBrowserWindow {
+            candidates = candidates.filter { isMainBrowserWindowFrame($0.rect) }
+        }
         let visibleCandidates = candidates.filter(\.isVisible)
         let pool = visibleCandidates.isEmpty ? candidates : visibleCandidates
         if let reference, !reference.isEmpty {
@@ -4747,6 +5019,21 @@ final class TextAccessService {
         let centerDistance = hypot(rect.midX - reference.midX, rect.midY - reference.midY)
         let sizeDelta = abs(rect.width - reference.width) + abs(rect.height - reference.height)
         return overlapArea - centerDistance * 18 - sizeDelta * 4
+    }
+
+    private func isMainBrowserWindowFrame(_ frame: CGRect) -> Bool {
+        guard frame.width >= 520, frame.height >= 360 else { return false }
+        return !isSmallDetachedPopupFrame(frame)
+    }
+
+    private func isMainAppWindowFrame(_ frame: CGRect) -> Bool {
+        guard frame.width >= 420, frame.height >= 260 else { return false }
+        return !isSmallDetachedPopupFrame(frame)
+    }
+
+    private func isUsableFloatingHelperWindowFrame(_ frame: CGRect) -> Bool {
+        guard frame.width >= 360, frame.height >= 220 else { return false }
+        return !isSmallDetachedPopupFrame(frame)
     }
 
     private func normalizedCGWindowRect(_ raw: CGRect) -> CGRect {
@@ -4934,6 +5221,78 @@ final class TextAccessService {
         }
         googleDocsFrontmostCache = (Date(), isDocs)
         return isDocs
+    }
+
+    private func isGoogleSheetsFrontmost() -> Bool {
+        guard let front = frontmostAppInfo(), front.bundleID == "com.google.Chrome" else { return false }
+        if let cached = googleSheetsFrontmostCache,
+           Date().timeIntervalSince(cached.createdAt) < 1.0 {
+            return cached.isSheets
+        }
+        let title = chromeFocusedWindowTitle()
+        let titleLower = (title ?? "").lowercased()
+        let isSheets = titleLower.contains("google sheets")
+            || titleLower.contains("sheets.google.com")
+            || titleLower.contains("google табли")
+            || titleLower.contains("google spreadsheets")
+        if isSheets {
+            postGoogleDocsDebug("sheets blocked title=\(title ?? "nil")")
+        }
+        googleSheetsFrontmostCache = (Date(), isSheets)
+        return isSheets
+    }
+
+    private func isGoogleSheetsTextEditFocus(_ element: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        var depth = 0
+        while let candidate = current, depth < 8 {
+            if isGoogleSheetsTextEditElement(candidate) {
+                return true
+            }
+            current = axElement(of: candidate, attribute: kAXParentAttribute as String)
+            depth += 1
+        }
+        return false
+    }
+
+    private func isGoogleSheetsTextEditElement(_ element: AXUIElement) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              resolvedBundleID(forOwningPID: pid) == "com.google.Chrome" else {
+            return false
+        }
+        guard !isSecureInputField(element),
+              !isTransientPopupLike(element),
+              !hasSensitiveFieldHint(element) else {
+            return false
+        }
+
+        let role = axString(of: element, attribute: kAXRoleAttribute) ?? ""
+        let textRoles: Set<String> = [
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String
+        ]
+        let roleLooksTextual = textRoles.contains(role)
+        let exposesEditableText = valueText(of: element) != nil
+            && selectedRangeValue(of: element) != nil
+            && isAXAttributeSettable(element, attribute: kAXValueAttribute as String)
+        guard roleLooksTextual || exposesEditableText else { return false }
+
+        guard let frame = elementFrame(of: element), !frame.isEmpty else { return false }
+        if frame.width > 900 || frame.height > 180 {
+            return false
+        }
+        guard let window = focusedWindowFrame(), !window.isEmpty else {
+            return true
+        }
+        let contentArea = window.insetBy(dx: -8, dy: -8)
+        guard contentArea.intersects(frame) || contentArea.contains(CGPoint(x: frame.midX, y: frame.midY)) else {
+            return false
+        }
+        // Exclude Chrome's toolbar/omnibox region while still allowing the
+        // Sheets formula bar and in-cell editor inside the page.
+        return frame.maxY < window.maxY - 72
     }
 
     private func chromeFocusedWindowLooksLikeGoogleDocs() -> Bool {
@@ -5167,6 +5526,7 @@ end tell
 
     private func shouldIgnoreCurrentFocusedInput(element provided: AXUIElement?, includeAppConsent: Bool) -> Bool {
         guard let element = provided ?? focusedElement() else { return false }
+        if isGoogleSheetsFrontmost(), !isGoogleSheetsTextEditFocus(element) { return true }
         if isSecureInputField(element) { return true }
         if isTransientPopupLike(element) { return true }
         if hasSensitiveFieldHint(element) { return true }
@@ -5379,6 +5739,13 @@ end tell
     }
 
     private func readViaClipboardFallback() -> String {
+        if isGoogleSheetsFrontmost() {
+            let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
+            guard isActiveCellEditor else {
+                textoraDiagLog("clipboardFallback", "blocked in Google Sheets outside active cell editor")
+                return ""
+            }
+        }
         let pasteboard = NSPasteboard.general
         let oldSnapshot = snapshotPasteboard(pasteboard)
         let oldChangeCount = pasteboard.changeCount

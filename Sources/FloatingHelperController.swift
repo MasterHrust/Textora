@@ -106,6 +106,13 @@ final class FloatingHelperController {
     private var easySwitchMutationSuppressedUntil: Date?
     /// Debounces AI auto-check by focused **text** (caret moves change `focusedTextSignature` but not this segment).
     private var lastCheckedValueSegment: String?
+    /// Guards the AI path by the actual context text. Some Chrome surfaces
+    /// can expose the same composer through changing AX focus signatures,
+    /// which otherwise replays identical requests indefinitely.
+    private var lastAutoEvaluationSnapshotKey: String?
+    private var lastAutoEvaluationSnapshotNormalizedText: String?
+    private var lastAutoEvaluationSnapshotAt: Date?
+    private let autoEvaluationSnapshotTTL: TimeInterval = 30
     /// Avoid `orderFrontRegardless` on every 200ms tick; set true when panel is hidden or z-order policy changes.
     private var floatingPanelNeedsZOrderPass = true
     private var lastLayoutStatusPostedAt: Date?
@@ -441,6 +448,9 @@ final class FloatingHelperController {
         textService.invalidateTransientFocusCaches()
         lastSignature = nil
         lastCheckedValueSegment = nil
+        lastAutoEvaluationSnapshotKey = nil
+        lastAutoEvaluationSnapshotNormalizedText = nil
+        lastAutoEvaluationSnapshotAt = nil
         latestSignature = nil
         selectionSignature = nil
         selectionSignatureSince = nil
@@ -543,7 +553,7 @@ final class FloatingHelperController {
             self.cancelScheduledDragHintHide()
             self.dragSessionStartFrame = self.panel?.frame ?? self.lastFrame
             self.lastDragMoveFrame = self.dragSessionStartFrame
-            self.dragBoundaryWindowFrame = self.textService.focusedWindowFrame()
+            self.dragBoundaryWindowFrame = self.textService.floatingHelperAnchorWindowFrame()
                 ?? self.lastMarkerFieldFrame
                 ?? self.lastFrame
             self.dragHintDirections = self.dragHintDirectionsForCurrentBubbleFrame()
@@ -555,7 +565,7 @@ final class FloatingHelperController {
         panel.onDragBegan = { [weak self] in
             guard let self else { return }
             self.isDragging = true
-            self.dragBoundaryWindowFrame = self.textService.focusedWindowFrame()
+            self.dragBoundaryWindowFrame = self.textService.floatingHelperAnchorWindowFrame()
                 ?? self.lastMarkerFieldFrame
                 ?? self.lastFrame
         }
@@ -599,6 +609,7 @@ final class FloatingHelperController {
             self.isDragging = false
             let pinned = self.pinnedBubbleFrame(fallback: finalFrame)
             self.manualFixedFrame = pinned
+            self.consentBootstrapFrame = pinned
             self.applyMainBubbleFrameIfChanged(pinned)
             self.dragBoundaryWindowFrame = nil
             self.lastDragMoveFrame = nil
@@ -697,6 +708,9 @@ final class FloatingHelperController {
         hoveredIssueID = nil
         hoveredIssueIDs = []
         lastCheckedValueSegment = nil
+        lastAutoEvaluationSnapshotKey = nil
+        lastAutoEvaluationSnapshotNormalizedText = nil
+        lastAutoEvaluationSnapshotAt = nil
         suggestionState = .neutral
         hideMarkerAndCard()
         updateRingColor()
@@ -914,6 +928,10 @@ final class FloatingHelperController {
                     suggestionState = .looksGood
                     updateRingColor()
                     postStatus("Post-apply text accepted; auto-check suppressed briefly")
+                } else if wasRecentlyAutoEvaluatedValueSegment(newValue) {
+                    lastCheckedValueSegment = newValue
+                    latestSignature = signature
+                    postStatus("Ignoring Chrome focus churn for already checked text")
                 } else if preservingLocalBatch {
                     lastCheckedValueSegment = newValue
                     postStatus("Keeping local suggestion batch after apply")
@@ -982,6 +1000,10 @@ final class FloatingHelperController {
         } else {
             suppressAutoEvaluationUntil = nil
         }
+        if !valueRaw.isEmpty, wasRecentlyAutoEvaluatedValueSegment(valueSeg) {
+            lastCheckedValueSegment = valueSeg
+            latestSignature = signature
+        }
         if !valueRaw.isEmpty,
            (elapsed >= idleDelay || (elapsed >= sentenceDelay && sentenceEnd)),
            lastCheckedValueSegment != valueSeg,
@@ -1013,7 +1035,7 @@ final class FloatingHelperController {
 
     private func pinnedBubbleFrame(fallback: CGRect) -> CGRect {
         let anchor = dragBoundaryWindowFrame
-            ?? textService.focusedWindowFrame()
+            ?? textService.floatingHelperAnchorWindowFrame()
             ?? lastMarkerFieldFrame
             ?? fallback
         guard !anchor.isEmpty, anchor.width > Self.floatingPanelSide, anchor.height > Self.floatingPanelSide else {
@@ -1067,7 +1089,7 @@ final class FloatingHelperController {
     private func dragHintDirectionsForCurrentBubbleFrame() -> [FloatingDragHintDirection] {
         let frame = panel?.frame ?? lastFrame
         let anchor = dragBoundaryWindowFrame
-            ?? textService.focusedWindowFrame()
+            ?? textService.floatingHelperAnchorWindowFrame()
             ?? lastMarkerFieldFrame
             ?? frame
         return dragHintDirections(for: frame, in: anchor)
@@ -1255,8 +1277,13 @@ final class FloatingHelperController {
             consentBootstrapBundleID = frontBundle
         }
         let frame: CGRect? = {
+            if isManuallyPlacedForCurrentFocus, let manualFixedFrame {
+                let pinned = pinnedBubbleFrame(fallback: manualFixedFrame)
+                consentBootstrapFrame = pinned
+                return pinned
+            }
             if let fixed = consentBootstrapFrame {
-                return clampedToVisibleScreens(fixed)
+                return pinnedBubbleFrame(fallback: fixed)
             }
             let initial: CGRect
             if let windowFrame {
@@ -1469,11 +1496,18 @@ final class FloatingHelperController {
         updateRingColor()
         onEvaluationStarted?()
         Task { @MainActor in
+            var completedSnapshotKey: String?
+            var completedSnapshotNormalizedText: String?
             let evaluationSignature = textService.focusedTextSignature() ?? self.lastSignature
             if let evaluationSignature, !evaluationSignature.isEmpty {
                 lastCheckedValueSegment = valueSegment(ofFocusedSignature: evaluationSignature)
             }
             defer {
+                if let completedSnapshotKey {
+                    lastAutoEvaluationSnapshotKey = completedSnapshotKey
+                    lastAutoEvaluationSnapshotNormalizedText = completedSnapshotNormalizedText
+                    lastAutoEvaluationSnapshotAt = Date()
+                }
                 isEvaluating = false
                 updateRingColor()
                 onEvaluationCompleted?()
@@ -1489,6 +1523,17 @@ final class FloatingHelperController {
             }
 
             guard let credentials = resolveAutoCheckCredentials() else { return }
+            let snapshotKey = autoEvaluationSnapshotKey(for: context.text, credentials: credentials)
+            if shouldSkipAutoEvaluation(snapshotKey: snapshotKey) {
+                textoraDiagLog(
+                    "aiRewrite",
+                    "skip evaluation: recently checked same text snapshot"
+                )
+                latestSignature = evaluationSignature
+                return
+            }
+            completedSnapshotKey = snapshotKey
+            completedSnapshotNormalizedText = normalized(context.text)
 
             if !detailedCorrectionsEnabled {
                 latestContext = context
@@ -1710,6 +1755,36 @@ final class FloatingHelperController {
         return AutoCheckCredentials(provider: provider, model: model, apiKey: key)
     }
 
+    private func autoEvaluationSnapshotKey(
+        for text: String,
+        credentials: AutoCheckCredentials
+    ) -> String {
+        [
+            credentials.provider.rawValue,
+            credentials.model,
+            smartAIEnabled ? "smart" : "manual",
+            detailedCorrectionsEnabled ? "detailed" : "whole",
+            normalized(text)
+        ].joined(separator: "\t")
+    }
+
+    private func shouldSkipAutoEvaluation(snapshotKey: String) -> Bool {
+        guard lastAutoEvaluationSnapshotKey == snapshotKey,
+              let lastAutoEvaluationSnapshotAt else {
+            return false
+        }
+        return Date().timeIntervalSince(lastAutoEvaluationSnapshotAt) < autoEvaluationSnapshotTTL
+    }
+
+    private func wasRecentlyAutoEvaluatedValueSegment(_ valueSegment: String) -> Bool {
+        guard let lastAutoEvaluationSnapshotNormalizedText,
+              let lastAutoEvaluationSnapshotAt,
+              Date().timeIntervalSince(lastAutoEvaluationSnapshotAt) < autoEvaluationSnapshotTTL else {
+            return false
+        }
+        return normalized(valueSegment) == lastAutoEvaluationSnapshotNormalizedText
+    }
+
     private func evaluateWholeContext(
         _ context: TextAccessService.FocusedTextContext,
         credentials: AutoCheckCredentials
@@ -1858,7 +1933,7 @@ final class FloatingHelperController {
             apiKey: credentials.apiKey,
             text: text
         )
-        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = sanitizedAISuggestion(original: text, candidate: candidate)
         guard !trimmed.isEmpty,
               normalized(trimmed) != normalized(text),
               preservesProtectedTokens(original: text, candidate: trimmed),
@@ -1894,7 +1969,7 @@ final class FloatingHelperController {
             )
         }
 
-        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = sanitizedAISuggestion(original: text, candidate: candidate)
         guard !trimmed.isEmpty,
               normalized(trimmed) != normalized(text),
               preservesProtectedTokens(original: text, candidate: trimmed),
@@ -1927,7 +2002,7 @@ final class FloatingHelperController {
             text: text
         )
         let filtered = candidates.compactMap { suggestion -> OverlaySuggestion? in
-            let trimmed = suggestion.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = sanitizedAISuggestion(original: text, candidate: suggestion.text)
             guard !trimmed.isEmpty,
                   normalized(trimmed) != normalized(text),
                   preservesProtectedTokens(original: text, candidate: trimmed),
@@ -2350,6 +2425,11 @@ final class FloatingHelperController {
                 lastCheckedValueSegment = valueSeg
                 return
             }
+            if wasRecentlyAutoEvaluatedValueSegment(valueSeg) {
+                lastCheckedValueSegment = valueSeg
+                latestSignature = signature
+                return
+            }
             guard lastCheckedValueSegment != valueSeg, latestSignature != signature else { return }
         }
         evaluateCurrentText()
@@ -2723,7 +2803,7 @@ final class FloatingHelperController {
     }
 
     private func validatedSafeFixSuggestion(original: String, candidate: String) -> String? {
-        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = sanitizedAISuggestion(original: original, candidate: candidate)
         guard !trimmed.isEmpty,
               normalized(trimmed) != normalized(original),
               preservesProtectedTokens(original: original, candidate: trimmed),
@@ -2731,6 +2811,57 @@ final class FloatingHelperController {
             return nil
         }
         return trimmed
+    }
+
+    private func sanitizedAISuggestion(original: String, candidate: String) -> String {
+        restoreOriginalProtectedTrailingPunctuationSpacing(
+            original: original,
+            candidate: candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func restoreOriginalProtectedTrailingPunctuationSpacing(
+        original: String,
+        candidate: String
+    ) -> String {
+        guard !candidate.isEmpty else { return candidate }
+        let originalNS = original as NSString
+        let punctuation = CharacterSet(charactersIn: ".,;:!?")
+        var result = candidate
+
+        for protectedRange in protectedTokenRanges(in: original) {
+            let protectedToken = normalizedProtectedToken(originalNS.substring(with: protectedRange))
+            guard protectedTokenLooksLikeURL(protectedToken) else { continue }
+
+            let tokenEnd = protectedRange.location + protectedRange.length
+            guard tokenEnd < originalNS.length else { continue }
+            var cursor = tokenEnd
+            while cursor < originalNS.length,
+                  isWhitespace(originalNS.character(at: cursor)) {
+                cursor += 1
+            }
+            guard cursor > tokenEnd, cursor < originalNS.length,
+                  let scalar = UnicodeScalar(UInt32(originalNS.character(at: cursor))),
+                  punctuation.contains(scalar) else {
+                continue
+            }
+
+            let separator = originalNS.substring(with: NSRange(location: tokenEnd, length: cursor - tokenEnd))
+            let mark = String(Character(scalar))
+            result = result.replacingOccurrences(
+                of: protectedToken + mark,
+                with: protectedToken + separator + mark
+            )
+        }
+
+        return result
+    }
+
+    private func protectedTokenLooksLikeURL(_ token: String) -> Bool {
+        let lower = token.lowercased()
+        return lower.hasPrefix("http://")
+            || lower.hasPrefix("https://")
+            || lower.hasPrefix("www.")
     }
 
     private func mergedIssues(_ issues: [OverlayIssue]) -> [OverlayIssue] {
@@ -3928,7 +4059,7 @@ final class FloatingHelperController {
                   !excludingOperations.contains(suggestion.operation) else {
                 continue
             }
-            let candidate = suggestion.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = sanitizedAISuggestion(original: segment, candidate: suggestion.text)
             guard !candidate.isEmpty,
                   normalized(candidate) != normalized(segment),
                   preservesProtectedTokens(original: segment, candidate: candidate),
@@ -3963,7 +4094,19 @@ final class FloatingHelperController {
 
     private func protectedTokens(in text: String) -> [String] {
         let ns = text as NSString
-        return protectedTokenRanges(in: text).map { ns.substring(with: $0) }
+        return protectedTokenRanges(in: text).map {
+            normalizedProtectedToken(ns.substring(with: $0))
+        }
+    }
+
+    private func normalizedProtectedToken(_ token: String) -> String {
+        var trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailingPunctuation = CharacterSet(charactersIn: ".,;:!?")
+        while let last = trimmed.unicodeScalars.last,
+              trailingPunctuation.contains(last) {
+            trimmed.removeLast()
+        }
+        return trimmed
     }
 
     private func fixMixedLatinCyrillicWords(in text: String) -> String {

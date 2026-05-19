@@ -135,6 +135,12 @@ final class EasySwitchManager {
             return Unmanaged.passUnretained(event)
         }
 
+        if isReturnOrEnterKey(keyCode) {
+            lock.withLock { wordBuffer.clear() }
+            textoraDiagLog("easySwitch", "returnOrEnter observed action=passThrough")
+            return Unmanaged.passUnretained(event)
+        }
+
         guard let chars = unicodeString(from: event), !chars.isEmpty else {
             return Unmanaged.passUnretained(event)
         }
@@ -160,11 +166,15 @@ final class EasySwitchManager {
 
     private func delimiter(chars: String, keyCode: CGKeyCode, keyboardLayout: EasySwitchKeyboardLayout) -> String? {
         if chars.count == 1, let scalar = chars.unicodeScalars.first {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) || ".!?,;:)]}".unicodeScalars.contains(scalar) {
+            if CharacterSet.whitespaces.contains(scalar) || ".!?,;:)]}".unicodeScalars.contains(scalar) {
                 return chars
             }
         }
         return nil
+    }
+
+    private func isReturnOrEnterKey(_ keyCode: CGKeyCode) -> Bool {
+        keyCode == 0x24 || keyCode == 0x4C
     }
 
     private func handleBoundary(
