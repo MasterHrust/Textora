@@ -43,6 +43,20 @@ final class DecisionEngineTests: XCTestCase {
         XCTAssertEqual(engine.decision(for: "Google", currentLanguage: .english, settings: settings).action, .skip)
     }
 
+    func testCommonShortEnglishWordsDoNotSwitchToRussianLookalikes() {
+        let scorer = LanguageScorer(
+            englishWords: ["her"],
+            russianWords: ["рук"],
+            russianKnownWords: ["рук"]
+        )
+        let engine = EasySwitchDecisionEngine(scorer: scorer, userDictionary: userDictionary)
+
+        let decision = engine.decision(for: "her", currentLanguage: .english, settings: settings)
+
+        XCTAssertEqual(decision.action, .skip)
+        XCTAssertEqual(decision.converted, "рук")
+    }
+
     func testTyposDoNotUseDictionaryCorrection() {
         for (word, language) in [("Првет", EasySwitchLanguage.russian), ("respons", .english)] {
             let decision = engine.decision(for: word, currentLanguage: language, settings: settings)

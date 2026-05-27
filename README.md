@@ -2,6 +2,8 @@
 
 Textora is an open-source macOS writing assistant that helps you rewrite selected text directly inside other apps (mail, chats, browsers, editors, and more).
 
+[Support the project](https://paypal.me/RShytskou)
+
 All AI requests are sent directly from your Mac using your own API key (BYO key).  
 This repository does not include a Textora backend proxy.
 
@@ -117,6 +119,10 @@ Contributions are welcome:
 2. Keep changes focused and documented.
 3. Ensure the app builds successfully.
 4. Open a pull request with a clear summary and test notes.
+
+## Support
+
+If Textora helps you, you can support development here: [paypal.me/RShytskou](https://paypal.me/RShytskou).
 
 ## License
 

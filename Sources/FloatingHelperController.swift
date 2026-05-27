@@ -113,6 +113,7 @@ final class FloatingHelperController {
     private var lastAutoEvaluationSnapshotNormalizedText: String?
     private var lastAutoEvaluationSnapshotAt: Date?
     private let autoEvaluationSnapshotTTL: TimeInterval = 30
+    private var postApplyAcceptedValueSegment: String?
     /// Avoid `orderFrontRegardless` on every 200ms tick; set true when panel is hidden or z-order policy changes.
     private var floatingPanelNeedsZOrderPass = true
     private var lastLayoutStatusPostedAt: Date?
@@ -448,9 +449,8 @@ final class FloatingHelperController {
         textService.invalidateTransientFocusCaches()
         lastSignature = nil
         lastCheckedValueSegment = nil
-        lastAutoEvaluationSnapshotKey = nil
-        lastAutoEvaluationSnapshotNormalizedText = nil
-        lastAutoEvaluationSnapshotAt = nil
+        clearRecentAutoEvaluationSnapshot()
+        postApplyAcceptedValueSegment = nil
         latestSignature = nil
         selectionSignature = nil
         selectionSignatureSince = nil
@@ -493,6 +493,7 @@ final class FloatingHelperController {
         lastSignature = nil
         lastCheckedValueSegment = nil
         latestSignature = nil
+        postApplyAcceptedValueSegment = nil
         latestSuggestion = ""
         latestSuggestionOptions = []
         latestIssueRange = nil
@@ -708,9 +709,8 @@ final class FloatingHelperController {
         hoveredIssueID = nil
         hoveredIssueIDs = []
         lastCheckedValueSegment = nil
-        lastAutoEvaluationSnapshotKey = nil
-        lastAutoEvaluationSnapshotNormalizedText = nil
-        lastAutoEvaluationSnapshotAt = nil
+        clearRecentAutoEvaluationSnapshot()
+        postApplyAcceptedValueSegment = nil
         suggestionState = .neutral
         hideMarkerAndCard()
         updateRingColor()
@@ -913,9 +913,11 @@ final class FloatingHelperController {
                 let preservingLocalBatch = !latestIssues.isEmpty
                     && (localBatchMutationGraceUntil.map { Date() <= $0 } ?? false)
                 let suppressingPostApply = suppressAutoEvaluationUntil.map { Date() <= $0 } ?? false
+                let acceptingPostApplyValue = suppressingPostApply
+                    && postApplyAcceptedValueSegment == newValue
                 lastActivityAt = Date()
                 latestSignature = nil
-                if suppressingPostApply {
+                if acceptingPostApplyValue {
                     lastCheckedValueSegment = newValue
                     latestSignature = signature
                     latestIssueRange = nil
@@ -928,7 +930,7 @@ final class FloatingHelperController {
                     suggestionState = .looksGood
                     updateRingColor()
                     postStatus("Post-apply text accepted; auto-check suppressed briefly")
-                } else if wasRecentlyAutoEvaluatedValueSegment(newValue) {
+                } else if !suppressingPostApply, wasRecentlyAutoEvaluatedValueSegment(newValue) {
                     lastCheckedValueSegment = newValue
                     latestSignature = signature
                     postStatus("Ignoring Chrome focus churn for already checked text")
@@ -994,11 +996,14 @@ final class FloatingHelperController {
 
         let elapsed = Date().timeIntervalSince(lastActivityAt)
         let sentenceEnd = hasSentenceEnding()
-        if let until = suppressAutoEvaluationUntil, Date() <= until {
+        if let until = suppressAutoEvaluationUntil,
+           Date() <= until,
+           postApplyAcceptedValueSegment == valueSeg {
             lastCheckedValueSegment = valueSeg
             latestSignature = signature
         } else {
             suppressAutoEvaluationUntil = nil
+            postApplyAcceptedValueSegment = nil
         }
         if !valueRaw.isEmpty, wasRecentlyAutoEvaluatedValueSegment(valueSeg) {
             lastCheckedValueSegment = valueSeg
@@ -1447,9 +1452,13 @@ final class FloatingHelperController {
     }
 
     func refreshAfterExternalRewriteApplied() {
-        suppressAutoEvaluationUntil = Date().addingTimeInterval(12)
+        suppressAutoEvaluationUntil = Date().addingTimeInterval(0.9)
+        clearRecentAutoEvaluationSnapshot()
+        postApplyAcceptedValueSegment = nil
         if let signature = textService.focusedTextSignature(), !signature.isEmpty {
-            lastCheckedValueSegment = valueSegment(ofFocusedSignature: signature)
+            let valueSeg = valueSegment(ofFocusedSignature: signature)
+            lastCheckedValueSegment = valueSeg
+            postApplyAcceptedValueSegment = valueSeg
             latestSignature = signature
         }
         suggestionState = .looksGood
@@ -1461,6 +1470,12 @@ final class FloatingHelperController {
         hoveredIssueIDs = []
         hideMarkerAndCard()
         updateRingColor()
+    }
+
+    private func clearRecentAutoEvaluationSnapshot() {
+        lastAutoEvaluationSnapshotKey = nil
+        lastAutoEvaluationSnapshotNormalizedText = nil
+        lastAutoEvaluationSnapshotAt = nil
     }
 
     func markRewritePopupSuggestionAvailability(_ hasSuggestion: Bool) {
@@ -1808,6 +1823,16 @@ final class FloatingHelperController {
                 issueLocalRange: primary.localRange,
                 state: .needsAttention,
                 issues: localRepeatedIssues
+            )
+        }
+
+        if let contraction = contractionTypoFix(in: text) {
+            return SegmentEvaluationResult(
+                suggestion: contraction.fixedText,
+                suggestionOptions: rankedSuggestions([OverlaySuggestion(operation: .fixGrammar, text: contraction.fixedText)], original: text),
+                issueLocalRange: contraction.issue.localRange,
+                state: .needsAttention,
+                issues: [contraction.issue]
             )
         }
 
@@ -2210,6 +2235,16 @@ final class FloatingHelperController {
             )
         }
 
+        if let contraction = contractionTypoFix(in: text) {
+            return SegmentEvaluationResult(
+                suggestion: contraction.fixedText,
+                suggestionOptions: rankedSuggestions([OverlaySuggestion(operation: .fixGrammar, text: contraction.fixedText)], original: text),
+                issueLocalRange: contraction.issue.localRange,
+                state: .needsAttention,
+                issues: [contraction.issue]
+            )
+        }
+
         if !isMeaningfulForAutoCheck(text) {
             if text.count >= 3, let localIssue = firstMisspelledRange(in: text) {
                 if let localFix = bestLocalSpellingReplacement(in: text).flatMap({
@@ -2493,6 +2528,68 @@ final class FloatingHelperController {
             }
         }
         return nil
+    }
+
+    private func contractionTypoFix(in text: String) -> (fixedText: String, issue: OverlayIssue)? {
+        let ns = text as NSString
+        guard ns.length >= 4 else { return nil }
+        let protectedRanges = protectedTokenRanges(in: text)
+        let pattern = #"\b([A-Za-z]+)(['’])t\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+
+        for match in matches {
+            guard match.numberOfRanges >= 3,
+                  !protectedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
+                continue
+            }
+            let base = ns.substring(with: match.range(at: 1))
+            let apostrophe = ns.substring(with: match.range(at: 2))
+            guard let replacement = correctedNegativeContraction(base: base, apostrophe: apostrophe) else {
+                continue
+            }
+            let originalWord = ns.substring(with: match.range)
+            guard replacement != originalWord else { continue }
+
+            let fixed = NSMutableString(string: text)
+            fixed.replaceCharacters(in: match.range, with: replacement)
+            let issue = OverlayIssue(
+                localRange: match.range,
+                originalText: originalWord,
+                category: .fixGrammar,
+                replacement: replacement,
+                reason: "Fix contraction"
+            )
+            return (fixed as String, issue)
+        }
+
+        return nil
+    }
+
+    private func correctedNegativeContraction(base: String, apostrophe: String) -> String? {
+        let lower = base.lowercased()
+        let correctedLower: String
+        switch lower {
+        case "can", "ca":
+            correctedLower = "can\(apostrophe)t"
+        case "won", "wo", "will":
+            correctedLower = "won\(apostrophe)t"
+        case "could", "would", "should", "do", "does", "did",
+             "is", "are", "was", "were", "has", "have", "had", "must":
+            correctedLower = "\(lower)n\(apostrophe)t"
+        default:
+            return nil
+        }
+        return matchCapitalization(of: base, replacement: correctedLower)
+    }
+
+    private func matchCapitalization(of source: String, replacement: String) -> String {
+        guard let first = source.unicodeScalars.first,
+              CharacterSet.uppercaseLetters.contains(first),
+              let replacementFirst = replacement.first else {
+            return replacement
+        }
+        return String(replacementFirst).uppercased() + replacement.dropFirst()
     }
 
     private func hasLocalSpellingIssues(_ text: String) -> Bool {
@@ -6436,6 +6533,8 @@ final class FloatingHelperController {
         appliedIssue: OverlayIssue?,
         previousIssues: [OverlayIssue]
     ) {
+        clearRecentAutoEvaluationSnapshot()
+        postApplyAcceptedValueSegment = nil
         invalidateSegmentCache(for: appliedSegmentText)
         invalidateSegmentCache(for: rewrittenSegmentText)
         localBatchMutationGraceUntil = Date().addingTimeInterval(2.0)

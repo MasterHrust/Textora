@@ -13,8 +13,23 @@ final class ReplacementService {
     struct EventSink {
         var postBackspace: () -> Void
         var typeText: (String) -> Bool
+        var typePhysicalText: (String) -> Bool
         var pasteText: (String) -> Void
         var selectKeyboardLayout: (EasySwitchKeyboardLayout) -> Bool
+
+        init(
+            postBackspace: @escaping () -> Void,
+            typeText: @escaping (String) -> Bool,
+            typePhysicalText: @escaping (String) -> Bool = { _ in false },
+            pasteText: @escaping (String) -> Void,
+            selectKeyboardLayout: @escaping (EasySwitchKeyboardLayout) -> Bool
+        ) {
+            self.postBackspace = postBackspace
+            self.typeText = typeText
+            self.typePhysicalText = typePhysicalText
+            self.pasteText = pasteText
+            self.selectKeyboardLayout = selectKeyboardLayout
+        }
 
         static let live = EventSink(
             postBackspace: {
@@ -25,6 +40,7 @@ final class ReplacementService {
                 up?.post(tap: .cghidEventTap)
             },
             typeText: ReplacementService.typeUnicodeString,
+            typePhysicalText: ReplacementService.typePhysicalASCIIString,
             pasteText: ReplacementService.pasteText,
             selectKeyboardLayout: EasySwitchInputSource.selectKeyboardLayout
         )
@@ -47,6 +63,7 @@ final class ReplacementService {
         targetKeyboardLayout: EasySwitchKeyboardLayout,
         switchKeyboardLayout: Bool,
         preferClipboardInsertion: Bool = false,
+        typedDelimiterAlreadyPassedThrough: Bool = false,
         completion: @escaping () -> Void
     ) {
         guard !original.isEmpty else {
@@ -61,22 +78,30 @@ final class ReplacementService {
             targetKeyboardLayout: targetKeyboardLayout
         )
 
-        let originalUTF16Length = (original as NSString).length
-        for _ in 0..<originalUTF16Length {
+        let textToDelete = typedDelimiterAlreadyPassedThrough ? original + delimiter : original
+        let deleteLength = (textToDelete as NSString).length
+        for _ in 0..<deleteLength {
             eventSink.postBackspace()
             usleep(2_000)
+        }
+        if switchKeyboardLayout {
+            _ = eventSink.selectKeyboardLayout(targetKeyboardLayout)
+            usleep(30_000)
         }
         let insertedText = replacement + delimiter
         if preferClipboardInsertion {
             eventSink.pasteText(insertedText)
+        } else if switchKeyboardLayout,
+                  let physicalText = Self.physicalReplayText(
+                    original: original,
+                    replacement: replacement,
+                    delimiter: delimiter,
+                    targetKeyboardLayout: targetKeyboardLayout
+                  ),
+                  eventSink.typePhysicalText(physicalText) {
+            // Physical replay keeps layout corrections paste-free in Electron composers.
         } else {
-            let inserted = eventSink.typeText(insertedText)
-            if !inserted {
-                eventSink.pasteText(insertedText)
-            }
-        }
-        if switchKeyboardLayout {
-            _ = eventSink.selectKeyboardLayout(targetKeyboardLayout)
+            _ = eventSink.typeText(insertedText)
         }
         clearReplacingSoon(completion: completion)
     }
@@ -90,10 +115,7 @@ final class ReplacementService {
             usleep(2_000)
         }
         let restored = lastReplacement.original + lastReplacement.delimiter
-        let inserted = eventSink.typeText(restored)
-        if !inserted {
-            eventSink.pasteText(restored)
-        }
+        _ = eventSink.typeText(restored)
         userDictionary.addPersistentIgnore(lastReplacement.original)
         self.lastReplacement = nil
         clearReplacingSoon(completion: completion)
@@ -140,6 +162,101 @@ final class ReplacementService {
             usleep(1_500)
         }
         return true
+    }
+
+    private static func physicalReplayText(
+        original: String,
+        replacement: String,
+        delimiter: String,
+        targetKeyboardLayout: EasySwitchKeyboardLayout
+    ) -> String? {
+        switch targetKeyboardLayout {
+        case .russian:
+            guard original.unicodeScalars.allSatisfy({ $0.value < 128 }) else { return nil }
+            return original + delimiter
+        case .english:
+            guard replacement.unicodeScalars.allSatisfy({ $0.value < 128 }) else { return nil }
+            return replacement + delimiter
+        case .other:
+            return nil
+        }
+    }
+
+    private static func typePhysicalASCIIString(_ text: String) -> Bool {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        for scalar in text.unicodeScalars {
+            guard let key = physicalKey(for: scalar) else { return false }
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: key.code, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: key.code, keyDown: false) else {
+                return false
+            }
+            down.flags = key.shift ? .maskShift : CGEventFlags()
+            up.flags = key.shift ? .maskShift : CGEventFlags()
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            usleep(2_000)
+        }
+        return true
+    }
+
+    private static func physicalKey(for scalar: Unicode.Scalar) -> (code: CGKeyCode, shift: Bool)? {
+        switch scalar {
+        case "a": return (0x00, false)
+        case "s": return (0x01, false)
+        case "d": return (0x02, false)
+        case "f": return (0x03, false)
+        case "h": return (0x04, false)
+        case "g": return (0x05, false)
+        case "z": return (0x06, false)
+        case "x": return (0x07, false)
+        case "c": return (0x08, false)
+        case "v": return (0x09, false)
+        case "b": return (0x0B, false)
+        case "q": return (0x0C, false)
+        case "w": return (0x0D, false)
+        case "e": return (0x0E, false)
+        case "r": return (0x0F, false)
+        case "y": return (0x10, false)
+        case "t": return (0x11, false)
+        case "1": return (0x12, false)
+        case "2": return (0x13, false)
+        case "3": return (0x14, false)
+        case "4": return (0x15, false)
+        case "6": return (0x16, false)
+        case "5": return (0x17, false)
+        case "=": return (0x18, false)
+        case "9": return (0x19, false)
+        case "7": return (0x1A, false)
+        case "-": return (0x1B, false)
+        case "8": return (0x1C, false)
+        case "0": return (0x1D, false)
+        case "]": return (0x1E, false)
+        case "o": return (0x1F, false)
+        case "u": return (0x20, false)
+        case "[": return (0x21, false)
+        case "i": return (0x22, false)
+        case "p": return (0x23, false)
+        case "l": return (0x25, false)
+        case "j": return (0x26, false)
+        case "'": return (0x27, false)
+        case "k": return (0x28, false)
+        case ";": return (0x29, false)
+        case "\\": return (0x2A, false)
+        case ",": return (0x2B, false)
+        case "/": return (0x2C, false)
+        case "n": return (0x2D, false)
+        case "m": return (0x2E, false)
+        case ".": return (0x2F, false)
+        case " ": return (0x31, false)
+        default:
+            let lower = String(scalar).lowercased()
+            guard lower != String(scalar),
+                  let lowerScalar = lower.unicodeScalars.first,
+                  let key = physicalKey(for: lowerScalar) else {
+                return nil
+            }
+            return (key.code, true)
+        }
     }
 
     private static func triggerPasteShortcut() {

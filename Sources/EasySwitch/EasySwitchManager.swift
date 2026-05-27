@@ -7,6 +7,38 @@ final class EasySwitchManager {
     static let settingsDidChangeNotification = EasySwitchSettings.settingsDidChangeNotification
     static let replacementDidBeginNotification = Notification.Name("EasySwitch.replacementDidBegin")
     static let replacementDidEndNotification = Notification.Name("EasySwitch.replacementDidEnd")
+    static let programmaticInputDidBeginNotification = Notification.Name("EasySwitch.programmaticInputDidBegin")
+    static let programmaticInputDidEndNotification = Notification.Name("EasySwitch.programmaticInputDidEnd")
+    private static let programmaticInputLock = NSLock()
+    private static var programmaticInputSuppressedUntil: Date?
+
+    static func suppressProgrammaticInput(duration: TimeInterval) {
+        programmaticInputLock.withLock {
+            let until = Date().addingTimeInterval(duration)
+            if let current = programmaticInputSuppressedUntil, current > until {
+                return
+            }
+            programmaticInputSuppressedUntil = until
+        }
+    }
+
+    private static func isProgrammaticInputSuppressed() -> Bool {
+        programmaticInputLock.withLock {
+            guard let until = programmaticInputSuppressedUntil else { return false }
+            if Date() <= until { return true }
+            programmaticInputSuppressedUntil = nil
+            return false
+        }
+    }
+
+    private static func currentProgrammaticSuppressionUntil() -> Date? {
+        programmaticInputLock.withLock {
+            guard let until = programmaticInputSuppressedUntil else { return nil }
+            if Date() <= until { return until }
+            programmaticInputSuppressedUntil = nil
+            return nil
+        }
+    }
 
     private let textService = TextAccessService()
     private let wordBuffer = WordBuffer()
@@ -22,6 +54,7 @@ final class EasySwitchManager {
     private var recentCorrectionDirectionUntil: Date?
     private var notificationAuthorizationRequested = false
     private var suppressInputUntil: Date?
+    private var programmaticInputObservers: [NSObjectProtocol] = []
 
     var isRunning: Bool {
         lock.withLock { eventTap != nil }
@@ -48,7 +81,7 @@ final class EasySwitchManager {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: mask,
             callback: EasySwitchManager.eventTapCallback,
             userInfo: refcon
@@ -71,7 +104,8 @@ final class EasySwitchManager {
             eventTap = tap
             runLoopSource = source
         }
-        textoraDiagLog("easySwitch", "start succeeded")
+        installProgrammaticInputObserversIfNeeded()
+        textoraDiagLog("easySwitch", "start succeeded mode=listenOnly")
         return true
     }
 
@@ -90,6 +124,77 @@ final class EasySwitchManager {
         if let tap = state.0 {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
+        }
+        removeProgrammaticInputObservers()
+    }
+
+    private func installProgrammaticInputObserversIfNeeded() {
+        guard programmaticInputObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        programmaticInputObservers.append(
+            center.addObserver(
+                forName: Self.programmaticInputDidBeginNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Self.suppressProgrammaticInput(duration: 3.0)
+                self?.suppressExternalProgrammaticInput(duration: 3.0)
+            }
+        )
+        programmaticInputObservers.append(
+            center.addObserver(
+                forName: Self.programmaticInputDidEndNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Self.suppressProgrammaticInput(duration: 0.8)
+                self?.suppressExternalProgrammaticInput(duration: 0.8)
+            }
+        )
+    }
+
+    private func removeProgrammaticInputObservers() {
+        let center = NotificationCenter.default
+        for observer in programmaticInputObservers {
+            center.removeObserver(observer)
+        }
+        programmaticInputObservers.removeAll()
+    }
+
+    private func suppressExternalProgrammaticInput(duration: TimeInterval) {
+        let until = Date().addingTimeInterval(duration)
+        let tap = lock.withLock { () -> CFMachPort? in
+            wordBuffer.clear()
+            if suppressInputUntil.map({ $0 < until }) ?? true {
+                suppressInputUntil = until
+            }
+            return eventTap
+        }
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.05) { [weak self] in
+            self?.reenableEventTapIfSuppressionExpired()
+        }
+    }
+
+    private func reenableEventTapIfSuppressionExpired() {
+        if let until = Self.currentProgrammaticSuppressionUntil() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.05, until.timeIntervalSinceNow + 0.05)) { [weak self] in
+                self?.reenableEventTapIfSuppressionExpired()
+            }
+            return
+        }
+        let tap = lock.withLock { () -> CFMachPort? in
+            if let suppressInputUntil, Date() <= suppressInputUntil {
+                return nil
+            }
+            suppressInputUntil = nil
+            guard enabled else { return nil }
+            return eventTap
+        }
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: true)
         }
     }
 
@@ -112,6 +217,10 @@ final class EasySwitchManager {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+        if Self.isProgrammaticInputSuppressed() {
+            lock.withLock { wordBuffer.clear() }
+            return Unmanaged.passUnretained(event)
+        }
         if isUndoShortcut(keyCode: keyCode, flags: flags) {
             return handleUndo(event: event)
         }
@@ -206,8 +315,8 @@ final class EasySwitchManager {
                 replacement: decision.converted,
                 delimiter: boundary.delimiter,
                 targetKeyboardLayout: self.targetKeyboardLayout(for: decision),
-                switchKeyboardLayout: decision.kind == .layout && self.settings.changesKeyboardLayout,
-                preferClipboardInsertion: true
+                switchKeyboardLayout: decision.kind == .layout,
+                typedDelimiterAlreadyPassedThrough: true
             ) { [weak self] in
                 self?.lock.withLock {
                     self?.wordBuffer.clear()
@@ -217,7 +326,7 @@ final class EasySwitchManager {
                 self?.showNotificationIfNeeded(original: decision.original, replacement: decision.converted)
             }
         }
-        return nil
+        return Unmanaged.passUnretained(event)
     }
 
     private func handleUndo(event: CGEvent) -> Unmanaged<CGEvent>? {

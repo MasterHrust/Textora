@@ -6,7 +6,7 @@ struct ContentView: View {
 
     private let bundleIDTextWidth: CGFloat = 210
     private let actionPickerWidth: CGFloat = 140
-    private let donateURL = "https://github.com/sponsors/MasterHrust"
+    private let donateURL = "https://paypal.me/RShytskou"
 
     var body: some View {
         ScrollView {

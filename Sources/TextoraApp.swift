@@ -4,7 +4,7 @@ import SwiftUI
 struct TextoraApp: App {
     @NSApplicationDelegateAdaptor(TextoraAppDelegate.self) private var appDelegate
     @StateObject private var coordinator = AppCoordinator.shared
-    private let donateURL = "https://github.com/sponsors/MasterHrust"
+    private let donateURL = "https://paypal.me/RShytskou"
 
     init() {
         UserDefaults.standard.register(defaults: [

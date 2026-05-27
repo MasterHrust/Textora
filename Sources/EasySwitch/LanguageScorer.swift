@@ -301,10 +301,12 @@ final class LanguageScorer {
     }
 
     private static let fallbackEnglishWords: Set<String> = [
-        "about", "after", "again", "also", "api", "because", "before", "could", "email", "from", "good", "google",
-        "hello", "hi", "how", "i", "later", "make", "message", "need", "oauth", "please", "profile", "settings", "should",
-        "switch", "text", "thanks", "that", "there", "this", "today", "tomorrow", "want", "what", "when", "where",
-        "with", "work", "would", "you"
+        "about", "after", "again", "also", "api", "are", "ask", "because", "before", "could", "email", "for", "from",
+        "good", "google", "guys", "had", "has", "have", "he", "hello", "her", "hi", "him", "his", "how", "i", "if",
+        "it", "its", "july", "later", "make", "me", "message", "middle", "migration", "my", "need", "oauth", "of",
+        "our", "please", "profile", "settings", "she", "should", "so", "switch", "text", "thanks", "that", "their",
+        "them", "there", "they", "this", "today", "told", "tomorrow", "us", "want", "was", "we", "were", "what",
+        "when", "where", "will", "with", "work", "would", "you"
     ]
 
     private static let fallbackRussianWords: Set<String> = [
