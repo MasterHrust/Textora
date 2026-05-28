@@ -175,7 +175,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("EasySwitch")
                 .font(.headline)
-            Text("EasySwitch works fully on-device.")
+            Text("EasySwitch works fully on-device. It catches words typed in the wrong English/Russian keyboard layout and fixes them while you type.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Enable EasySwitch", isOn: $viewModel.easySwitchEnabled)

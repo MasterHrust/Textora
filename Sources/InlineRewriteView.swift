@@ -165,6 +165,104 @@ private struct OperationSegmentBar: View {
     }
 }
 
+private struct PopupFeatureToggleButton: View {
+    let isOn: Bool
+    let systemImage: String
+    let label: String
+    let accessibilityLabel: String
+    let helpText: String
+    let activeColors: [Color]
+    let activeShadow: Color
+    var isTemporarilyPaused = false
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                HStack(spacing: 4) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 11, weight: .bold))
+                    Text(label)
+                        .font(.system(size: 10.5, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .foregroundStyle(isOn ? .white : TextoraPopupTheme.muted)
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(
+                    Capsule().fill(
+                        LinearGradient(
+                            colors: isOn ? activeColors : [Color.white.opacity(0.07), Color.white.opacity(0.07)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(isOn ? 0.38 : 0.10), lineWidth: 1)
+                )
+                .shadow(color: activeShadow.opacity(isOn ? 0.30 : 0), radius: 10, x: 0, y: 0)
+                .contentShape(Capsule())
+
+                if isTemporarilyPaused {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 6.5, weight: .black))
+                        .foregroundStyle(.white)
+                        .frame(width: 13, height: 13)
+                        .background(Circle().fill(Color.red.opacity(0.95)))
+                        .overlay(Circle().stroke(Color.white.opacity(0.55), lineWidth: 0.8))
+                        .offset(x: 4, y: -5)
+                }
+            }
+            .overlay(alignment: .top) {
+                if isHovering {
+                    PopupFeatureTooltip(text: helpText)
+                        .offset(y: 34)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+        .zIndex(isHovering ? 20 : 1)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(isOn ? "On" : "Off")
+    }
+}
+
+private struct PopupFeatureTooltip: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.white.opacity(0.92))
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 190)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color(red: 0.08, green: 0.08, blue: 0.10).opacity(0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 6)
+    }
+}
+
 // MARK: - Main view
 
 struct InlineRewriteView: View {
@@ -174,6 +272,7 @@ struct InlineRewriteView: View {
     let onActionInvoked: () -> Void
     let onSuggestionAvailabilityChanged: (Bool) -> Void
     @AppStorage(AppViewModel.SettingsKeys.smartAIEnabled) private var smartAIEnabled = true
+    @AppStorage(AppViewModel.SettingsKeys.easySwitchEnabled) private var easySwitchEnabled = true
 
     private var showSuggestionCard: Bool {
         !viewModel.noChangesNeeded && !viewModel.rewrittenText.isEmpty
@@ -196,6 +295,7 @@ struct InlineRewriteView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             headerRow
+                .zIndex(10)
 
             OperationSegmentBar(
                 selection: $viewModel.operation,
@@ -266,7 +366,7 @@ struct InlineRewriteView: View {
                 .frame(height: 44)
                 .opacity(0.001)
 
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
                     .scaledToFit()
@@ -283,50 +383,49 @@ struct InlineRewriteView: View {
 
                 Spacer(minLength: 0)
 
-                Button {
+                PopupFeatureToggleButton(
+                    isOn: smartAIEnabled,
+                    systemImage: smartAIEnabled ? "sparkles" : "sparkle",
+                    label: "SmartAI",
+                    accessibilityLabel: "Smart AI",
+                    helpText: smartAIEnabled
+                        ? "SmartAI is on: Textora chooses the best rewrite mode."
+                        : "SmartAI is off: Textora uses your selected rewrite mode.",
+                    activeColors: [
+                        Color(red: 0.12, green: 0.60, blue: 1.0),
+                        Color(red: 0.62, green: 0.30, blue: 1.0),
+                        Color(red: 1.0, green: 0.32, blue: 0.72)
+                    ],
+                    activeShadow: Color(red: 0.35, green: 0.70, blue: 1.0)
+                ) {
                     let previousOperation = viewModel.operation
                     smartAIEnabled.toggle()
                     viewModel.prepareOperationForMarkerWindow()
                     if previousOperation == viewModel.operation {
                         viewModel.triggerRewrite(.operationChanged)
                     }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: smartAIEnabled ? "sparkles" : "sparkle")
-                            .font(.system(size: 10, weight: .bold))
-                        Text("Smart AI")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                    .foregroundStyle(smartAIEnabled ? .white : TextoraPopupTheme.muted)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule().fill(
-                            smartAIEnabled
-                            ? LinearGradient(
-                                colors: [
-                                    Color(red: 0.12, green: 0.60, blue: 1.0),
-                                    Color(red: 0.62, green: 0.30, blue: 1.0),
-                                    Color(red: 1.0, green: 0.32, blue: 0.72)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.07), Color.white.opacity(0.07)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                    )
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(smartAIEnabled ? 0.42 : 0.10), lineWidth: 1)
-                    )
-                    .shadow(color: Color(red: 0.35, green: 0.70, blue: 1.0).opacity(smartAIEnabled ? 0.34 : 0), radius: 10, x: 0, y: 0)
                 }
-                .buttonStyle(.plain)
-                .help(smartAIEnabled ? "Smart AI recommendations enabled" : "Use last selected mode first")
+
+                PopupFeatureToggleButton(
+                    isOn: easySwitchEnabled,
+                    systemImage: easySwitchEnabled ? "keyboard.fill" : "keyboard",
+                    label: "EasySwitch",
+                    accessibilityLabel: "EasySwitch",
+                    helpText: easySwitchEnabled
+                        ? "EasySwitch is paused while this pop-up is open. Close it to correct wrong EN/RU layout."
+                        : "EasySwitch is off: click to fix wrong English/Russian layout words while typing.",
+                    activeColors: [
+                        Color(red: 0.10, green: 0.72, blue: 0.58),
+                        Color(red: 0.16, green: 0.58, blue: 1.0)
+                    ],
+                    activeShadow: Color(red: 0.12, green: 0.72, blue: 0.66),
+                    isTemporarilyPaused: easySwitchEnabled
+                ) {
+                    easySwitchEnabled.toggle()
+                    UserDefaults.standard.set(easySwitchEnabled, forKey: AppViewModel.SettingsKeys.easySwitchEnabled)
+                    NotificationCenter.default.post(name: EasySwitchManager.settingsDidChangeNotification, object: nil)
+                    AppCoordinator.shared.applyEasySwitchSettingsNow(forceRestart: false)
+                }
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")

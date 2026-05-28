@@ -7,6 +7,10 @@ final class TextoraAppDelegate: NSObject, NSApplicationDelegate {
         AppCoordinator.shared.startAfterApplicationReady()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        AppCoordinator.shared.warmEasySwitchIfPossible()
+    }
+
     /// Menu bar (LSUIElement) apps otherwise quit when Settings is closed — no dock icon to "reopen".
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false

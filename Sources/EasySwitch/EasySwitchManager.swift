@@ -310,20 +310,23 @@ final class EasySwitchManager {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             NotificationCenter.default.post(name: Self.replacementDidBeginNotification, object: nil)
-            self.replacementService.replacePreviousWord(
-                original: decision.original,
-                replacement: decision.converted,
-                delimiter: boundary.delimiter,
-                targetKeyboardLayout: self.targetKeyboardLayout(for: decision),
-                switchKeyboardLayout: decision.kind == .layout,
-                typedDelimiterAlreadyPassedThrough: true
-            ) { [weak self] in
-                self?.lock.withLock {
-                    self?.wordBuffer.clear()
-                    self?.suppressInputUntil = Date().addingTimeInterval(0.25)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                guard let self else { return }
+                self.replacementService.replacePreviousWord(
+                    original: decision.original,
+                    replacement: decision.converted,
+                    delimiter: boundary.delimiter,
+                    targetKeyboardLayout: self.targetKeyboardLayout(for: decision),
+                    switchKeyboardLayout: decision.kind == .layout,
+                    typedDelimiterAlreadyPassedThrough: true
+                ) { [weak self] in
+                    self?.lock.withLock {
+                        self?.wordBuffer.clear()
+                        self?.suppressInputUntil = Date().addingTimeInterval(0.25)
+                    }
+                    NotificationCenter.default.post(name: Self.replacementDidEndNotification, object: nil)
+                    self?.showNotificationIfNeeded(original: decision.original, replacement: decision.converted)
                 }
-                NotificationCenter.default.post(name: Self.replacementDidEndNotification, object: nil)
-                self?.showNotificationIfNeeded(original: decision.original, replacement: decision.converted)
             }
         }
         return Unmanaged.passUnretained(event)

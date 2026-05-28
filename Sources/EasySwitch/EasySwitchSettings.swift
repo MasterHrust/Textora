@@ -48,6 +48,7 @@ struct EasySwitchSettings {
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
+            Keys.enabled: true,
             Keys.autoCorrectWrongLayout: true,
             Keys.minimumWordLength: 3,
             Keys.confidenceThreshold: 0.65,

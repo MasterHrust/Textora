@@ -111,18 +111,18 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
-        configureEasySwitch()
+        configureEasySwitch(forceRestart: false)
         if !hasAnyConfiguredKey() {
             shouldOpenAccessibilityAfterOnboarding = true
             showOnboardingWindow()
             return
         }
         if !textAccess.hasAccessibilityPermission() {
-            configureEasySwitch()
+            configureEasySwitch(forceRestart: false)
             showAccessibilityWizardDeferred()
             return
         }
-        configureEasySwitch()
+        configureEasySwitch(forceRestart: false)
         floatingHelper?.start()
         showOnboardingIfNeededOnLaunch()
     }
@@ -135,45 +135,65 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.configureEasySwitch()
+                self?.configureEasySwitch(forceRestart: false)
             }
         }
     }
 
-    private func configureEasySwitch() {
+    func applyEasySwitchSettingsNow(forceRestart: Bool = false) {
+        configureEasySwitch(forceRestart: forceRestart)
+    }
+
+    func warmEasySwitchIfPossible() {
+        configureEasySwitch(forceRestart: false)
+    }
+
+    private func configureEasySwitch(forceRestart: Bool) {
         EasySwitchSettings.registerDefaults()
-        let isEnabled = UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.easySwitchEnabled)
-        guard isEnabled, textAccess.hasAccessibilityPermission() else {
-            cancelEasySwitchStartRetry()
-            easySwitch.stop()
+        easySwitch.reloadSettings()
+        guard textAccess.hasAccessibilityPermission() else {
+            if easySwitch.isRunning {
+                easySwitch.stop()
+            }
+            scheduleEasySwitchStartRetry(reason: "accessibilityUnavailable")
             return
         }
-        easySwitch.reloadSettings()
+        if forceRestart {
+            cancelEasySwitchStartRetry()
+            easySwitch.stop()
+        }
+
+        guard !easySwitch.isRunning else {
+            cancelEasySwitchStartRetry()
+            return
+        }
+
         if easySwitch.start() {
             cancelEasySwitchStartRetry()
         } else {
-            scheduleEasySwitchStartRetry()
+            scheduleEasySwitchStartRetry(reason: "startFailed")
         }
     }
 
-    private func scheduleEasySwitchStartRetry() {
+    private func scheduleEasySwitchStartRetry(reason: String) {
         guard easySwitchStartRetryTask == nil else { return }
-        guard easySwitchStartRetryCount < 6 else {
-            textoraDiagLog("easySwitch", "start retry abandoned attempts=\(easySwitchStartRetryCount)")
+        guard easySwitchStartRetryCount < 12 else {
+            textoraDiagLog("easySwitch", "start retry abandoned attempts=\(easySwitchStartRetryCount) reason=\(reason)")
             return
         }
         easySwitchStartRetryCount += 1
-        let delay = min(8.0, pow(2.0, Double(easySwitchStartRetryCount - 1)) * 0.5)
+        let retryDelays: [TimeInterval] = [0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0, 1.0, 1.5, 2.0, 3.0, 5.0]
+        let delay = retryDelays[min(easySwitchStartRetryCount - 1, retryDelays.count - 1)]
         let task = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 self?.easySwitchStartRetryTask = nil
-                self?.configureEasySwitch()
+                self?.configureEasySwitch(forceRestart: false)
             }
         }
         easySwitchStartRetryTask = task
         textoraDiagLog(
             "easySwitch",
-            "start retry scheduled attempt=\(easySwitchStartRetryCount) delay=\(String(format: "%.1f", delay))"
+            "start retry scheduled attempt=\(easySwitchStartRetryCount) delay=\(String(format: "%.2f", delay)) reason=\(reason)"
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
@@ -230,7 +250,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         accessibilityWizardWindow = nil
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
-        configureEasySwitch()
+        configureEasySwitch(forceRestart: false)
         floatingHelper?.start()
         showOnboardingIfNeededOnLaunch(afterAccessibility: true)
     }
@@ -240,7 +260,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             accessibilityWizardWindow = nil
             KeychainHelper.migrateIfNeeded()
             KeychainHelper.warmUpCache()
-            configureEasySwitch()
+            configureEasySwitch(forceRestart: false)
             floatingHelper?.start()
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
             return
@@ -471,6 +491,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                         self.shouldOpenAccessibilityAfterOnboarding = false
                         self.showAccessibilityWizardDeferred()
                     } else {
+                        self.configureEasySwitch(forceRestart: false)
                         self.floatingHelper?.start()
                     }
                 }
