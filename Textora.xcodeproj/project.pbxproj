@@ -53,6 +53,10 @@
 		F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */; };
 		F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 691BD7E2D55CD14AA7B983F8 /* helper-icon.png */; };
 		FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8F80F4CABD08C9775382E58 /* Models.swift */; };
+		01A1B2C3D4E5F60718293A11 /* SelectionAssistantController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */; };
+		01A1B2C3D4E5F60718293A12 /* SelectionAssistantSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */; };
+		01A1B2C3D4E5F60718293A13 /* SelectionAssistantViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */; };
+		01A1B2C3D4E5F60718293A14 /* SelectionToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -107,6 +111,10 @@
 		F889CFF6CF88B62CE4585E1D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F8F80F4CABD08C9775382E58 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		FDFA3B38183BC8A18BB52F2B /* AIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIClient.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantController.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantSettings.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantViewModel.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionToolbarView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -174,9 +182,21 @@
 				9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */,
 				4072587BAA8858F50B0BEF4D /* TextoraApp.swift */,
 				641D1A2A1ED1C3F6CC370219 /* TextoraAppDelegate.swift */,
+				01A1B2C3D4E5F60718293A21 /* SelectionAssistant */,
 				FA55E9D0E2CEA9D5DCFDE5AD /* EasySwitch */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		01A1B2C3D4E5F60718293A21 /* SelectionAssistant */ = {
+			isa = PBXGroup;
+			children = (
+				01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */,
+				01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */,
+				01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */,
+				01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */,
+			);
+			path = SelectionAssistant;
 			sourceTree = "<group>";
 		};
 		E54D2E17A9C3F08C1353B4FB /* Products */ = {
@@ -344,6 +364,10 @@
 				C196E96AD4B703765CB5CA65 /* MarkerViews.swift in Sources */,
 				FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */,
 				8B3BA22F61CA18A86D3F35EC /* ReplacementService.swift in Sources */,
+				01A1B2C3D4E5F60718293A11 /* SelectionAssistantController.swift in Sources */,
+				01A1B2C3D4E5F60718293A12 /* SelectionAssistantSettings.swift in Sources */,
+				01A1B2C3D4E5F60718293A13 /* SelectionAssistantViewModel.swift in Sources */,
+				01A1B2C3D4E5F60718293A14 /* SelectionToolbarView.swift in Sources */,
 				1BC6850DC9195C1BBBE7E7E4 /* TextAccessService.swift in Sources */,
 				A315AADAD3FB2D3F434A2BC3 /* TextoraApp.swift in Sources */,
 				170DAD722EF2B9AE0A74E034 /* TextoraAppDelegate.swift in Sources */,

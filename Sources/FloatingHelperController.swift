@@ -80,6 +80,7 @@ final class FloatingHelperController {
     private var extraMarkerPanels: [NSPanel] = []
     private var hoverCardPanel: NSPanel?
     private var timer: Timer?
+    private var isRunning = false
     private var workspaceActivationObserver: NSObjectProtocol?
     private var easySwitchBeginObserver: NSObjectProtocol?
     private var easySwitchEndObserver: NSObjectProtocol?
@@ -382,6 +383,7 @@ final class FloatingHelperController {
     }
 
     func start() {
+        isRunning = true
         if panel == nil {
             createPanel()
         }
@@ -404,6 +406,23 @@ final class FloatingHelperController {
         installWorkspaceActivationObserverIfNeeded()
         installEasySwitchMutationObserversIfNeeded()
         updateVisibilityAndPosition()
+    }
+
+    func stop() {
+        isRunning = false
+        timer?.invalidate()
+        timer = nil
+        hideFloatingHelperImmediately()
+        hideMarkerAndCard()
+        hideDragHintPanels()
+        suggestionState = .neutral
+        latestSuggestion = ""
+        latestSuggestionOptions = []
+        latestContext = nil
+        latestSignature = nil
+        latestIssues = []
+        isEvaluating = false
+        setKeepBelowWindow(nil)
     }
 
     private func installWorkspaceActivationObserverIfNeeded() {
@@ -442,6 +461,10 @@ final class FloatingHelperController {
     }
 
     private func handleWorkspaceDidActivate(_ notification: Notification) {
+        guard isRunning else {
+            hideFloatingHelperImmediately()
+            return
+        }
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         let bundleID = app?.bundleIdentifier ?? ""
         guard bundleID != ourBundleID else { return }
@@ -465,7 +488,7 @@ final class FloatingHelperController {
 
         updateVisibilityAndPosition()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            guard let self, !self.isEvaluating, !self.isDragging else { return }
+            guard let self, self.isRunning, !self.isEvaluating, !self.isDragging else { return }
             self.evaluateCurrentText()
         }
     }
@@ -623,6 +646,10 @@ final class FloatingHelperController {
     }
 
     private func updateVisibilityAndPosition() {
+        guard isRunning else {
+            hideFloatingHelperImmediately()
+            return
+        }
         syncRuntimeSettingsIfNeeded()
         if isEasySwitchMutationSuppressed() {
             postStatus("Waiting for EasySwitch correction")

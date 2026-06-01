@@ -1047,8 +1047,11 @@ final class TextAccessService {
         )
     }
 
-    private func readClipboardAfterCopyIfSelectionLikely() -> String? {
-        if isGoogleSheetsFrontmost() {
+    private func readClipboardAfterCopyIfSelectionLikely(
+        allowGoogleSheetsGrid: Bool = false,
+        acceptUnchangedPasteboard: Bool = false
+    ) -> String? {
+        if isGoogleSheetsFrontmost(), !allowGoogleSheetsGrid {
             let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
             guard isActiveCellEditor else {
                 textoraDiagLog("clipboardProbe", "blocked in Google Sheets outside active cell editor")
@@ -1074,7 +1077,7 @@ final class TextAccessService {
             usleep(50_000)
             if pasteboard.changeCount != oldChangeCount { break }
         }
-        guard pasteboard.changeCount != oldChangeCount else { return nil }
+        guard pasteboard.changeCount != oldChangeCount || acceptUnchangedPasteboard else { return nil }
         let copied = extractPlainTextFromPasteboard(pasteboard)
         restorePasteboard(pasteboard, snapshot: snapshot)
         return copied
@@ -1161,9 +1164,25 @@ final class TextAccessService {
     func selectedTextContextAnyFocus(
         minLength: Int = 1,
         maxLength: Int = 1600,
-        allowClipboardFallback: Bool = true
+        allowClipboardFallback: Bool = true,
+        allowBrowserClipboardSelection: Bool = false
     ) -> FocusedTextContext? {
-        guard let start = focusedElement() else { return nil }
+        if allowClipboardFallback,
+           allowBrowserClipboardSelection,
+           let front = frontmostAppInfo(),
+           isBrowserBundleID(front.bundleID) {
+            return selectedTextContextFromFrontmostClipboardSelection(
+                minLength: minLength,
+                maxLength: maxLength
+            )
+        }
+        guard let start = focusedElement() else {
+            guard allowClipboardFallback, allowBrowserClipboardSelection else { return nil }
+            return selectedTextContextFromFrontmostClipboardSelection(
+                minLength: minLength,
+                maxLength: maxLength
+            )
+        }
         var element: AXUIElement? = start
         var depth = 0
         while let focused = element, depth < 24 {
@@ -1193,9 +1212,13 @@ final class TextAccessService {
             var selected = selectedAX
             if selected.isEmpty, allowClipboardFallback, bundleID != "com.apple.mail" {
                 // Mail/Electron can expose selection without returning AXSelectedText; use robust live-copy probe.
-                selected = readClipboardAfterCopyIfSelectionLikely()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                selected = readClipboardAfterCopyIfSelectionLikely(
+                    allowGoogleSheetsGrid: allowBrowserClipboardSelection
+                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if selected.isEmpty {
-                    selected = readViaClipboardFallback().trimmingCharacters(in: .whitespacesAndNewlines)
+                    selected = readViaClipboardFallback(
+                        allowGoogleSheetsGrid: allowBrowserClipboardSelection
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
                 }
             }
 
@@ -1225,13 +1248,18 @@ final class TextAccessService {
             depth += 1
         }
         // Some editors (notably Mail) may hide AX selectedRange but still allow Cmd+C for highlighted text.
-        if allowClipboardFallback,
-           frontmostAppInfo()?.bundleID != "com.apple.mail",
-           let copied = readClipboardAfterCopyIfSelectionLikely()?.trimmingCharacters(in: .whitespacesAndNewlines),
-           copied.count >= minLength {
+        if allowClipboardFallback {
             var pid: pid_t = 0
             AXUIElementGetPid(start, &pid)
             let bundleID = resolvedBundleID(forOwningPID: pid)
+            guard bundleID != "com.apple.mail",
+                  appConsentStatus(for: bundleID) == .allowed,
+                  let copied = readClipboardAfterCopyIfSelectionLikely(
+                    allowGoogleSheetsGrid: allowBrowserClipboardSelection
+                  )?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  copied.count >= minLength else {
+                return nil
+            }
             let frame = focusedWindowFrame() ?? rectForTextContext(anchorElement: start)
             let anchor = TextAnchor(
                 rect: frame,
@@ -1251,6 +1279,48 @@ final class TextAccessService {
             )
         }
         return nil
+    }
+
+    private func selectedTextContextFromFrontmostClipboardSelection(
+        minLength: Int,
+        maxLength: Int
+    ) -> FocusedTextContext? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let bundleID = app.bundleIdentifier,
+              !bundleID.isEmpty,
+              appConsentStatus(for: bundleID) == .allowed,
+              bundleID != "com.apple.mail" else {
+            return nil
+        }
+        guard let copied = readClipboardAfterCopyIfSelectionLikely(
+            allowGoogleSheetsGrid: true,
+            acceptUnchangedPasteboard: true
+        )?.trimmingCharacters(in: .whitespacesAndNewlines),
+              copied.count >= minLength else {
+            return nil
+        }
+        let pid = app.processIdentifier
+        let target = AXUIElementCreateApplication(pid)
+        let frame = focusedWindowFrame()
+            ?? frontmostBrowserCGWindowFrame()
+            ?? NSScreen.main?.visibleFrame
+            ?? .zero
+        let anchor = TextAnchor(
+            rect: frame,
+            source: .clipboardFallback,
+            confidence: .weak,
+            rawRect: nil
+        )
+        return FocusedTextContext(
+            text: clipToMaxLength(copied, maxLength: maxLength),
+            frame: frame,
+            usesSelection: true,
+            selectedRange: nil,
+            targetElement: target,
+            targetAppPID: pid,
+            targetBundleID: bundleID,
+            anchor: anchor
+        )
     }
 
     func manualCaptureSelectionFromMail(minLength: Int = 1, maxLength: Int = 1600) -> MailManualCaptureResult {
@@ -1475,6 +1545,14 @@ final class TextAccessService {
             + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
             + "strategy=unifiedPhysicalRewrite"
         )
+        if context.usesSelection,
+           context.selectedRange == nil,
+           context.anchor.source == .clipboardFallback,
+           prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID),
+           applyClipboardSelectionPasteReplace(rewritten, basedOn: context) {
+            textoraDiagLog("applyRewrittenText", "success via clipboardSelectionPasteReplace")
+            return .success
+        }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyRewrittenText", "success via unifiedPhysicalRewrite")
             return .success
@@ -6070,8 +6148,8 @@ end tell
         return score
     }
 
-    private func readViaClipboardFallback() -> String {
-        if isGoogleSheetsFrontmost() {
+    private func readViaClipboardFallback(allowGoogleSheetsGrid: Bool = false) -> String {
+        if isGoogleSheetsFrontmost(), !allowGoogleSheetsGrid {
             let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
             guard isActiveCellEditor else {
                 textoraDiagLog("clipboardFallback", "blocked in Google Sheets outside active cell editor")

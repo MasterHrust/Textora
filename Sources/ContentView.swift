@@ -27,6 +27,7 @@ struct ContentView: View {
             providerSection
             Toggle("Detailed corrections", isOn: $viewModel.detailedCorrectionsEnabled)
                 .toggleStyle(.checkbox)
+            betaFeatureSection
             Divider().padding(.vertical, 4)
             easySwitchSection
             Button("Save settings") {
@@ -38,6 +39,16 @@ struct ContentView: View {
             appPermissionsSection
         }
         .padding(12)
+    }
+
+    private var betaFeatureSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Beta-Feature: selection toolbar", isOn: $viewModel.selectionAssistantBetaEnabled)
+                .toggleStyle(.checkbox)
+            Text("Shows a compact toolbar only when text is selected. While enabled, Textora pauses the floating bubble and auto-whole rewrite flow; EasySwitch can still work independently.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var providerSection: some View {

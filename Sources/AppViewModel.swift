@@ -6,6 +6,7 @@ final class AppViewModel: ObservableObject {
     enum SettingsKeys {
         static let detailedCorrectionsEnabled = "overlay.detailedCorrections.enabled"
         static let smartAIEnabled = "overlay.smartAI.enabled"
+        static let selectionAssistantBetaEnabled = SelectionAssistantSettings.Keys.enabled
         static let easySwitchEnabled = EasySwitchSettings.Keys.enabled
         static let easySwitchAutoCorrectWrongLayout = EasySwitchSettings.Keys.autoCorrectWrongLayout
         static let easySwitchChangesKeyboardLayout = EasySwitchSettings.Keys.changesKeyboardLayout
@@ -52,6 +53,13 @@ final class AppViewModel: ObservableObject {
     @Published var appConsentRows: [AppConsentRow] = []
     @Published var hasAccessibilityPermission: Bool = false
     @Published var detailedCorrectionsEnabled: Bool = false
+    @Published var selectionAssistantBetaEnabled: Bool = false {
+        didSet {
+            guard !isReloadingFromDefaults else { return }
+            guard oldValue != selectionAssistantBetaEnabled else { return }
+            SelectionAssistantSettings.setEnabled(selectionAssistantBetaEnabled)
+        }
+    }
     @Published var easySwitchEnabled: Bool = false
     @Published var easySwitchAutoCorrectWrongLayout: Bool = true
     @Published var easySwitchChangesKeyboardLayout: Bool = false
@@ -84,6 +92,7 @@ final class AppViewModel: ObservableObject {
         isReloadingFromDefaults = true
         defer { isReloadingFromDefaults = false }
         EasySwitchSettings.registerDefaults()
+        SelectionAssistantSettings.registerDefaults()
         provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
         model = UserDefaults.standard.string(forKey: "model") ?? defaultModel(for: provider)
         openAIKey = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
@@ -92,6 +101,7 @@ final class AppViewModel: ObservableObject {
         customToken = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
         customOpenAIBaseURL = UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? ""
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
+        selectionAssistantBetaEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.selectionAssistantBetaEnabled)
         easySwitchEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchEnabled)
         easySwitchAutoCorrectWrongLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
         easySwitchChangesKeyboardLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
@@ -181,6 +191,7 @@ final class AppViewModel: ObservableObject {
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
         )
         UserDefaults.standard.set(detailedCorrectionsEnabled, forKey: SettingsKeys.detailedCorrectionsEnabled)
+        UserDefaults.standard.set(selectionAssistantBetaEnabled, forKey: SettingsKeys.selectionAssistantBetaEnabled)
         UserDefaults.standard.set(easySwitchEnabled, forKey: SettingsKeys.easySwitchEnabled)
         UserDefaults.standard.set(easySwitchAutoCorrectWrongLayout, forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
         UserDefaults.standard.set(easySwitchChangesKeyboardLayout, forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
@@ -200,6 +211,7 @@ final class AppViewModel: ObservableObject {
         UserDefaults.standard.set(protectedWords, forKey: "easySwitch.userDictionary.whitelist")
         UserDefaults.standard.set([], forKey: "easySwitch.userDictionary.ignoredWords")
         NotificationCenter.default.post(name: EasySwitchManager.settingsDidChangeNotification, object: nil)
+        NotificationCenter.default.post(name: SelectionAssistantSettings.settingsDidChangeNotification, object: nil)
         KeychainHelper.saveAll(
             openAI: openAIKey,
             gemini: geminiKey,
@@ -222,6 +234,7 @@ final class AppViewModel: ObservableObject {
             customToken,
             customOpenAIBaseURL,
             String(detailedCorrectionsEnabled),
+            String(selectionAssistantBetaEnabled),
             String(easySwitchEnabled),
             String(easySwitchAutoCorrectWrongLayout),
             String(easySwitchChangesKeyboardLayout),

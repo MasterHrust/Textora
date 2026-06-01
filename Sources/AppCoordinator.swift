@@ -9,6 +9,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private static let onboardingSkippedKey = "onboarding.byok.skipped"
 
     private var floatingHelper: FloatingHelperController?
+    private let selectionAssistant = SelectionAssistantController()
     private let rewritePanel = InlineRewritePanelController()
     private var settingsWindow: NSWindow?
     private var settingsViewModel: AppViewModel?
@@ -19,6 +20,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private let textAccess = TextAccessService()
     private let easySwitch = EasySwitchManager()
     private var easySwitchSettingsObserver: NSObjectProtocol?
+    private var selectionAssistantSettingsObserver: NSObjectProtocol?
     private var easySwitchStartRetryTask: DispatchWorkItem?
     private var easySwitchStartRetryCount = 0
     private var isHelperHovered = false
@@ -38,6 +40,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if let easySwitchSettingsObserver {
             NotificationCenter.default.removeObserver(easySwitchSettingsObserver)
         }
+        if let selectionAssistantSettingsObserver {
+            NotificationCenter.default.removeObserver(selectionAssistantSettingsObserver)
+        }
         easySwitch.stop()
     }
 
@@ -50,6 +55,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     func start() {
         installEasySwitchSettingsObserverIfNeeded()
+        installSelectionAssistantSettingsObserverIfNeeded()
         rewritePanel.onHoverChanged = { [weak self] hovering in
             self?.handleRewritePopupHoverChanged(hovering)
         }
@@ -71,6 +77,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         consentPrompt.onHoverChanged = { [weak self] hovering in
             self?.handleConsentPromptHoverChanged(hovering)
+        }
+        selectionAssistant.onConsentRequired = { [weak self] anchor, bundleID in
+            self?.handleSelectionAssistantConsentRequired(anchor: anchor, bundleID: bundleID)
         }
         if floatingHelper == nil {
             floatingHelper = FloatingHelperController(
@@ -114,16 +123,18 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         configureEasySwitch(forceRestart: false)
         if !hasAnyConfiguredKey() {
             shouldOpenAccessibilityAfterOnboarding = true
+            configurePrimaryInteractionMode()
             showOnboardingWindow()
             return
         }
         if !textAccess.hasAccessibilityPermission() {
             configureEasySwitch(forceRestart: false)
+            configurePrimaryInteractionMode()
             showAccessibilityWizardDeferred()
             return
         }
         configureEasySwitch(forceRestart: false)
-        floatingHelper?.start()
+        configurePrimaryInteractionMode()
         showOnboardingIfNeededOnLaunch()
     }
 
@@ -144,8 +155,49 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         configureEasySwitch(forceRestart: forceRestart)
     }
 
+    private func installSelectionAssistantSettingsObserverIfNeeded() {
+        guard selectionAssistantSettingsObserver == nil else { return }
+        selectionAssistantSettingsObserver = NotificationCenter.default.addObserver(
+            forName: SelectionAssistantSettings.settingsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.configurePrimaryInteractionMode()
+            }
+        }
+    }
+
+    private var isSelectionAssistantBetaEnabled: Bool {
+        SelectionAssistantSettings.registerDefaults()
+        return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled)
+    }
+
+    private func configurePrimaryInteractionMode() {
+        if isSelectionAssistantBetaEnabled {
+            cancelScheduledFloatingPanelsHide()
+            isHelperHovered = false
+            isRewritePopupHovered = false
+            isConsentPromptHovered = false
+            rewritePanel.hide()
+            consentPrompt.hide()
+            floatingHelper?.setKeepBelowWindow(nil)
+            floatingHelper?.stop()
+            selectionAssistant.start()
+            return
+        }
+
+        selectionAssistant.stop()
+        guard hasAnyConfiguredKey(), textAccess.hasAccessibilityPermission() else {
+            floatingHelper?.stop()
+            return
+        }
+        floatingHelper?.start()
+    }
+
     func warmEasySwitchIfPossible() {
         configureEasySwitch(forceRestart: false)
+        configurePrimaryInteractionMode()
     }
 
     private func configureEasySwitch(forceRestart: Bool) {
@@ -251,7 +303,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
         configureEasySwitch(forceRestart: false)
-        floatingHelper?.start()
+        configurePrimaryInteractionMode()
         showOnboardingIfNeededOnLaunch(afterAccessibility: true)
     }
 
@@ -261,7 +313,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             KeychainHelper.migrateIfNeeded()
             KeychainHelper.warmUpCache()
             configureEasySwitch(forceRestart: false)
-            floatingHelper?.start()
+            configurePrimaryInteractionMode()
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
             return
         }
@@ -278,6 +330,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func handleFloatingHoverChanged(hovering: Bool, frame: CGRect) {
+        guard !isSelectionAssistantBetaEnabled else {
+            rewritePanel.hide()
+            consentPrompt.hide()
+            floatingHelper?.setKeepBelowWindow(nil)
+            return
+        }
         isHelperHovered = hovering
         if hovering {
             cancelScheduledFloatingPanelsHide()
@@ -394,6 +452,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         textAccess.setAppConsentStatus(.allowed, for: bundleID)
         consentPrompt.hide()
+        if isSelectionAssistantBetaEnabled {
+            selectionAssistant.refreshAfterConsentChange()
+            return
+        }
         if let frame = floatingHelper?.currentFrame, !frame.isEmpty {
             showRewritePopupFromFloatingState(frame: frame)
         }
@@ -408,11 +470,28 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         textAccess.setAppConsentStatus(.denied, for: bundleID)
         rewritePanel.hide()
         consentPrompt.hide()
+        if isSelectionAssistantBetaEnabled {
+            selectionAssistant.refreshAfterConsentChange()
+        }
     }
 
     private func handleConsentLater() {
         isConsentPromptHovered = false
         consentPrompt.hide()
+        if isSelectionAssistantBetaEnabled {
+            selectionAssistant.suppressConsentPromptBriefly()
+        }
+    }
+
+    private func handleSelectionAssistantConsentRequired(anchor: CGRect, bundleID: String) {
+        guard isSelectionAssistantBetaEnabled else { return }
+        cancelScheduledFloatingPanelsHide()
+        rewritePanel.hide()
+        floatingHelper?.setKeepBelowWindow(nil)
+
+        let frontmost = textAccess.frontmostAppInfo()
+        let appName = frontmost?.bundleID == bundleID ? frontmost?.displayName ?? bundleID : bundleID
+        consentPrompt.show(near: anchor, appName: appName, targetBundleID: bundleID)
     }
 
     func showSettingsWindow() {
@@ -492,7 +571,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                         self.showAccessibilityWizardDeferred()
                     } else {
                         self.configureEasySwitch(forceRestart: false)
-                        self.floatingHelper?.start()
+                        self.configurePrimaryInteractionMode()
                     }
                 }
             )
