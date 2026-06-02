@@ -5,49 +5,54 @@ struct SelectionToolbarView: View {
     @ObservedObject var viewModel: SelectionAssistantViewModel
     let onApply: () -> Void
 
-    private let panelWidth: CGFloat = 660
+    @AppStorage(AppViewModel.SettingsKeys.easySwitchEnabled) private var easySwitchEnabled = true
+    @State private var isLogoHovering = false
+    @State private var isEasySwitchHovering = false
+    @State private var showEasySwitchTooltip = false
+    @State private var easySwitchTooltipTask: DispatchWorkItem?
+
+    private let panelWidth: CGFloat = 680
+    static let tooltipTopReserve: CGFloat = 54
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            topRow
+        ZStack(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 7) {
+                topRow
 
-            if viewModel.isLanguagePickerExpanded {
-                compactLanguageDropdown
-            } else if viewModel.hasTranslationContent {
-                translationPanel
-            } else if viewModel.hasRewritePreview {
-                rewritePreviewPanel
+                if viewModel.isLanguagePickerExpanded {
+                    compactLanguageDropdown
+                } else if viewModel.hasTranslationContent {
+                    translationPanel
+                } else if viewModel.hasRewritePreview {
+                    rewritePreviewPanel
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .frame(width: panelWidth, height: panelHeight, alignment: .topLeading)
+            .background(panelBackground)
+            .overlay(panelStroke)
+            .shadow(color: Color(red: 0.36, green: 0.67, blue: 1.0).opacity(0.10), radius: 22, x: 0, y: 0)
+            .shadow(color: .black.opacity(0.42), radius: 22, x: 0, y: 14)
+            .offset(y: Self.tooltipTopReserve)
+
+            if showEasySwitchTooltip {
+                SelectionToolbarTooltip(text: easySwitchTooltipText)
+                    .offset(x: 58, y: 2)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+                    .allowsHitTesting(false)
+                    .zIndex(40)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .frame(width: panelWidth, height: panelHeight, alignment: .topLeading)
-        .background(panelBackground)
-        .overlay(panelStroke)
-        .shadow(color: Color(red: 0.36, green: 0.67, blue: 1.0).opacity(0.10), radius: 22, x: 0, y: 0)
-        .shadow(color: .black.opacity(0.42), radius: 22, x: 0, y: 14)
+        .frame(width: panelWidth, height: panelHeight + Self.tooltipTopReserve, alignment: .topLeading)
     }
 
     private var topRow: some View {
         HStack(spacing: 7) {
-            HStack(spacing: 6) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.24, green: 0.73, blue: 1.0),
-                                Color(red: 0.88, green: 0.21, blue: 0.92)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                Text("Ask")
-                    .font(.system(size: 14.5, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.94))
-            }
-            .frame(width: 56, alignment: .leading)
+            textoraLogo
+                .frame(width: 42, alignment: .leading)
+
+            easySwitchButton
 
             toolbarDivider
 
@@ -97,6 +102,125 @@ struct SelectionToolbarView: View {
             .buttonStyle(.plain)
             .disabled(!viewModel.canTranslate)
         }
+    }
+
+    private var textoraLogo: some View {
+        Group {
+            if let image = NSImage(named: "helper-icon") {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 31, height: 31)
+            } else {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.24, green: 0.73, blue: 1.0),
+                                Color(red: 0.88, green: 0.21, blue: 0.92)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+        }
+        .scaleEffect(isLogoHovering ? 1.13 : 1.0)
+        .padding(5)
+        .background {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.12, green: 0.66, blue: 1.0).opacity(isLogoHovering ? 0.26 : 0.0),
+                                Color(red: 0.92, green: 0.20, blue: 0.94).opacity(isLogoHovering ? 0.24 : 0.0)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Circle()
+                    .stroke(Color.white.opacity(isLogoHovering ? 0.28 : 0.0), lineWidth: 1)
+            }
+            .shadow(color: Color(red: 0.70, green: 0.34, blue: 1.0).opacity(isLogoHovering ? 0.34 : 0), radius: 12, x: 0, y: 0)
+        }
+        .contentShape(Circle())
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.64)) {
+                isLogoHovering = hovering
+            }
+        }
+        .help("Textora")
+    }
+
+    private var easySwitchButton: some View {
+        Button {
+            easySwitchEnabled.toggle()
+            UserDefaults.standard.set(easySwitchEnabled, forKey: AppViewModel.SettingsKeys.easySwitchEnabled)
+            NotificationCenter.default.post(name: EasySwitchManager.settingsDidChangeNotification, object: nil)
+            AppCoordinator.shared.applyEasySwitchSettingsNow(forceRestart: false)
+        } label: {
+            Image(systemName: easySwitchEnabled ? "keyboard.fill" : "keyboard")
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundStyle(easySwitchEnabled ? .white : Color.white.opacity(0.54))
+                .frame(width: 31, height: 31)
+                .background(
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: easySwitchEnabled
+                                    ? [
+                                        Color(red: 0.10, green: 0.72, blue: 0.58),
+                                        Color(red: 0.16, green: 0.58, blue: 1.0)
+                                    ]
+                                    : [Color.white.opacity(0.07), Color.white.opacity(0.045)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(easySwitchEnabled ? 0.30 : 0.10), lineWidth: 1)
+                )
+                .shadow(color: Color(red: 0.10, green: 0.72, blue: 0.62).opacity(easySwitchEnabled ? 0.24 : 0), radius: 9, x: 0, y: 0)
+                .scaleEffect(isEasySwitchHovering ? 1.07 : 1.0)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            handleEasySwitchHover(hovering)
+        }
+        .accessibilityLabel("EasySwitch")
+        .accessibilityValue(easySwitchEnabled ? "On" : "Off")
+        .zIndex(showEasySwitchTooltip ? 30 : 1)
+    }
+
+    private var easySwitchTooltipText: String {
+        easySwitchEnabled
+            ? "EasySwitch is on. Click to turn off wrong English/Russian layout correction."
+            : "EasySwitch is off. Click to fix wrong English/Russian layout words while typing."
+    }
+
+    private func handleEasySwitchHover(_ hovering: Bool) {
+        easySwitchTooltipTask?.cancel()
+        easySwitchTooltipTask = nil
+        withAnimation(.easeOut(duration: 0.12)) {
+            isEasySwitchHovering = hovering
+            if !hovering {
+                showEasySwitchTooltip = false
+            }
+        }
+        guard hovering else { return }
+        let task = DispatchWorkItem {
+            withAnimation(.easeOut(duration: 0.14)) {
+                showEasySwitchTooltip = true
+            }
+        }
+        easySwitchTooltipTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: task)
     }
 
     private func operationButton(_ operation: RewriteOperation) -> some View {
@@ -364,16 +488,17 @@ struct SelectionToolbarView: View {
     }
 
     private var panelHeight: CGFloat {
+        let baseHeight: CGFloat
         if viewModel.isLanguagePickerExpanded {
-            return 132
+            baseHeight = 170
+        } else if viewModel.hasTranslationContent {
+            baseHeight = 164
+        } else if viewModel.hasRewritePreview {
+            baseHeight = 164
+        } else {
+            baseHeight = 50
         }
-        if viewModel.hasTranslationContent {
-            return 164
-        }
-        if viewModel.hasRewritePreview {
-            return 164
-        }
-        return 50
+        return baseHeight
     }
 
     @ViewBuilder
@@ -434,6 +559,30 @@ struct SelectionToolbarView: View {
         case .applying:
             return "Applying"
         }
+    }
+}
+
+private struct SelectionToolbarTooltip: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.92))
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 220)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(red: 0.07, green: 0.07, blue: 0.09).opacity(0.98))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.42), radius: 12, x: 0, y: 7)
     }
 }
 

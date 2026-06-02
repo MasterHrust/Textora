@@ -23,6 +23,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var selectionAssistantSettingsObserver: NSObjectProtocol?
     private var easySwitchStartRetryTask: DispatchWorkItem?
     private var easySwitchStartRetryCount = 0
+    private var primaryInteractionRetryTask: DispatchWorkItem?
+    private var primaryInteractionRetryCount = 0
     private var isHelperHovered = false
     private var isRewritePopupHovered = false
     private var isConsentPromptHovered = false
@@ -43,6 +45,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if let selectionAssistantSettingsObserver {
             NotificationCenter.default.removeObserver(selectionAssistantSettingsObserver)
         }
+        primaryInteractionRetryTask?.cancel()
         easySwitch.stop()
     }
 
@@ -124,17 +127,20 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if !hasAnyConfiguredKey() {
             shouldOpenAccessibilityAfterOnboarding = true
             configurePrimaryInteractionMode()
+            schedulePrimaryInteractionRetry(reason: "waitingForKey")
             showOnboardingWindow()
             return
         }
         if !textAccess.hasAccessibilityPermission() {
             configureEasySwitch(forceRestart: false)
             configurePrimaryInteractionMode()
+            schedulePrimaryInteractionRetry(reason: "accessibilityUnavailable")
             showAccessibilityWizardDeferred()
             return
         }
         configureEasySwitch(forceRestart: false)
         configurePrimaryInteractionMode()
+        schedulePrimaryInteractionRetry(reason: "launchWarmup")
         showOnboardingIfNeededOnLaunch()
     }
 
@@ -170,34 +176,70 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private var isSelectionAssistantBetaEnabled: Bool {
         SelectionAssistantSettings.registerDefaults()
-        return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled)
+        return true
     }
 
     private func configurePrimaryInteractionMode() {
-        if isSelectionAssistantBetaEnabled {
-            cancelScheduledFloatingPanelsHide()
-            isHelperHovered = false
-            isRewritePopupHovered = false
-            isConsentPromptHovered = false
-            rewritePanel.hide()
-            consentPrompt.hide()
-            floatingHelper?.setKeepBelowWindow(nil)
-            floatingHelper?.stop()
-            selectionAssistant.start()
-            return
-        }
+        cancelScheduledFloatingPanelsHide()
+        isHelperHovered = false
+        isRewritePopupHovered = false
+        isConsentPromptHovered = false
+        rewritePanel.hide()
+        consentPrompt.hide()
+        floatingHelper?.setKeepBelowWindow(nil)
+        floatingHelper?.stop()
 
-        selectionAssistant.stop()
         guard hasAnyConfiguredKey(), textAccess.hasAccessibilityPermission() else {
-            floatingHelper?.stop()
+            helperStatus = "Waiting for setup"
+            selectionAssistant.stop()
             return
         }
-        floatingHelper?.start()
+        cancelPrimaryInteractionRetry()
+        helperStatus = "Selection toolbar active"
+        selectionAssistant.start()
     }
 
     func warmEasySwitchIfPossible() {
         configureEasySwitch(forceRestart: false)
         configurePrimaryInteractionMode()
+        schedulePrimaryInteractionRetry(reason: "activationWarmup")
+    }
+
+    private func schedulePrimaryInteractionRetry(reason: String) {
+        guard hasAnyConfiguredKey() else { return }
+        guard primaryInteractionRetryTask == nil else { return }
+        guard primaryInteractionRetryCount < 8 else {
+            textoraDiagLog(
+                "selectionAssistant",
+                "primary retry abandoned attempts=\(primaryInteractionRetryCount) reason=\(reason)"
+            )
+            return
+        }
+        primaryInteractionRetryCount += 1
+        let retryDelays: [TimeInterval] = [0.10, 0.25, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0]
+        let delay = retryDelays[min(primaryInteractionRetryCount - 1, retryDelays.count - 1)]
+        let task = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.primaryInteractionRetryTask = nil
+                self.configurePrimaryInteractionMode()
+                if !self.textAccess.hasAccessibilityPermission() {
+                    self.schedulePrimaryInteractionRetry(reason: reason)
+                }
+            }
+        }
+        primaryInteractionRetryTask = task
+        textoraDiagLog(
+            "selectionAssistant",
+            "primary retry scheduled attempt=\(primaryInteractionRetryCount) delay=\(String(format: "%.2f", delay)) reason=\(reason)"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    private func cancelPrimaryInteractionRetry() {
+        primaryInteractionRetryTask?.cancel()
+        primaryInteractionRetryTask = nil
+        primaryInteractionRetryCount = 0
     }
 
     private func configureEasySwitch(forceRestart: Bool) {

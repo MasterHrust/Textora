@@ -11,10 +11,10 @@ enum AIProvider: String, CaseIterable, Identifiable {
     /// UI label; `rawValue` stays stable for UserDefaults persistence.
     var displayName: String {
         switch self {
-        case .openai: return "OpenAI"
+        case .openai: return "GPT"
         case .gemini: return "Gemini"
         case .claude: return "Claude"
-        case .other: return "Other AI"
+        case .other: return "Other"
         }
     }
 }

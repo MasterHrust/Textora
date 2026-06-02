@@ -25,9 +25,6 @@ struct ContentView: View {
     private var settingsContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             providerSection
-            Toggle("Detailed corrections", isOn: $viewModel.detailedCorrectionsEnabled)
-                .toggleStyle(.checkbox)
-            betaFeatureSection
             Divider().padding(.vertical, 4)
             easySwitchSection
             Button("Save settings") {
@@ -41,21 +38,14 @@ struct ContentView: View {
         .padding(12)
     }
 
-    private var betaFeatureSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("Beta-Feature: selection toolbar", isOn: $viewModel.selectionAssistantBetaEnabled)
-                .toggleStyle(.checkbox)
-            Text("Shows a compact toolbar only when text is selected. While enabled, Textora pauses the floating bubble and auto-whole rewrite flow; EasySwitch can still work independently.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private var providerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Settings")
                 .font(.headline)
             Text("Textora is free and works with your own AI key")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Select text to open the Textora toolbar with Fix, Shorten, Formal, Humanize, and Translate.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Provider", selection: $viewModel.provider) {
@@ -64,8 +54,11 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Model", text: $viewModel.model)
+            TextField("Model (Auto, optional)", text: $viewModel.model)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Leave empty to let Textora use the recommended model for the selected provider.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             credentialFields
             providerSetupHelp
         }
@@ -75,7 +68,7 @@ struct ContentView: View {
     private var credentialFields: some View {
         switch viewModel.provider {
         case .openai:
-            SecureField("OpenAI API key", text: $viewModel.openAIKey)
+            SecureField("GPT API key", text: $viewModel.openAIKey)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .gemini:
             SecureField("Gemini API key", text: $viewModel.geminiKey)
@@ -117,7 +110,7 @@ struct ContentView: View {
                 .frame(width: 8, height: 8)
             Text(viewModel.hasAccessibilityPermission
                  ? "Accessibility granted"
-                 : "Accessibility is required for floating helper and text replacement")
+                 : "Accessibility is required for the selection toolbar and text replacement")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -236,7 +229,7 @@ struct ContentView: View {
     private var providerSetupHelp: some View {
         switch viewModel.provider {
         case .openai:
-            Link("Get OpenAI API key", destination: URL(string: "https://platform.openai.com/api-keys")!)
+            Link("Get GPT API key", destination: URL(string: "https://platform.openai.com/api-keys")!)
                 .font(.caption)
         case .gemini:
             Link("Get Gemini API key", destination: URL(string: "https://aistudio.google.com/app/apikey")!)
@@ -280,7 +273,7 @@ struct OnboardingView: View {
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.muted)
             case 2:
-                Text("Choose an AI provider and add your key. OpenAI is selected by default.")
+                Text("Choose an AI provider and add your key. GPT is selected by default.")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.muted)
                 Picker("Provider", selection: $viewModel.provider) {
@@ -414,15 +407,15 @@ struct OnboardingView: View {
 
     @ViewBuilder
     private var onboardingCredentialFields: some View {
-        TextField("Model", text: $viewModel.model)
+        TextField("Model (Auto, optional)", text: $viewModel.model)
             .frame(maxWidth: .infinity, alignment: .leading)
             .textFieldStyle(.roundedBorder)
         switch viewModel.provider {
         case .openai:
-            SecureField("OpenAI API key", text: $viewModel.openAIKey)
+            SecureField("GPT API key", text: $viewModel.openAIKey)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
-            Link("Get OpenAI API key", destination: URL(string: "https://platform.openai.com/api-keys")!)
+            Link("Get GPT API key", destination: URL(string: "https://platform.openai.com/api-keys")!)
                 .font(.caption)
                 .foregroundStyle(.blue)
         case .gemini:

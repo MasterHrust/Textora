@@ -23,16 +23,13 @@ struct TextoraApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text("Desktop helper is active")
-            Text("Focus text field to see floating button")
+            Text("Textora is active")
+            Text("Select text to open the toolbar")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("Status: \(coordinator.helperStatus)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Button("Show test bubble at mouse") {
-                coordinator.showDebugBubbleAtMouse()
-            }
             Divider()
             Button("Open Quick Setup") {
                 coordinator.showQuickSetupWindow()

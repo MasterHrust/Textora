@@ -11,6 +11,10 @@ final class SelectionAssistantController {
     private var pendingConsentKey: String?
     private var lockedAnchorKey: String?
     private var lockedAnchor: CGRect?
+    private var stableSelectionKey: String?
+    private var stableSelectionAnchor: CGRect?
+    private var lastSelectionGestureAnchor: CGRect?
+    private var lockedPanelPlacementSide: PanelPlacementSide?
     private var suppressConsentPromptUntil: Date?
     private var selectionDebounceTask: DispatchWorkItem?
     private var fallbackResolveTask: DispatchWorkItem?
@@ -20,10 +24,19 @@ final class SelectionAssistantController {
     private var mouseDownPoint: CGPoint?
     private var didDragSinceMouseDown = false
     private var eventMonitorTokens: [Any] = []
+    private var commandAEventTap: CFMachPort?
+    private var commandAEventTapSource: CFRunLoopSource?
 
     var onConsentRequired: ((CGRect, String) -> Void)?
 
-    private static let panelWidth: CGFloat = 660
+    private static let panelWidth: CGFloat = 680
+    private static let panelTopReserve: CGFloat = SelectionToolbarView.tooltipTopReserve
+    private static let maxPanelContentHeight: CGFloat = 170
+
+    private enum PanelPlacementSide {
+        case above
+        case below
+    }
 
     func start() {
         SelectionAssistantSettings.registerDefaults()
@@ -52,6 +65,10 @@ final class SelectionAssistantController {
         pendingConsentKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
+        stableSelectionKey = nil
+        stableSelectionAnchor = nil
+        lastSelectionGestureAnchor = nil
+        lockedPanelPlacementSide = nil
         fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = .distantPast
         mouseDownPoint = nil
@@ -65,6 +82,10 @@ final class SelectionAssistantController {
         pendingSelectionKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
+        stableSelectionKey = nil
+        stableSelectionAnchor = nil
+        lastSelectionGestureAnchor = nil
+        lockedPanelPlacementSide = nil
         tick()
     }
 
@@ -89,7 +110,8 @@ final class SelectionAssistantController {
             return
         }
         if isFrontmostBrowserLikeApp {
-            if isMouseInsidePanel {
+            if let signal = textService.selectedTextSignalAnyFocus(), signal.hasSelection {
+                handleSelectionSignal(signal)
                 return
             }
             guard canUseFallbackSelectionProbe else {
@@ -113,11 +135,19 @@ final class SelectionAssistantController {
             scheduleFallbackSelectionResolve()
             return
         }
+        handleSelectionSignal(signal)
+    }
+
+    private func handleSelectionSignal(_ signal: TextAccessService.SelectedTextSignal) {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
 
         let key = selectionKey(for: signal)
-        let anchor = anchoredSelectionRect(for: key) ?? preferredAnchor(for: signal)
+        let anchor = anchorForCurrentSelection(
+            key: key,
+            preferred: preferredAnchor(for: signal),
+            allowStableAnchor: true
+        )
         rememberAnchor(anchor, for: key)
 
         switch textService.appConsentStatus(for: signal.targetBundleID) {
@@ -148,6 +178,10 @@ final class SelectionAssistantController {
         pendingConsentKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
+        stableSelectionKey = nil
+        stableSelectionAnchor = nil
+        lastSelectionGestureAnchor = nil
+        lockedPanelPlacementSide = nil
         fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = .distantPast
         viewModel.clear()
@@ -160,6 +194,12 @@ final class SelectionAssistantController {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
         pendingSelectionKey = nil
+        lockedAnchorKey = nil
+        lockedAnchor = nil
+        stableSelectionKey = nil
+        stableSelectionAnchor = nil
+        lastSelectionGestureAnchor = nil
+        lockedPanelPlacementSide = nil
         viewModel.clear()
         panel?.orderOut(nil)
 
@@ -186,7 +226,11 @@ final class SelectionAssistantController {
                     self.viewModel.clear()
                     return
                 }
-                let anchor = self.anchoredSelectionRect(for: expectedKey) ?? self.preferredAnchor(for: context)
+                let anchor = self.anchorForCurrentSelection(
+                    key: expectedKey,
+                    preferred: self.preferredAnchor(for: context),
+                    allowStableAnchor: true
+                )
                 self.rememberAnchor(anchor, for: expectedKey)
                 self.showOrMovePanel(near: anchor)
                 self.viewModel.setSelectionContext(context)
@@ -237,7 +281,11 @@ final class SelectionAssistantController {
                 }
                 self.fallbackProbeAllowedUntil = .distantPast
                 let key = self.selectionKey(for: context)
-                let anchor = self.anchoredSelectionRect(for: key) ?? self.preferredAnchor(for: context)
+                let anchor = self.anchorForCurrentSelection(
+                    key: key,
+                    preferred: self.preferredAnchor(for: context),
+                    allowStableAnchor: true
+                )
                 self.rememberAnchor(anchor, for: key)
                 self.showOrMovePanel(near: anchor)
                 guard key != self.pendingSelectionKey else {
@@ -255,6 +303,10 @@ final class SelectionAssistantController {
 
     private var canUseFallbackSelectionProbe: Bool {
         Date() <= fallbackProbeAllowedUntil
+    }
+
+    private var isMouseSelectionDragActive: Bool {
+        mouseDownPoint != nil && didDragSinceMouseDown
     }
 
     private func installInputMonitorsIfNeeded() {
@@ -277,6 +329,7 @@ final class SelectionAssistantController {
         if let local {
             eventMonitorTokens.append(local)
         }
+        installCommandAEventTapIfNeeded()
     }
 
     private func removeInputMonitors() {
@@ -284,6 +337,52 @@ final class SelectionAssistantController {
             NSEvent.removeMonitor(token)
         }
         eventMonitorTokens.removeAll()
+        if let commandAEventTap {
+            CGEvent.tapEnable(tap: commandAEventTap, enable: false)
+        }
+        if let commandAEventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), commandAEventTapSource, .commonModes)
+        }
+        commandAEventTap = nil
+        commandAEventTapSource = nil
+    }
+
+    private func installCommandAEventTapIfNeeded() {
+        guard commandAEventTap == nil else { return }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: { _, type, event, refcon in
+                guard type == .keyDown, let refcon else {
+                    return Unmanaged.passUnretained(event)
+                }
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
+                if keyCode == 0, flags.contains(.maskCommand) {
+                    let controller = Unmanaged<SelectionAssistantController>
+                        .fromOpaque(refcon)
+                        .takeUnretainedValue()
+                    Task { @MainActor in
+                        controller.allowFallbackProbeBriefly()
+                    }
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: refcon
+        ) else {
+            return
+        }
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            return
+        }
+        commandAEventTap = tap
+        commandAEventTapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     private func handleSelectionGestureEvent(_ event: NSEvent) {
@@ -297,6 +396,7 @@ final class SelectionAssistantController {
             if !clickedInsidePanel {
                 suppressSelectionUntil = Date().addingTimeInterval(0.35)
             }
+            lastSelectionGestureAnchor = nil
             mouseDownPoint = event.locationInWindow
             didDragSinceMouseDown = false
         case .leftMouseDragged:
@@ -312,6 +412,7 @@ final class SelectionAssistantController {
             }
         case .leftMouseUp:
             if didDragSinceMouseDown {
+                lastSelectionGestureAnchor = mouseAnchor()
                 allowFallbackProbeBriefly()
             } else {
                 suppressSelectionUntil = Date().addingTimeInterval(0.35)
@@ -319,8 +420,9 @@ final class SelectionAssistantController {
             mouseDownPoint = nil
             didDragSinceMouseDown = false
         case .keyDown:
-            let isCommandA = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
-                && event.charactersIgnoringModifiers?.lowercased() == "a"
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isCommandA = flags.contains(.command)
+                && (event.charactersIgnoringModifiers?.lowercased() == "a" || event.keyCode == 0)
             if isCommandA {
                 allowFallbackProbeBriefly()
             }
@@ -379,7 +481,7 @@ final class SelectionAssistantController {
         guard let panel else { return }
         let size = currentPanelSize
         panel.contentView?.frame = NSRect(origin: .zero, size: size)
-        let frame = panelFrame(near: anchor, size: size)
+        let frame = panelFrame(near: anchor, size: size, lockPlacement: !isMouseSelectionDragActive)
         if panel.frame != frame {
             panel.setFrame(frame, display: true)
         }
@@ -390,10 +492,13 @@ final class SelectionAssistantController {
     }
 
     private var currentPanelSize: CGSize {
+        let contentHeight: CGFloat
         if viewModel.isLanguagePickerExpanded {
-            return CGSize(width: Self.panelWidth, height: 132)
+            contentHeight = 170
+        } else {
+            contentHeight = viewModel.showsTranslationPanel ? 164 : 50
         }
-        return CGSize(width: Self.panelWidth, height: viewModel.showsTranslationPanel ? 164 : 50)
+        return CGSize(width: Self.panelWidth, height: contentHeight + Self.panelTopReserve)
     }
 
     private var isMouseInsidePanel: Bool {
@@ -401,39 +506,87 @@ final class SelectionAssistantController {
         return panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation)
     }
 
-    private func panelFrame(near anchor: CGRect, size: CGSize) -> CGRect {
+    private func panelFrame(near anchor: CGRect, size: CGSize, lockPlacement: Bool) -> CGRect {
         let gap: CGFloat = 8
-        var frame = CGRect(
-            x: anchor.midX - size.width / 2,
+        let contentSize = CGSize(width: size.width, height: max(1, size.height - Self.panelTopReserve))
+        let placementContentHeight = max(contentSize.height, Self.maxPanelContentHeight)
+        let contentX = anchor.midX - contentSize.width / 2
+        var contentFrame = CGRect(
+            x: contentX,
             y: anchor.maxY + gap,
+            width: contentSize.width,
+            height: contentSize.height
+        )
+        let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(anchor) }) ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else {
+            return CGRect(origin: contentFrame.origin, size: size)
+        }
+        let pad: CGFloat = 8
+        let aboveFrame = CGRect(
+            x: anchor.midX - contentSize.width / 2,
+            y: anchor.maxY + gap,
+            width: contentSize.width,
+            height: contentSize.height
+        )
+        let belowFrame = CGRect(
+            x: anchor.midX - contentSize.width / 2,
+            y: anchor.minY - gap - contentSize.height,
+            width: contentSize.width,
+            height: contentSize.height
+        )
+        let aboveFits = anchor.maxY + gap + placementContentHeight + Self.panelTopReserve <= visible.maxY - pad
+            && aboveFrame.minY >= visible.minY + pad
+        let belowFits = anchor.minY - gap - placementContentHeight >= visible.minY + pad
+            && belowFrame.maxY <= visible.maxY - pad
+
+        let side: PanelPlacementSide
+        if lockPlacement,
+           let lockedPanelPlacementSide,
+           (lockedPanelPlacementSide == .above ? aboveFits : belowFits) {
+            side = lockedPanelPlacementSide
+        } else if aboveFits {
+            side = .above
+        } else if belowFits {
+            side = .below
+        } else {
+            let spaceAbove = visible.maxY - anchor.maxY - gap - Self.panelTopReserve
+            let spaceBelow = anchor.minY - visible.minY - gap
+            side = spaceAbove >= spaceBelow ? .above : .below
+        }
+        if lockPlacement {
+            lockedPanelPlacementSide = side
+        }
+        contentFrame = side == .above ? aboveFrame : belowFrame
+        contentFrame.origin.x = min(max(contentFrame.origin.x, visible.minX + pad), visible.maxX - contentFrame.width - pad)
+        if side == .above {
+            contentFrame.origin.y = min(contentFrame.origin.y, visible.maxY - contentFrame.height - Self.panelTopReserve - pad)
+            contentFrame.origin.y = max(contentFrame.origin.y, anchor.maxY + gap)
+        } else {
+            contentFrame.origin.y = max(contentFrame.origin.y, visible.minY + pad)
+            contentFrame.origin.y = min(contentFrame.origin.y, anchor.minY - gap - contentFrame.height)
+        }
+        return CGRect(
+            x: contentFrame.minX,
+            y: contentFrame.minY,
             width: size.width,
             height: size.height
         )
-        let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(anchor) }) ?? NSScreen.main
-        guard let visible = screen?.visibleFrame else { return frame }
-        let pad: CGFloat = 8
-        if frame.maxY > visible.maxY - pad {
-            frame.origin.y = anchor.minY - gap - frame.height
-        }
-        frame.origin.x = min(max(frame.origin.x, visible.minX + pad), visible.maxX - frame.width - pad)
-        frame.origin.y = min(max(frame.origin.y, visible.minY + pad), visible.maxY - frame.height - pad)
-        return frame
     }
 
     private func preferredAnchor(for signal: TextAccessService.SelectedTextSignal) -> CGRect {
         if shouldPreferMouseAnchor(bundleID: signal.targetBundleID, candidate: signal.bounds) {
-            return mouseAnchor()
+            return fallbackInteractionAnchor()
         }
         if let bounds = signal.bounds, isUsableAnchor(bounds) {
             return bounds
         }
-        return mouseAnchor()
+        return fallbackInteractionAnchor()
     }
 
     private func preferredAnchor(for context: TextAccessService.FocusedTextContext) -> CGRect {
         let anchor = context.anchor.rect
         if shouldPreferMouseAnchor(bundleID: context.targetBundleID, candidate: anchor) {
-            return mouseAnchor()
+            return fallbackInteractionAnchor()
         }
         if isUsableAnchor(anchor), context.anchor.confidence != .weak {
             return anchor
@@ -441,17 +594,19 @@ final class SelectionAssistantController {
         if isUsableAnchor(context.frame) {
             return context.frame
         }
-        return mouseAnchor()
+        return fallbackInteractionAnchor()
     }
 
     private func shouldPreferMouseAnchor(bundleID: String, candidate: CGRect?) -> Bool {
         guard usesWeakSelectionGeometry(bundleID: bundleID) else { return false }
         guard let candidate, isUsableAnchor(candidate) else { return true }
         if candidate.height > 90 || candidate.width > 1_800 {
+            if !isMouseSelectionDragActive, candidate.height <= 320, candidate.width <= 1_600 {
+                return false
+            }
             return true
         }
-        let mouse = NSEvent.mouseLocation
-        return !candidate.insetBy(dx: -160, dy: -140).contains(mouse)
+        return false
     }
 
     private func usesWeakSelectionGeometry(bundleID: String) -> Bool {
@@ -481,11 +636,48 @@ final class SelectionAssistantController {
         CGRect(x: NSEvent.mouseLocation.x, y: NSEvent.mouseLocation.y, width: 1, height: 1)
     }
 
+    private func fallbackInteractionAnchor() -> CGRect {
+        if isMouseSelectionDragActive {
+            return mouseAnchor()
+        }
+        if let lastSelectionGestureAnchor {
+            return lastSelectionGestureAnchor
+        }
+        return mouseAnchor()
+    }
+
+    private func anchorForCurrentSelection(
+        key: String,
+        preferred: CGRect,
+        allowStableAnchor: Bool
+    ) -> CGRect {
+        if stableSelectionKey != nil, stableSelectionKey != key {
+            stableSelectionKey = nil
+            stableSelectionAnchor = nil
+            lockedPanelPlacementSide = nil
+        }
+        if allowStableAnchor, stableSelectionKey == key, let stableSelectionAnchor {
+            return stableSelectionAnchor
+        }
+        if isMouseSelectionDragActive {
+            return preferred
+        }
+        if let locked = anchoredSelectionRect(for: key) {
+            stableSelectionKey = key
+            stableSelectionAnchor = locked
+            return locked
+        }
+        stableSelectionKey = key
+        stableSelectionAnchor = preferred
+        return preferred
+    }
+
     private func anchoredSelectionRect(for key: String) -> CGRect? {
         lockedAnchorKey == key ? lockedAnchor : nil
     }
 
     private func rememberAnchor(_ anchor: CGRect, for key: String) {
+        guard !isMouseSelectionDragActive else { return }
         lockedAnchorKey = key
         lockedAnchor = anchor
     }

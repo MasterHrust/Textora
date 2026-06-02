@@ -287,7 +287,8 @@ final class TextAccessService {
         "com.googlecode.iterm2"
     ]
     private let sensitiveFieldHints: [String] = [
-        "password", "passcode", "otp", "token", "2fa", "login"
+        "password", "passcode", "otp", "token", "2fa", "login", "log in", "sign in", "sign-in",
+        "signin", "username", "user name", "credential", "auth", "verification code"
     ]
     private let neverEditableRoles: Set<String> = [
         "AXApplication",
@@ -1119,11 +1120,17 @@ final class TextAccessService {
     /// without necessarily reading the selected text (e.g. before per-app consent is granted).
     func selectedTextSignalAnyFocus() -> SelectedTextSignal? {
         guard let start = focusedElement() else { return nil }
+        guard !shouldIgnoreCurrentFocusedInput(element: start, includeAppConsent: false) else { return nil }
         if isGoogleSheetsFrontmost(), !isGoogleSheetsTextEditFocus(start) { return nil }
         // Walk ancestors: Electron/WebView may report selection on a parent, not the deepest focus leaf.
         var element: AXUIElement? = start
         var depth = 0
         while let el = element, depth < 24 {
+            guard !shouldIgnoreCurrentFocusedInput(element: el, includeAppConsent: false) else {
+                element = axElement(of: el, attribute: kAXParentAttribute as String)
+                depth += 1
+                continue
+            }
             var pid: pid_t = 0
             AXUIElementGetPid(el, &pid)
             let bundleID = resolvedBundleID(forOwningPID: pid)
@@ -1171,6 +1178,10 @@ final class TextAccessService {
            allowBrowserClipboardSelection,
            let front = frontmostAppInfo(),
            isBrowserBundleID(front.bundleID) {
+            if let focused = focusedElement(),
+               shouldIgnoreCurrentFocusedInput(element: focused, includeAppConsent: false) {
+                return nil
+            }
             return selectedTextContextFromFrontmostClipboardSelection(
                 minLength: minLength,
                 maxLength: maxLength
@@ -5940,6 +5951,7 @@ end tell
         if isSecureInputField(element) { return true }
         if isTransientPopupLike(element) { return true }
         if hasSensitiveFieldHint(element) { return true }
+        if isBrowserChromeInputField(element) { return true }
         var pid: pid_t = 0
         if AXUIElementGetPid(element, &pid) == .success, pid != 0 {
             let bundleID = resolvedBundleID(forOwningPID: pid)
@@ -6016,6 +6028,45 @@ end tell
         .joined(separator: " ")
         guard !hintSource.isEmpty else { return false }
         return sensitiveFieldHints.contains(where: { hintSource.contains($0) })
+    }
+
+    private func isBrowserChromeInputField(_ element: AXUIElement) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return false }
+        let bundleID = resolvedBundleID(forOwningPID: pid)
+        guard isBrowserBundleID(bundleID) else { return false }
+        let role = axString(of: element, attribute: kAXRoleAttribute) ?? ""
+        let subrole = axString(of: element, attribute: kAXSubroleAttribute) ?? ""
+        let textLikeRoles: Set<String> = [
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String
+        ]
+        guard textLikeRoles.contains(role) || textLikeRoles.contains(subrole) else { return false }
+
+        let hintSource = [
+            axString(of: element, attribute: "AXPlaceholderValue"),
+            axString(of: element, attribute: kAXTitleAttribute),
+            axString(of: element, attribute: kAXDescriptionAttribute),
+            axString(of: element, attribute: "AXIdentifier")
+        ]
+        .compactMap { $0?.lowercased() }
+        .joined(separator: " ")
+        let addressHints = [
+            "address", "url", "search", "omnibox", "location", "web address",
+            "адрес", "поиск"
+        ]
+        if addressHints.contains(where: { hintSource.contains($0) }) {
+            return true
+        }
+
+        guard let frame = elementFrame(of: element),
+              let window = focusedWindowFrame(),
+              !frame.isEmpty,
+              !window.isEmpty else {
+            return false
+        }
+        return frame.maxY > window.maxY - 76 && frame.height <= 64
     }
 
     private func contextualSlice(from fullText: String, around range: CFRange?, maxLength: Int) -> String {

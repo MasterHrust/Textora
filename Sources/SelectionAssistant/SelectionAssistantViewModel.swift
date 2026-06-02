@@ -18,6 +18,14 @@ enum TranslationLanguage: String, CaseIterable, Identifiable {
     case polish
     case dutch
     case hindi
+    case indonesian
+    case vietnamese
+    case thai
+    case hebrew
+    case greek
+    case czech
+    case swedish
+    case romanian
 
     var id: String { rawValue }
 
@@ -39,6 +47,14 @@ enum TranslationLanguage: String, CaseIterable, Identifiable {
         case .polish: return "🇵🇱"
         case .dutch: return "🇳🇱"
         case .hindi: return "🇮🇳"
+        case .indonesian: return "🇮🇩"
+        case .vietnamese: return "🇻🇳"
+        case .thai: return "🇹🇭"
+        case .hebrew: return "🇮🇱"
+        case .greek: return "🇬🇷"
+        case .czech: return "🇨🇿"
+        case .swedish: return "🇸🇪"
+        case .romanian: return "🇷🇴"
         }
     }
 
@@ -60,6 +76,14 @@ enum TranslationLanguage: String, CaseIterable, Identifiable {
         case .polish: return "Polish"
         case .dutch: return "Dutch"
         case .hindi: return "Hindi"
+        case .indonesian: return "Indonesian"
+        case .vietnamese: return "Vietnamese"
+        case .thai: return "Thai"
+        case .hebrew: return "Hebrew"
+        case .greek: return "Greek"
+        case .czech: return "Czech"
+        case .swedish: return "Swedish"
+        case .romanian: return "Romanian"
         }
     }
 }

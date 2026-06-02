@@ -10,9 +10,12 @@ enum SelectionAssistantSettings {
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
-            Keys.enabled: false,
+            Keys.enabled: true,
             Keys.operation: RewriteOperation.fixGrammar.rawValue
         ])
+        if defaults.object(forKey: Keys.enabled) as? Bool != true {
+            defaults.set(true, forKey: Keys.enabled)
+        }
     }
 
     static func selectedOperation(defaults: UserDefaults = .standard) -> RewriteOperation {

@@ -40,10 +40,10 @@ final class AppViewModel: ObservableObject {
     @Published var provider: AIProvider = .openai {
         didSet {
             guard !isReloadingFromDefaults else { return }
-            model = defaultModel(for: provider)
+            model = ""
         }
     }
-    @Published var model: String = AIClient.Defaults.openAIModel
+    @Published var model: String = ""
     @Published var openAIKey: String = ""
     @Published var geminiKey: String = ""
     @Published var claudeKey: String = ""
@@ -94,7 +94,7 @@ final class AppViewModel: ObservableObject {
         EasySwitchSettings.registerDefaults()
         SelectionAssistantSettings.registerDefaults()
         provider = AIProvider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "openai") ?? .openai
-        model = UserDefaults.standard.string(forKey: "model") ?? defaultModel(for: provider)
+        model = storedModelForCurrentProvider()
         openAIKey = KeychainHelper.read(key: KeychainHelper.openAIKeyAccount) ?? ""
         geminiKey = KeychainHelper.read(key: KeychainHelper.geminiKeyAccount) ?? ""
         claudeKey = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
@@ -148,7 +148,7 @@ final class AppViewModel: ObservableObject {
         if provider == .other {
             let base = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !base.isEmpty else {
-                errorText = "API base URL is missing for Other AI"
+                errorText = "API base URL is missing for Other"
                 return
             }
         }
@@ -184,14 +184,12 @@ final class AppViewModel: ObservableObject {
 
     func saveSettings() {
         UserDefaults.standard.set(provider.rawValue, forKey: "provider")
-        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmedModel.isEmpty ? defaultModel(for: provider) : trimmedModel, forKey: "model")
+        UserDefaults.standard.set(model.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "model")
         UserDefaults.standard.set(
             customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
         )
-        UserDefaults.standard.set(detailedCorrectionsEnabled, forKey: SettingsKeys.detailedCorrectionsEnabled)
-        UserDefaults.standard.set(selectionAssistantBetaEnabled, forKey: SettingsKeys.selectionAssistantBetaEnabled)
+        SelectionAssistantSettings.setEnabled(true)
         UserDefaults.standard.set(easySwitchEnabled, forKey: SettingsKeys.easySwitchEnabled)
         UserDefaults.standard.set(easySwitchAutoCorrectWrongLayout, forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
         UserDefaults.standard.set(easySwitchChangesKeyboardLayout, forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
@@ -233,8 +231,6 @@ final class AppViewModel: ObservableObject {
             claudeKey,
             customToken,
             customOpenAIBaseURL,
-            String(detailedCorrectionsEnabled),
-            String(selectionAssistantBetaEnabled),
             String(easySwitchEnabled),
             String(easySwitchAutoCorrectWrongLayout),
             String(easySwitchChangesKeyboardLayout),
@@ -297,7 +293,7 @@ final class AppViewModel: ObservableObject {
             validationModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AIClient.Defaults.customModel : model
             let base = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             if base.isEmpty {
-                onboardingErrorText = "Set API URL for Other AI."
+                onboardingErrorText = "Set API URL for Other."
                 return false
             }
         }
@@ -362,6 +358,23 @@ final class AppViewModel: ObservableObject {
         case .other:
             return AIClient.Defaults.customModel
         }
+    }
+
+    private func storedModelForCurrentProvider() -> String {
+        let stored = UserDefaults.standard.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !stored.isEmpty else { return "" }
+        let defaults: Set<String> = [
+            AIClient.Defaults.openAIModel,
+            "gpt-5.4-mini",
+            AIClient.Defaults.geminiModel,
+            AIClient.Defaults.claudeModel,
+            AIClient.Defaults.customModel
+        ]
+        if defaults.contains(stored) {
+            UserDefaults.standard.set("", forKey: "model")
+            return ""
+        }
+        return stored
     }
 
     func refreshAppConsents() {

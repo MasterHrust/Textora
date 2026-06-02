@@ -6,7 +6,7 @@ struct AIClient {
     private let userDictionary = UserDictionary()
 
     enum Defaults {
-        static let openAIModel = "gpt-5.4-mini"
+        static let openAIModel = "gpt-5.4"
         static let geminiModel = "gemini-1.5-pro"
         static let claudeModel = "claude-3-5-sonnet-latest"
         /// Placeholder model id; your server may use a different id — set **Model** in Settings accordingly.
