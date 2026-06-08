@@ -375,12 +375,15 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     static func fingerprint(for context: TextAccessService.FocusedTextContext) -> String {
-        let range = context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
+        let range = context.usesSelection ? "text-selection" : (context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil")
+        let text = context.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         return [
             context.targetBundleID,
             String(context.targetAppPID),
             range,
-            context.text
+            text
         ].joined(separator: "\u{1F}")
     }
 }

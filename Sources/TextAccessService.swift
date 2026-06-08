@@ -1556,13 +1556,19 @@ final class TextAccessService {
             + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
             + "strategy=unifiedPhysicalRewrite"
         )
-        if context.usesSelection,
-           context.selectedRange == nil,
-           context.anchor.source == .clipboardFallback,
-           prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID),
-           applyClipboardSelectionPasteReplace(rewritten, basedOn: context) {
-            textoraDiagLog("applyRewrittenText", "success via clipboardSelectionPasteReplace")
-            return .success
+        if context.usesSelection {
+            let shouldUseClipboardSelectionPaste = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
+                || context.anchor.source == .clipboardFallback
+            if shouldUseClipboardSelectionPaste,
+               applyClipboardSelectionPasteReplace(rewritten, basedOn: context) {
+                textoraDiagLog("applyRewrittenText", "success via clipboardSelectionPasteReplace")
+                return .success
+            }
+            if !shouldUseClipboardSelectionPaste,
+               applySelectedTextDirect(rewritten, basedOn: context) {
+                textoraDiagLog("applyRewrittenText", "success via selectedTextDirect")
+                return .success
+            }
         }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyRewrittenText", "success via unifiedPhysicalRewrite")
@@ -3401,6 +3407,10 @@ final class TextAccessService {
         originalValue: String,
         basedOn context: FocusedTextContext
     ) -> Bool? {
+        guard !context.usesSelection else {
+            textoraDiagLog("selectedRangePhysicalRewrite", "skip: active selection uses atomic selection paste")
+            return nil
+        }
         let target = context.targetElement
         var currentValue = originalValue
         var didMutateText = false

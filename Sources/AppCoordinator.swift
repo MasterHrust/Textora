@@ -25,6 +25,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var easySwitchStartRetryCount = 0
     private var primaryInteractionRetryTask: DispatchWorkItem?
     private var primaryInteractionRetryCount = 0
+    private var launchWarmupTask: DispatchWorkItem?
+    private var launchWarmupCount = 0
     private var isHelperHovered = false
     private var isRewritePopupHovered = false
     private var isConsentPromptHovered = false
@@ -46,6 +48,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             NotificationCenter.default.removeObserver(selectionAssistantSettingsObserver)
         }
         primaryInteractionRetryTask?.cancel()
+        launchWarmupTask?.cancel()
         easySwitch.stop()
     }
 
@@ -124,6 +127,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
         configureEasySwitch(forceRestart: false)
+        scheduleLaunchWarmupRetry(reason: "launch")
         if !hasAnyConfiguredKey() {
             shouldOpenAccessibilityAfterOnboarding = true
             configurePrimaryInteractionMode()
@@ -174,9 +178,14 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    private var isSelectionAssistantBetaEnabled: Bool {
+    private var isToolboxEnabled: Bool {
         SelectionAssistantSettings.registerDefaults()
-        return true
+        return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.toolboxEnabled)
+    }
+
+    private var isFloatingIconEnabled: Bool {
+        SelectionAssistantSettings.registerDefaults()
+        return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.floatingIconEnabled)
     }
 
     private func configurePrimaryInteractionMode() {
@@ -187,36 +196,107 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         rewritePanel.hide()
         consentPrompt.hide()
         floatingHelper?.setKeepBelowWindow(nil)
-        floatingHelper?.stop()
 
         guard hasAnyConfiguredKey(), textAccess.hasAccessibilityPermission() else {
             helperStatus = "Waiting for setup"
             selectionAssistant.stop()
+            floatingHelper?.stop()
             return
         }
         cancelPrimaryInteractionRetry()
-        helperStatus = "Selection toolbar active"
-        selectionAssistant.start()
+
+        if isToolboxEnabled {
+            selectionAssistant.start()
+        } else {
+            selectionAssistant.stop()
+        }
+
+        if isFloatingIconEnabled {
+            floatingHelper?.start()
+        } else {
+            floatingHelper?.stop()
+        }
+
+        switch (isToolboxEnabled, isFloatingIconEnabled) {
+        case (true, true):
+            helperStatus = "Toolbox + floating icon active"
+        case (true, false):
+            helperStatus = "Toolbox active"
+        case (false, true):
+            helperStatus = "Floating icon active"
+        case (false, false):
+            helperStatus = "No Textora interface enabled"
+        }
     }
 
     func warmEasySwitchIfPossible() {
         configureEasySwitch(forceRestart: false)
         configurePrimaryInteractionMode()
         schedulePrimaryInteractionRetry(reason: "activationWarmup")
+        scheduleLaunchWarmupRetry(reason: "activationWarmup")
+    }
+
+    private func scheduleLaunchWarmupRetry(reason: String) {
+        guard hasAnyConfiguredKey() else { return }
+        guard launchWarmupTask == nil else { return }
+        guard launchWarmupCount < 24 else {
+            logSelectionAssistantDiagnostic(
+                "launch warmup abandoned attempts=\(launchWarmupCount) reason=\(reason)"
+            )
+            return
+        }
+        launchWarmupCount += 1
+        let retryDelays: [TimeInterval] = [
+            0.25, 0.50, 0.75, 1.0, 1.5, 2.0,
+            3.0, 4.0, 5.0, 6.0, 8.0, 10.0
+        ]
+        let delay = retryDelays[min(launchWarmupCount - 1, retryDelays.count - 1)]
+        let task = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.launchWarmupTask = nil
+                self.configureEasySwitch(forceRestart: false)
+                self.configurePrimaryInteractionMode()
+                if self.shouldContinueLaunchWarmup {
+                    self.scheduleLaunchWarmupRetry(reason: reason)
+                } else {
+                    self.cancelLaunchWarmupRetry()
+                }
+            }
+        }
+        launchWarmupTask = task
+        logSelectionAssistantDiagnostic(
+            "launch warmup scheduled attempt=\(launchWarmupCount) delay=\(String(format: "%.2f", delay)) reason=\(reason)"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    private var shouldContinueLaunchWarmup: Bool {
+        guard hasAnyConfiguredKey() else { return false }
+        guard textAccess.hasAccessibilityPermission() else { return true }
+        if isToolboxEnabled || isFloatingIconEnabled {
+            return false
+        }
+        return launchWarmupCount < 3
+    }
+
+    private func cancelLaunchWarmupRetry() {
+        launchWarmupTask?.cancel()
+        launchWarmupTask = nil
+        launchWarmupCount = 0
     }
 
     private func schedulePrimaryInteractionRetry(reason: String) {
         guard hasAnyConfiguredKey() else { return }
         guard primaryInteractionRetryTask == nil else { return }
-        guard primaryInteractionRetryCount < 8 else {
-            textoraDiagLog(
-                "selectionAssistant",
+        guard primaryInteractionRetryCount < 12 else {
+            logSelectionAssistantDiagnostic(
                 "primary retry abandoned attempts=\(primaryInteractionRetryCount) reason=\(reason)"
             )
             return
         }
         primaryInteractionRetryCount += 1
-        let retryDelays: [TimeInterval] = [0.10, 0.25, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0]
+        let retryDelays: [TimeInterval] = [0.10, 0.25, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0, 10.0]
         let delay = retryDelays[min(primaryInteractionRetryCount - 1, retryDelays.count - 1)]
         let task = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
@@ -229,8 +309,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             }
         }
         primaryInteractionRetryTask = task
-        textoraDiagLog(
-            "selectionAssistant",
+        logSelectionAssistantDiagnostic(
             "primary retry scheduled attempt=\(primaryInteractionRetryCount) delay=\(String(format: "%.2f", delay)) reason=\(reason)"
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
@@ -240,6 +319,11 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         primaryInteractionRetryTask?.cancel()
         primaryInteractionRetryTask = nil
         primaryInteractionRetryCount = 0
+    }
+
+    private func logSelectionAssistantDiagnostic(_ message: String) {
+        guard SelectionAssistantSettings.diagnosticsEnabled() else { return }
+        textoraDiagLog("selectionAssistant", message)
     }
 
     private func configureEasySwitch(forceRestart: Bool) {
@@ -372,7 +456,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func handleFloatingHoverChanged(hovering: Bool, frame: CGRect) {
-        guard !isSelectionAssistantBetaEnabled else {
+        guard isFloatingIconEnabled else {
             rewritePanel.hide()
             consentPrompt.hide()
             floatingHelper?.setKeepBelowWindow(nil)
@@ -494,11 +578,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         textAccess.setAppConsentStatus(.allowed, for: bundleID)
         consentPrompt.hide()
-        if isSelectionAssistantBetaEnabled {
+        if isToolboxEnabled {
             selectionAssistant.refreshAfterConsentChange()
-            return
         }
-        if let frame = floatingHelper?.currentFrame, !frame.isEmpty {
+        if isFloatingIconEnabled, let frame = floatingHelper?.currentFrame, !frame.isEmpty {
             showRewritePopupFromFloatingState(frame: frame)
         }
     }
@@ -512,7 +595,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         textAccess.setAppConsentStatus(.denied, for: bundleID)
         rewritePanel.hide()
         consentPrompt.hide()
-        if isSelectionAssistantBetaEnabled {
+        if isToolboxEnabled {
             selectionAssistant.refreshAfterConsentChange()
         }
     }
@@ -520,13 +603,13 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func handleConsentLater() {
         isConsentPromptHovered = false
         consentPrompt.hide()
-        if isSelectionAssistantBetaEnabled {
+        if isToolboxEnabled {
             selectionAssistant.suppressConsentPromptBriefly()
         }
     }
 
     private func handleSelectionAssistantConsentRequired(anchor: CGRect, bundleID: String) {
-        guard isSelectionAssistantBetaEnabled else { return }
+        guard isToolboxEnabled else { return }
         cancelScheduledFloatingPanelsHide()
         rewritePanel.hide()
         floatingHelper?.setKeepBelowWindow(nil)
@@ -619,7 +702,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             )
             let hosting = NSHostingView(rootView: root)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 340),
+                contentRect: NSRect(x: 0, y: 0, width: 500, height: 430),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false

@@ -26,6 +26,8 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             providerSection
             Divider().padding(.vertical, 4)
+            interfaceSection
+            Divider().padding(.vertical, 4)
             easySwitchSection
             Button("Save settings") {
                 viewModel.saveSettings()
@@ -61,6 +63,26 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             credentialFields
             providerSetupHelp
+        }
+    }
+
+    private var interfaceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Interface")
+                .font(.headline)
+            Text("Choose how Textora appears. You can enable both; identical AI checks are shared instead of requested twice.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            InterfaceModeCards(
+                toolboxEnabled: $viewModel.toolboxEnabled,
+                floatingIconEnabled: $viewModel.floatingIconEnabled,
+                compact: true
+            )
+            Toggle("Enable Toolbox diagnostics log", isOn: $viewModel.selectionAssistantDiagnosticsEnabled)
+                .toggleStyle(.checkbox)
+            Text("Writes selection toolbar lifecycle details to /tmp/TextoraMarkerGeometry.log when troubleshooting.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -244,6 +266,210 @@ struct ContentView: View {
     }
 }
 
+private struct InterfaceModeCards: View {
+    @Binding var toolboxEnabled: Bool
+    @Binding var floatingIconEnabled: Bool
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            InterfaceModeCard(
+                title: "Toolbox",
+                subtitle: compact ? "Panel above selection" : "A focused toolbar above selected text with Fix, Formal, Humanize, and Translate.",
+                isOn: $toolboxEnabled,
+                accent: Color(red: 0.27, green: 0.73, blue: 1.0),
+                preview: .toolbox,
+                compact: compact
+            )
+            InterfaceModeCard(
+                title: "Floating icon",
+                subtitle: compact ? "Classic marker" : "The classic Textora marker near editable fields, with a pop-up for quick corrections.",
+                isOn: $floatingIconEnabled,
+                accent: Color(red: 0.89, green: 0.24, blue: 0.93),
+                preview: .floating,
+                compact: compact
+            )
+        }
+    }
+}
+
+private struct InterfaceModeCard: View {
+    enum PreviewKind {
+        case toolbox
+        case floating
+    }
+
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+    let accent: Color
+    let preview: PreviewKind
+    var compact = false
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            VStack(alignment: .leading, spacing: compact ? 7 : 10) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: compact ? 12.5 : 14, weight: .bold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: compact ? 15 : 17, weight: .semibold))
+                        .foregroundStyle(isOn ? accent : Color.white.opacity(0.38))
+                }
+                modePreview
+                    .frame(height: compact ? 54 : 72)
+                Text(subtitle)
+                    .font(.system(size: compact ? 10.5 : 12, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.62))
+                    .lineLimit(compact ? 2 : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(compact ? 10 : 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardBackground)
+            .overlay(cardStroke)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var modePreview: some View {
+        switch preview {
+        case .toolbox:
+            toolboxPreview
+        case .floating:
+            floatingPreview
+        }
+    }
+
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(isOn ? 0.11 : 0.055),
+                        accent.opacity(isOn ? 0.16 : 0.035)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+    }
+
+    private var cardStroke: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(isOn ? accent.opacity(0.55) : Color.white.opacity(0.12), lineWidth: 1)
+    }
+
+    private var toolboxPreview: some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: 14, height: 14)
+                previewPill("Fix", color: Color(red: 0.25, green: 0.72, blue: 1.0))
+                previewPill("Formal", color: Color(red: 0.66, green: 0.29, blue: 1.0))
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 5) {
+                previewTextBox(label: "Before", color: Color.white.opacity(0.52), lineColor: Color.white.opacity(0.42))
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(Color.white.opacity(0.32))
+                previewTextBox(label: "After", color: Color(red: 0.25, green: 0.72, blue: 1.0), lineColor: Color(red: 0.25, green: 0.84, blue: 0.34))
+            }
+        }
+        .padding(7)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.black.opacity(0.24))
+        )
+    }
+
+    private var floatingPreview: some View {
+        ZStack(alignment: .bottomTrailing) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.16))
+                        .frame(width: 30, height: 24)
+                    VStack(alignment: .leading, spacing: 4) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.white.opacity(0.58))
+                            .frame(width: 66, height: 5)
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.white.opacity(0.34))
+                            .frame(width: 42, height: 5)
+                    }
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 5) {
+                    previewPill("SmartAI", color: Color(red: 0.67, green: 0.32, blue: 1.0))
+                    previewPill("Fix", color: Color(red: 0.25, green: 0.84, blue: 0.34))
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.black.opacity(0.26))
+            )
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: compact ? 20 : 24, height: compact ? 20 : 24)
+                .overlay(Image(systemName: "wand.and.stars").font(.system(size: compact ? 9 : 10, weight: .bold)).foregroundStyle(.white))
+                .shadow(color: accent.opacity(0.45), radius: 9, x: 0, y: 0)
+                .offset(x: 5, y: 5)
+        }
+    }
+
+    private func previewPill(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: compact ? 7.5 : 8.5, weight: .heavy))
+            .foregroundStyle(color)
+            .padding(.horizontal, compact ? 5 : 6)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.14)))
+    }
+
+    private func previewTextBox(label: String, color: Color, lineColor: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: compact ? 7 : 8, weight: .heavy))
+                .foregroundStyle(color)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(lineColor)
+                .frame(height: 4)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.white.opacity(0.24))
+                .frame(width: compact ? 44 : 54, height: 4)
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+    }
+}
+
 struct OnboardingView: View {
     @ObservedObject var viewModel: AppViewModel
     let onClose: () -> Void
@@ -292,6 +518,23 @@ struct OnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(Color.red.opacity(0.95))
                 }
+            case 4:
+                Text("Choose how Textora should appear when you write.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.muted)
+                Text("Toolbox is the new selection panel. Floating icon is the classic marker. You can enable both.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.muted)
+                InterfaceModeCards(
+                    toolboxEnabled: $viewModel.toolboxEnabled,
+                    floatingIconEnabled: $viewModel.floatingIconEnabled,
+                    compact: false
+                )
+                if !viewModel.toolboxEnabled && !viewModel.floatingIconEnabled {
+                    Text("Select at least one interface mode to continue.")
+                        .font(.caption)
+                        .foregroundStyle(Color.red.opacity(0.95))
+                }
             default:
                 Text("Done. Next, Accessibility will open to complete setup.")
                     .font(.system(size: 14))
@@ -301,7 +544,7 @@ struct OnboardingView: View {
             Divider()
 
             HStack(spacing: 8) {
-                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 4 {
+                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 5 {
                     Button("Back") {
                         viewModel.moveOnboardingBack()
                     }
@@ -322,6 +565,12 @@ struct OnboardingView: View {
                     }
                     .disabled(viewModel.isOnboardingBusy)
                     .buttonStyle(PrimaryButtonStyle())
+                } else if viewModel.onboardingStep == 4 {
+                    Button("Continue") {
+                        viewModel.moveOnboardingNext()
+                    }
+                    .disabled(!viewModel.toolboxEnabled && !viewModel.floatingIconEnabled)
+                    .buttonStyle(PrimaryButtonStyle())
                 } else {
                     Button("Finish") {
                         onFinish()
@@ -333,7 +582,7 @@ struct OnboardingView: View {
                     .buttonStyle(SecondaryButtonStyle())
                 }
                 Spacer()
-                if viewModel.onboardingStep < 4 {
+                if viewModel.onboardingStep < 5 {
                     Button("Skip for now") {
                         viewModel.skipOnboardingForNow()
                         onClose()
@@ -343,7 +592,7 @@ struct OnboardingView: View {
             }
         }
         .padding(16)
-        .frame(width: 460, height: 340)
+        .frame(width: 500, height: 430)
         .background(popupBackground)
         .preferredColorScheme(.dark)
     }
@@ -358,7 +607,7 @@ struct OnboardingView: View {
                 Text("Textora Quick setup")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
-                Text("Step \(viewModel.onboardingStep) of 4")
+                Text("Step \(viewModel.onboardingStep) of 5")
                     .font(.caption)
                     .foregroundStyle(Theme.muted)
             }
@@ -377,7 +626,7 @@ struct OnboardingView: View {
     }
     
     private var stepBadge: some View {
-        Text("\(viewModel.onboardingStep)/4")
+        Text("\(viewModel.onboardingStep)/5")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 8)

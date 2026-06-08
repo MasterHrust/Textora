@@ -7,6 +7,9 @@ final class AppViewModel: ObservableObject {
         static let detailedCorrectionsEnabled = "overlay.detailedCorrections.enabled"
         static let smartAIEnabled = "overlay.smartAI.enabled"
         static let selectionAssistantBetaEnabled = SelectionAssistantSettings.Keys.enabled
+        static let toolboxEnabled = SelectionAssistantSettings.Keys.toolboxEnabled
+        static let floatingIconEnabled = SelectionAssistantSettings.Keys.floatingIconEnabled
+        static let selectionAssistantDiagnosticsEnabled = SelectionAssistantSettings.Keys.diagnosticsEnabled
         static let easySwitchEnabled = EasySwitchSettings.Keys.enabled
         static let easySwitchAutoCorrectWrongLayout = EasySwitchSettings.Keys.autoCorrectWrongLayout
         static let easySwitchChangesKeyboardLayout = EasySwitchSettings.Keys.changesKeyboardLayout
@@ -53,11 +56,26 @@ final class AppViewModel: ObservableObject {
     @Published var appConsentRows: [AppConsentRow] = []
     @Published var hasAccessibilityPermission: Bool = false
     @Published var detailedCorrectionsEnabled: Bool = false
-    @Published var selectionAssistantBetaEnabled: Bool = false {
+    @Published var selectionAssistantBetaEnabled: Bool = false
+    @Published var toolboxEnabled: Bool = true {
         didSet {
             guard !isReloadingFromDefaults else { return }
-            guard oldValue != selectionAssistantBetaEnabled else { return }
-            SelectionAssistantSettings.setEnabled(selectionAssistantBetaEnabled)
+            guard oldValue != toolboxEnabled else { return }
+            SelectionAssistantSettings.setToolboxEnabled(toolboxEnabled)
+        }
+    }
+    @Published var floatingIconEnabled: Bool = false {
+        didSet {
+            guard !isReloadingFromDefaults else { return }
+            guard oldValue != floatingIconEnabled else { return }
+            SelectionAssistantSettings.setFloatingIconEnabled(floatingIconEnabled)
+        }
+    }
+    @Published var selectionAssistantDiagnosticsEnabled: Bool = false {
+        didSet {
+            guard !isReloadingFromDefaults else { return }
+            guard oldValue != selectionAssistantDiagnosticsEnabled else { return }
+            SelectionAssistantSettings.setDiagnosticsEnabled(selectionAssistantDiagnosticsEnabled)
         }
     }
     @Published var easySwitchEnabled: Bool = false
@@ -102,6 +120,9 @@ final class AppViewModel: ObservableObject {
         customOpenAIBaseURL = UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? ""
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
         selectionAssistantBetaEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.selectionAssistantBetaEnabled)
+        toolboxEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.toolboxEnabled)
+        floatingIconEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.floatingIconEnabled)
+        selectionAssistantDiagnosticsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.selectionAssistantDiagnosticsEnabled)
         easySwitchEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchEnabled)
         easySwitchAutoCorrectWrongLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
         easySwitchChangesKeyboardLayout = UserDefaults.standard.bool(forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
@@ -190,6 +211,9 @@ final class AppViewModel: ObservableObject {
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
         )
         SelectionAssistantSettings.setEnabled(true)
+        UserDefaults.standard.set(toolboxEnabled, forKey: SettingsKeys.toolboxEnabled)
+        UserDefaults.standard.set(floatingIconEnabled, forKey: SettingsKeys.floatingIconEnabled)
+        UserDefaults.standard.set(selectionAssistantDiagnosticsEnabled, forKey: SettingsKeys.selectionAssistantDiagnosticsEnabled)
         UserDefaults.standard.set(easySwitchEnabled, forKey: SettingsKeys.easySwitchEnabled)
         UserDefaults.standard.set(easySwitchAutoCorrectWrongLayout, forKey: SettingsKeys.easySwitchAutoCorrectWrongLayout)
         UserDefaults.standard.set(easySwitchChangesKeyboardLayout, forKey: SettingsKeys.easySwitchChangesKeyboardLayout)
@@ -231,6 +255,9 @@ final class AppViewModel: ObservableObject {
             claudeKey,
             customToken,
             customOpenAIBaseURL,
+            String(toolboxEnabled),
+            String(floatingIconEnabled),
+            String(selectionAssistantDiagnosticsEnabled),
             String(easySwitchEnabled),
             String(easySwitchAutoCorrectWrongLayout),
             String(easySwitchChangesKeyboardLayout),
@@ -257,12 +284,13 @@ final class AppViewModel: ObservableObject {
 
     func moveOnboardingNext() {
         onboardingErrorText = ""
-        onboardingStep = min(4, onboardingStep + 1)
+        onboardingStep = min(5, onboardingStep + 1)
     }
 
     func completeOnboarding() {
         isOnboardingComplete = true
         onboardingErrorText = ""
+        saveSettings()
         UserDefaults.standard.set(true, forKey: OnboardingDefaults.completedKey)
         UserDefaults.standard.removeObject(forKey: OnboardingDefaults.skippedKey)
     }

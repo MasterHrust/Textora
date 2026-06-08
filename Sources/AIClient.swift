@@ -1,5 +1,38 @@
 import Foundation
 
+private actor AIRequestDeduplicator {
+    static let shared = AIRequestDeduplicator()
+
+    private var stringTasks: [String: Task<String, Error>] = [:]
+    private var suggestionTasks: [String: Task<[OverlaySuggestion], Error>] = [:]
+
+    func string(
+        key: String,
+        operation: @escaping @Sendable () async throws -> String
+    ) async throws -> String {
+        if let task = stringTasks[key] {
+            return try await task.value
+        }
+        let task = Task { try await operation() }
+        stringTasks[key] = task
+        defer { stringTasks[key] = nil }
+        return try await task.value
+    }
+
+    func suggestions(
+        key: String,
+        operation: @escaping @Sendable () async throws -> [OverlaySuggestion]
+    ) async throws -> [OverlaySuggestion] {
+        if let task = suggestionTasks[key] {
+            return try await task.value
+        }
+        let task = Task { try await operation() }
+        suggestionTasks[key] = task
+        defer { suggestionTasks[key] = nil }
+        return try await task.value
+    }
+}
+
 struct AIClient {
     /// User-configured base URL for OpenAI-compatible Chat Completions (stored in UserDefaults).
     static let openAICompatibleBaseURLUserDefaultsKey = "openAICompatibleBaseURL"
@@ -42,6 +75,28 @@ struct AIClient {
         case .other:
             return Defaults.customModel
         }
+    }
+
+    private func requestCacheKey(
+        kind: String,
+        provider: AIProvider,
+        model: String,
+        apiKey: String,
+        operation: RewriteOperation?,
+        text: String
+    ) -> String {
+        let baseURL = provider == .other
+            ? (UserDefaults.standard.string(forKey: Self.openAICompatibleBaseURLUserDefaultsKey) ?? "")
+            : ""
+        return [
+            kind,
+            provider.rawValue,
+            model,
+            baseURL,
+            String(apiKey.hashValue),
+            operation?.rawValue ?? "multi",
+            text
+        ].joined(separator: "\u{1F}")
     }
 
     private func logAIResponse(
@@ -102,40 +157,49 @@ struct AIClient {
             text: text,
             promptKind: "operationPrompt"
         )
-        let output: String
-        switch provider {
-        case .openai:
-            output = try await rewriteOpenAI(
-                model: model.isEmpty ? Defaults.openAIModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: operation,
-                systemPromptOverride: nil
-            )
-        case .gemini:
-            output = try await rewriteGemini(
-                model: model.isEmpty ? Defaults.geminiModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: operation,
-                systemPromptOverride: nil
-            )
-        case .claude:
-            output = try await rewriteClaude(
-                model: model.isEmpty ? Defaults.claudeModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: operation,
-                systemPromptOverride: nil
-            )
-        case .other:
-            output = try await rewriteOpenAICompatible(
-                model: model.isEmpty ? Defaults.customModel : model,
-                token: apiKey,
-                text: text,
-                operation: operation,
-                systemPromptOverride: nil
-            )
+        let cacheKey = requestCacheKey(
+            kind: "manualRewrite",
+            provider: provider,
+            model: resolvedModel,
+            apiKey: apiKey,
+            operation: operation,
+            text: text
+        )
+        let output = try await AIRequestDeduplicator.shared.string(key: cacheKey) {
+            switch provider {
+            case .openai:
+                return try await rewriteOpenAI(
+                    model: model.isEmpty ? Defaults.openAIModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: operation,
+                    systemPromptOverride: nil
+                )
+            case .gemini:
+                return try await rewriteGemini(
+                    model: model.isEmpty ? Defaults.geminiModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: operation,
+                    systemPromptOverride: nil
+                )
+            case .claude:
+                return try await rewriteClaude(
+                    model: model.isEmpty ? Defaults.claudeModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: operation,
+                    systemPromptOverride: nil
+                )
+            case .other:
+                return try await rewriteOpenAICompatible(
+                    model: model.isEmpty ? Defaults.customModel : model,
+                    token: apiKey,
+                    text: text,
+                    operation: operation,
+                    systemPromptOverride: nil
+                )
+            }
         }
         logAIResponse(kind: "manualRewrite", startedAt: startedAt, output: output)
         return output
@@ -169,40 +233,49 @@ struct AIClient {
         Return only the final corrected text.
         """
 
-        let output: String
-        switch provider {
-        case .openai:
-            output = try await rewriteOpenAI(
-                model: model.isEmpty ? Defaults.openAIModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: strictPrompt
-            )
-        case .gemini:
-            output = try await rewriteGemini(
-                model: model.isEmpty ? Defaults.geminiModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: strictPrompt
-            )
-        case .claude:
-            output = try await rewriteClaude(
-                model: model.isEmpty ? Defaults.claudeModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: strictPrompt
-            )
-        case .other:
-            output = try await rewriteOpenAICompatible(
-                model: model.isEmpty ? Defaults.customModel : model,
-                token: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: strictPrompt
-            )
+        let cacheKey = requestCacheKey(
+            kind: "fixCheck",
+            provider: provider,
+            model: resolvedModel,
+            apiKey: apiKey,
+            operation: .fixGrammar,
+            text: text
+        )
+        let output = try await AIRequestDeduplicator.shared.string(key: cacheKey) {
+            switch provider {
+            case .openai:
+                return try await rewriteOpenAI(
+                    model: model.isEmpty ? Defaults.openAIModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: strictPrompt
+                )
+            case .gemini:
+                return try await rewriteGemini(
+                    model: model.isEmpty ? Defaults.geminiModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: strictPrompt
+                )
+            case .claude:
+                return try await rewriteClaude(
+                    model: model.isEmpty ? Defaults.claudeModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: strictPrompt
+                )
+            case .other:
+                return try await rewriteOpenAICompatible(
+                    model: model.isEmpty ? Defaults.customModel : model,
+                    token: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: strictPrompt
+                )
+            }
         }
         logAIResponse(kind: "fixCheck", startedAt: startedAt, output: output)
         return output
@@ -246,42 +319,52 @@ struct AIClient {
         - No explanations, no markdown, no code block.
         """
 
-        let raw: String
-        switch provider {
-        case .openai:
-            raw = try await rewriteOpenAI(
-                model: model.isEmpty ? Defaults.openAIModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: prompt
-            )
-        case .gemini:
-            raw = try await rewriteGemini(
-                model: model.isEmpty ? Defaults.geminiModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: prompt
-            )
-        case .claude:
-            raw = try await rewriteClaude(
-                model: model.isEmpty ? Defaults.claudeModel : model,
-                apiKey: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: prompt
-            )
-        case .other:
-            raw = try await rewriteOpenAICompatible(
-                model: model.isEmpty ? Defaults.customModel : model,
-                token: apiKey,
-                text: text,
-                operation: .fixGrammar,
-                systemPromptOverride: prompt
-            )
+        let cacheKey = requestCacheKey(
+            kind: "overlaySuggestions",
+            provider: provider,
+            model: resolvedModel,
+            apiKey: apiKey,
+            operation: nil,
+            text: text
+        )
+        let suggestions = try await AIRequestDeduplicator.shared.suggestions(key: cacheKey) {
+            let raw: String
+            switch provider {
+            case .openai:
+                raw = try await rewriteOpenAI(
+                    model: model.isEmpty ? Defaults.openAIModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: prompt
+                )
+            case .gemini:
+                raw = try await rewriteGemini(
+                    model: model.isEmpty ? Defaults.geminiModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: prompt
+                )
+            case .claude:
+                raw = try await rewriteClaude(
+                    model: model.isEmpty ? Defaults.claudeModel : model,
+                    apiKey: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: prompt
+                )
+            case .other:
+                raw = try await rewriteOpenAICompatible(
+                    model: model.isEmpty ? Defaults.customModel : model,
+                    token: apiKey,
+                    text: text,
+                    operation: .fixGrammar,
+                    systemPromptOverride: prompt
+                )
+            }
+            return decodeOverlaySuggestions(raw, original: text)
         }
-        let suggestions = decodeOverlaySuggestions(raw, original: text)
         logAIResponse(kind: "overlaySuggestions", startedAt: startedAt, suggestions: suggestions)
         return suggestions
     }

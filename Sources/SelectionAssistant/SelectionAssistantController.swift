@@ -21,8 +21,11 @@ final class SelectionAssistantController {
     private var lastFallbackProbeAt = Date.distantPast
     private var fallbackProbeAllowedUntil = Date.distantPast
     private var suppressSelectionUntil = Date.distantPast
+    private var ignoreCommandCUntil = Date.distantPast
     private var mouseDownPoint: CGPoint?
     private var didDragSinceMouseDown = false
+    private var selectionGestureID = 0
+    private var lastTraceSignature: String?
     private var eventMonitorTokens: [Any] = []
     private var commandAEventTap: CFMachPort?
     private var commandAEventTapSource: CFRunLoopSource?
@@ -71,8 +74,11 @@ final class SelectionAssistantController {
         lockedPanelPlacementSide = nil
         fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = .distantPast
+        ignoreCommandCUntil = .distantPast
         mouseDownPoint = nil
         didDragSinceMouseDown = false
+        selectionGestureID += 1
+        lastTraceSignature = nil
         viewModel.clear()
         panel?.orderOut(nil)
     }
@@ -86,6 +92,8 @@ final class SelectionAssistantController {
         stableSelectionAnchor = nil
         lastSelectionGestureAnchor = nil
         lockedPanelPlacementSide = nil
+        selectionGestureID += 1
+        lastTraceSignature = nil
         tick()
     }
 
@@ -111,6 +119,7 @@ final class SelectionAssistantController {
         }
         if isFrontmostBrowserLikeApp {
             if let signal = textService.selectedTextSignalAnyFocus(), signal.hasSelection {
+                trace("tick browser signal", signal: signal, key: selectionKey(for: signal))
                 handleSelectionSignal(signal)
                 return
             }
@@ -121,6 +130,7 @@ final class SelectionAssistantController {
                 hideForNoSelection()
                 return
             }
+            trace("tick browser fallback")
             scheduleFallbackSelectionResolve()
             return
         }
@@ -161,12 +171,24 @@ final class SelectionAssistantController {
             return
         }
 
-        showOrMovePanel(near: anchor)
+        if panel?.isVisible == true, pendingSelectionKey == key {
+            trace("signal same move", signal: signal, key: key)
+            showOrMovePanel(near: anchor)
+        }
 
-        guard key != pendingSelectionKey else { return }
+        guard key != pendingSelectionKey else {
+            trace("signal ignored same", signal: signal, key: key)
+            return
+        }
+        trace(
+            "signal new",
+            signal: signal,
+            key: key,
+            extra: "pending=\(pendingSelectionKey ?? "nil")"
+        )
         pendingSelectionKey = key
         viewModel.prepareForSelectionMove()
-        scheduleSelectionResolve(expectedKey: key)
+        scheduleSelectionResolve(expectedKey: key, keepPendingKey: true)
     }
 
     private func hideForNoSelection() {
@@ -186,6 +208,7 @@ final class SelectionAssistantController {
         suppressSelectionUntil = .distantPast
         viewModel.clear()
         panel?.orderOut(nil)
+        trace("hide no selection")
     }
 
     private func hideForConsentRequired(signal: TextAccessService.SelectedTextSignal, anchor: CGRect) {
@@ -212,17 +235,27 @@ final class SelectionAssistantController {
         onConsentRequired?(anchor, signal.targetBundleID)
     }
 
-    private func scheduleSelectionResolve(expectedKey: String) {
+    private func scheduleSelectionResolve(expectedKey: String, keepPendingKey: Bool = false) {
         selectionDebounceTask?.cancel()
+        trace("resolve scheduled", key: expectedKey, extra: "keepPending=\(keepPendingKey)")
         let task = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.pendingSelectionKey == expectedKey else { return }
-                guard let context = self.textService.selectedTextContextAnyFocus(
-                    minLength: 1,
-                    maxLength: 6000,
-                    allowClipboardFallback: true,
-                    allowBrowserClipboardSelection: true
-                ) else {
+                guard let self else { return }
+                guard self.pendingSelectionKey == expectedKey else {
+                    self.trace(
+                        "resolve skipped stale",
+                        key: expectedKey,
+                        extra: "pending=\(self.pendingSelectionKey ?? "nil")"
+                    )
+                    return
+                }
+                guard Date() >= self.suppressSelectionUntil else {
+                    self.trace("resolve skipped suppressed", key: expectedKey)
+                    return
+                }
+                let context = self.readSelectedTextContextForToolbar()
+                guard let context else {
+                    self.trace("resolve no context", key: expectedKey)
                     self.viewModel.clear()
                     return
                 }
@@ -233,11 +266,32 @@ final class SelectionAssistantController {
                 )
                 self.rememberAnchor(anchor, for: expectedKey)
                 self.showOrMovePanel(near: anchor)
+                if !keepPendingKey {
+                    self.pendingSelectionKey = self.selectionKey(for: context)
+                }
+                self.trace(
+                    "resolve context",
+                    context: context,
+                    key: expectedKey,
+                    extra: "keepPending=\(keepPendingKey)"
+                )
                 self.viewModel.setSelectionContext(context)
             }
         }
         selectionDebounceTask = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
+    }
+
+    private func readSelectedTextContextForToolbar() -> TextAccessService.FocusedTextContext? {
+        ignoreCommandCUntil = Date().addingTimeInterval(1.25)
+        let context = textService.selectedTextContextAnyFocus(
+                    minLength: 1,
+                    maxLength: 6000,
+                    allowClipboardFallback: true,
+                    allowBrowserClipboardSelection: true
+        )
+        ignoreCommandCUntil = Date().addingTimeInterval(0.45)
+        return context
     }
 
     private func scheduleFallbackSelectionResolve() {
@@ -257,6 +311,9 @@ final class SelectionAssistantController {
                     self.hideForNoSelection()
                     return
                 }
+                guard Date() >= self.suppressSelectionUntil else {
+                    return
+                }
                 if let app = self.textService.frontmostAppInfo() {
                     switch self.textService.appConsentStatus(for: app.bundleID) {
                     case .allowed:
@@ -270,12 +327,8 @@ final class SelectionAssistantController {
                         return
                     }
                 }
-                guard let context = self.textService.selectedTextContextAnyFocus(
-                    minLength: 1,
-                    maxLength: 6000,
-                    allowClipboardFallback: true,
-                    allowBrowserClipboardSelection: true
-                ) else {
+                guard let context = self.readSelectedTextContextForToolbar() else {
+                    self.trace("fallback no context")
                     self.hideForNoSelection()
                     return
                 }
@@ -289,9 +342,16 @@ final class SelectionAssistantController {
                 self.rememberAnchor(anchor, for: key)
                 self.showOrMovePanel(near: anchor)
                 guard key != self.pendingSelectionKey else {
+                    self.trace("fallback same context", context: context, key: key)
                     self.viewModel.setSelectionContext(context)
                     return
                 }
+                self.trace(
+                    "fallback new context",
+                    context: context,
+                    key: key,
+                    extra: "pending=\(self.pendingSelectionKey ?? "nil")"
+                )
                 self.pendingSelectionKey = key
                 self.viewModel.prepareForSelectionMove()
                 self.viewModel.setSelectionContext(context)
@@ -311,7 +371,7 @@ final class SelectionAssistantController {
 
     private func installInputMonitorsIfNeeded() {
         guard eventMonitorTokens.isEmpty else { return }
-        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown]
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .keyDown]
         let global = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             Task { @MainActor [weak self] in
                 self?.handleSelectionGestureEvent(event)
@@ -362,12 +422,21 @@ final class SelectionAssistantController {
                 }
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
-                if keyCode == 0, flags.contains(.maskCommand) {
+                guard flags.contains(.maskCommand) else {
+                    return Unmanaged.passUnretained(event)
+                }
+                if keyCode == 0 || keyCode == 8 {
                     let controller = Unmanaged<SelectionAssistantController>
                         .fromOpaque(refcon)
                         .takeUnretainedValue()
                     Task { @MainActor in
-                        controller.allowFallbackProbeBriefly()
+                        if keyCode == 0 {
+                            controller.resetResolvedSelectionState()
+                            controller.beginNewSelectionGesture("cmdA")
+                            controller.allowFallbackProbeBriefly()
+                        } else {
+                            controller.handleCommandCEvent()
+                        }
                     }
                 }
                 return Unmanaged.passUnretained(event)
@@ -399,6 +468,8 @@ final class SelectionAssistantController {
             lastSelectionGestureAnchor = nil
             mouseDownPoint = event.locationInWindow
             didDragSinceMouseDown = false
+        case .rightMouseDown:
+            suppressForContextMenu()
         case .leftMouseDragged:
             if let mouseDownPoint {
                 let dx = event.locationInWindow.x - mouseDownPoint.x
@@ -413,6 +484,7 @@ final class SelectionAssistantController {
         case .leftMouseUp:
             if didDragSinceMouseDown {
                 lastSelectionGestureAnchor = mouseAnchor()
+                beginNewSelectionGesture("mouseDrag")
                 allowFallbackProbeBriefly()
             } else {
                 suppressSelectionUntil = Date().addingTimeInterval(0.35)
@@ -423,16 +495,74 @@ final class SelectionAssistantController {
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isCommandA = flags.contains(.command)
                 && (event.charactersIgnoringModifiers?.lowercased() == "a" || event.keyCode == 0)
+            let isCommandC = flags.contains(.command)
+                && (event.charactersIgnoringModifiers?.lowercased() == "c" || event.keyCode == 8)
             if isCommandA {
+                resetResolvedSelectionState()
+                beginNewSelectionGesture("cmdA")
                 allowFallbackProbeBriefly()
+            } else if isCommandC {
+                handleCommandCEvent()
             }
         default:
             break
         }
     }
 
+    private func handleCommandCEvent() {
+        guard Date() >= ignoreCommandCUntil else {
+            trace("ignore internal copy")
+            return
+        }
+        suppressForUserCopy()
+    }
+
+    private func suppressForUserCopy() {
+        suppressSelectionUntil = Date().addingTimeInterval(1.25)
+        selectionDebounceTask?.cancel()
+        selectionDebounceTask = nil
+        fallbackResolveTask?.cancel()
+        fallbackResolveTask = nil
+        pendingSelectionKey = nil
+        pendingConsentKey = nil
+        lockedPanelPlacementSide = nil
+        viewModel.clear()
+        panel?.orderOut(nil)
+        trace("suppress copy")
+    }
+
+    private func suppressForContextMenu() {
+        suppressSelectionUntil = Date().addingTimeInterval(0.9)
+        selectionDebounceTask?.cancel()
+        selectionDebounceTask = nil
+        fallbackResolveTask?.cancel()
+        fallbackResolveTask = nil
+        pendingSelectionKey = nil
+        pendingConsentKey = nil
+        lockedPanelPlacementSide = nil
+        viewModel.clear()
+        panel?.orderOut(nil)
+        trace("suppress context menu")
+    }
+
     private func allowFallbackProbeBriefly() {
         fallbackProbeAllowedUntil = Date().addingTimeInterval(1.0)
+    }
+
+    private func beginNewSelectionGesture(_ reason: String) {
+        selectionGestureID += 1
+        lastTraceSignature = nil
+        trace("gesture new", extra: "reason=\(reason) id=\(selectionGestureID)")
+    }
+
+    private func resetResolvedSelectionState() {
+        pendingSelectionKey = nil
+        pendingConsentKey = nil
+        lockedAnchorKey = nil
+        lockedAnchor = nil
+        stableSelectionKey = nil
+        stableSelectionAnchor = nil
+        lockedPanelPlacementSide = nil
     }
 
     private var isFrontmostBrowserLikeApp: Bool {
@@ -507,7 +637,7 @@ final class SelectionAssistantController {
     }
 
     private func panelFrame(near anchor: CGRect, size: CGSize, lockPlacement: Bool) -> CGRect {
-        let gap: CGFloat = 8
+        let gap: CGFloat = viewModel.hasRewritePreview || viewModel.hasTranslationContent ? 34 : 18
         let contentSize = CGSize(width: size.width, height: max(1, size.height - Self.panelTopReserve))
         let placementContentHeight = max(contentSize.height, Self.maxPanelContentHeight)
         let contentX = anchor.midX - contentSize.width / 2
@@ -530,7 +660,7 @@ final class SelectionAssistantController {
         )
         let belowFrame = CGRect(
             x: anchor.midX - contentSize.width / 2,
-            y: anchor.minY - gap - contentSize.height,
+            y: anchor.minY - gap - size.height,
             width: contentSize.width,
             height: contentSize.height
         )
@@ -563,7 +693,7 @@ final class SelectionAssistantController {
             contentFrame.origin.y = max(contentFrame.origin.y, anchor.maxY + gap)
         } else {
             contentFrame.origin.y = max(contentFrame.origin.y, visible.minY + pad)
-            contentFrame.origin.y = min(contentFrame.origin.y, anchor.minY - gap - contentFrame.height)
+            contentFrame.origin.y = min(contentFrame.origin.y, anchor.minY - gap - size.height)
         }
         return CGRect(
             x: contentFrame.minX,
@@ -683,7 +813,12 @@ final class SelectionAssistantController {
     }
 
     private func selectionKey(for signal: TextAccessService.SelectedTextSignal) -> String {
-        let range = signal.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
+        let range: String
+        if usesWeakSelectionGeometry(bundleID: signal.targetBundleID) {
+            range = "weak-selection-signal-\(selectionGestureID)"
+        } else {
+            range = signal.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
+        }
         return [
             signal.targetBundleID,
             String(signal.targetAppPID),
@@ -692,13 +827,26 @@ final class SelectionAssistantController {
     }
 
     private func selectionKey(for context: TextAccessService.FocusedTextContext) -> String {
-        let range = context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
+        let range: String
+        if context.usesSelection,
+           (usesWeakSelectionGeometry(bundleID: context.targetBundleID)
+            || context.anchor.source == .clipboardFallback) {
+            range = "text-selection"
+        } else {
+            range = context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
+        }
         return [
             context.targetBundleID,
             String(context.targetAppPID),
             range,
-            context.text
+            normalizedSelectionText(context.text)
         ].joined(separator: "|")
+    }
+
+    private func normalizedSelectionText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
 
     private func consentKey(for signal: TextAccessService.SelectedTextSignal) -> String {
@@ -708,5 +856,32 @@ final class SelectionAssistantController {
             String(signal.targetAppPID),
             range
         ].joined(separator: "|")
+    }
+
+    private func trace(
+        _ event: String,
+        signal: TextAccessService.SelectedTextSignal? = nil,
+        context: TextAccessService.FocusedTextContext? = nil,
+        key: String? = nil,
+        extra: String = ""
+    ) {
+        guard SelectionAssistantSettings.diagnosticsEnabled() else { return }
+        let textPart: String = {
+            guard let context else { return "" }
+            return " textLen=\((context.text as NSString).length) text=\(textoraDiagPreview(context.text, limit: 80))"
+        }()
+        let signalPart: String = {
+            guard let signal else { return "" }
+            return " bundle=\(signal.targetBundleID) pid=\(signal.targetAppPID) range=\(signal.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") bounds=\(textoraDiagRect(signal.bounds))"
+        }()
+        let contextPart: String = {
+            guard let context else { return "" }
+            return " bundle=\(context.targetBundleID) pid=\(context.targetAppPID) selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") source=\(context.anchor.source.rawValue) confidence=\(context.anchor.confidence.rawValue)"
+        }()
+        let message = "\(event) id=\(selectionGestureID) key=\(key ?? "nil") pending=\(pendingSelectionKey ?? "nil") panel=\(panel?.isVisible == true)\(signalPart)\(contextPart)\(textPart)\(extra.isEmpty ? "" : " \(extra)")"
+        let signature = "\(event)|\(key ?? "nil")|\(pendingSelectionKey ?? "nil")|\(signal?.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil")|\(context.map { "\(($0.text as NSString).length):\($0.anchor.source.rawValue)" } ?? "nil")|\(extra)"
+        guard signature != lastTraceSignature else { return }
+        lastTraceSignature = signature
+        textoraDiagLog("selectionAssistant", message)
     }
 }
