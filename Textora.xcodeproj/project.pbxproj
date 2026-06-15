@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01A1B2C3D4E5F60718293A11 /* SelectionAssistantController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */; };
+		01A1B2C3D4E5F60718293A12 /* SelectionAssistantSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */; };
+		01A1B2C3D4E5F60718293A13 /* SelectionAssistantViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */; };
+		01A1B2C3D4E5F60718293A14 /* SelectionToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */; };
 		026AE038C3CC7104C457F4BC /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */; };
 		098B8129632FC2A0E3A42EA0 /* ReplacementService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47980A73A856D69377F18964 /* ReplacementService.swift */; };
 		16A1AD437ED20C62601BBBC8 /* InlineRewritePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4186B001A370380D5EF520C /* InlineRewritePanelController.swift */; };
@@ -53,10 +57,6 @@
 		F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */; };
 		F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 691BD7E2D55CD14AA7B983F8 /* helper-icon.png */; };
 		FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8F80F4CABD08C9775382E58 /* Models.swift */; };
-		01A1B2C3D4E5F60718293A11 /* SelectionAssistantController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */; };
-		01A1B2C3D4E5F60718293A12 /* SelectionAssistantSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */; };
-		01A1B2C3D4E5F60718293A13 /* SelectionAssistantViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */; };
-		01A1B2C3D4E5F60718293A14 /* SelectionToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +70,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantController.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantSettings.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantViewModel.swift; sourceTree = "<group>"; };
+		01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionToolbarView.swift; sourceTree = "<group>"; };
 		03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		118D4E1534298FDDBD25D49B /* InlineRewriteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteView.swift; sourceTree = "<group>"; };
@@ -100,8 +104,8 @@
 		B34FBDF4CDFD0C37D4E4FBDA /* common_ru_words.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = common_ru_words.txt; sourceTree = "<group>"; };
 		B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConsentPromptController.swift; sourceTree = "<group>"; };
 		B7EF71A9570085EEB3690569 /* MarkerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkerViews.swift; sourceTree = "<group>"; };
-		B9D2E4F6A8C14039B5E7D1C2 /* GrammarlyRewritePlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrammarlyRewritePlannerTests.swift; sourceTree = "<group>"; };
 		B8C3323B309B30E4C44CEACF /* EasySwitchSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EasySwitchSettings.swift; sourceTree = "<group>"; };
+		B9D2E4F6A8C14039B5E7D1C2 /* GrammarlyRewritePlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrammarlyRewritePlannerTests.swift; sourceTree = "<group>"; };
 		CF82180214CA54812509E58C /* ReplacementServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplacementServiceTests.swift; sourceTree = "<group>"; };
 		DD53487A6560FD81FE7DE9E1 /* AppCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCoordinator.swift; sourceTree = "<group>"; };
 		E43A2D871EF7E4395D8B177B /* FloatingHelperController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingHelperController.swift; sourceTree = "<group>"; };
@@ -111,13 +115,20 @@
 		F889CFF6CF88B62CE4585E1D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F8F80F4CABD08C9775382E58 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		FDFA3B38183BC8A18BB52F2B /* AIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIClient.swift; sourceTree = "<group>"; };
-		01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantController.swift; sourceTree = "<group>"; };
-		01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantSettings.swift; sourceTree = "<group>"; };
-		01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantViewModel.swift; sourceTree = "<group>"; };
-		01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionToolbarView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		01A1B2C3D4E5F60718293A21 /* SelectionAssistant */ = {
+			isa = PBXGroup;
+			children = (
+				01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */,
+				01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */,
+				01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */,
+				01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */,
+			);
+			path = SelectionAssistant;
+			sourceTree = "<group>";
+		};
 		5EC32467F6544FA5FC0B8C1D /* Resources */ = {
 			isa = PBXGroup;
 			children = (
@@ -186,17 +197,6 @@
 				FA55E9D0E2CEA9D5DCFDE5AD /* EasySwitch */,
 			);
 			path = Sources;
-			sourceTree = "<group>";
-		};
-		01A1B2C3D4E5F60718293A21 /* SelectionAssistant */ = {
-			isa = PBXGroup;
-			children = (
-				01A1B2C3D4E5F60718293A01 /* SelectionAssistantController.swift */,
-				01A1B2C3D4E5F60718293A02 /* SelectionAssistantSettings.swift */,
-				01A1B2C3D4E5F60718293A03 /* SelectionAssistantViewModel.swift */,
-				01A1B2C3D4E5F60718293A04 /* SelectionToolbarView.swift */,
-			);
-			path = SelectionAssistant;
 			sourceTree = "<group>";
 		};
 		E54D2E17A9C3F08C1353B4FB /* Products */ = {
@@ -392,13 +392,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = "";
 				DEAD_CODE_STRIPPING = YES;
 				INFOPLIST_FILE = Sources/Info.plist;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_CFBundleDisplayName = Textora;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = "";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -488,21 +491,33 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				AUTOMATION_APPLE_EVENTS = NO;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = 35Q2T38T7Q;
+				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
 				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
 				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
 				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
 				INFOPLIST_FILE = Sources/Info.plist;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_CFBundleDisplayName = Textora;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = "";
+				"MARKETING_VERSION[sdk=macosx*]" = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.textora.desktop;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
 				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;

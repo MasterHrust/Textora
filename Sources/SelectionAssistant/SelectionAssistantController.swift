@@ -8,6 +8,7 @@ final class SelectionAssistantController {
     private var panel: NSPanel?
     private var timer: Timer?
     private var pendingSelectionKey: String?
+    private var pendingWeakSelectionRangeSignature: String?
     private var pendingConsentKey: String?
     private var lockedAnchorKey: String?
     private var lockedAnchor: CGRect?
@@ -21,6 +22,8 @@ final class SelectionAssistantController {
     private var lastFallbackProbeAt = Date.distantPast
     private var fallbackProbeAllowedUntil = Date.distantPast
     private var suppressSelectionUntil = Date.distantPast
+    private var contextMenuSuppressionUntil = Date.distantPast
+    private var transientSelectionLossGraceUntil = Date.distantPast
     private var ignoreCommandCUntil = Date.distantPast
     private var mouseDownPoint: CGPoint?
     private var didDragSinceMouseDown = false
@@ -35,6 +38,7 @@ final class SelectionAssistantController {
     private static let panelWidth: CGFloat = 680
     private static let panelTopReserve: CGFloat = SelectionToolbarView.tooltipTopReserve
     private static let maxPanelContentHeight: CGFloat = 170
+    private static let transientSelectionLossGrace: TimeInterval = 0.65
 
     private enum PanelPlacementSide {
         case above
@@ -65,6 +69,7 @@ final class SelectionAssistantController {
         fallbackResolveTask = nil
         removeInputMonitors()
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         pendingConsentKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
@@ -74,6 +79,8 @@ final class SelectionAssistantController {
         lockedPanelPlacementSide = nil
         fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = .distantPast
+        contextMenuSuppressionUntil = .distantPast
+        transientSelectionLossGraceUntil = .distantPast
         ignoreCommandCUntil = .distantPast
         mouseDownPoint = nil
         didDragSinceMouseDown = false
@@ -86,6 +93,7 @@ final class SelectionAssistantController {
     func refreshAfterConsentChange() {
         pendingConsentKey = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
         stableSelectionKey = nil
@@ -101,6 +109,7 @@ final class SelectionAssistantController {
         suppressConsentPromptUntil = Date().addingTimeInterval(2.0)
         pendingConsentKey = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         panel?.orderOut(nil)
     }
 
@@ -117,10 +126,26 @@ final class SelectionAssistantController {
             }
             return
         }
-        if isFrontmostBrowserLikeApp {
+        if isContextMenuSuppressed || textService.isCurrentFocusInTransientPopupOrMenu() {
+            if !isMouseInsidePanel {
+                let until = max(contextMenuSuppressionUntil, Date().addingTimeInterval(0.5))
+                hideForNoSelection()
+                contextMenuSuppressionUntil = until
+                suppressSelectionUntil = max(suppressSelectionUntil, until)
+            }
+            return
+        }
+        if isFrontmostWeakSelectionApp {
             if let signal = textService.selectedTextSignalAnyFocus(), signal.hasSelection {
                 trace("tick browser signal", signal: signal, key: selectionKey(for: signal))
                 handleSelectionSignal(signal)
+                return
+            }
+            if shouldHoldPanelDuringTransientSelectionLoss {
+                trace("tick transient selection loss")
+                if canUseFallbackSelectionProbe {
+                    scheduleFallbackSelectionResolve()
+                }
                 return
             }
             guard canUseFallbackSelectionProbe else {
@@ -151,8 +176,10 @@ final class SelectionAssistantController {
     private func handleSelectionSignal(_ signal: TextAccessService.SelectedTextSignal) {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
+        extendTransientSelectionLossGrace()
 
         let key = selectionKey(for: signal)
+        let weakRangeSignature = weakSelectionRangeSignature(for: signal)
         let anchor = anchorForCurrentSelection(
             key: key,
             preferred: preferredAnchor(for: signal),
@@ -176,6 +203,16 @@ final class SelectionAssistantController {
             showOrMovePanel(near: anchor)
         }
 
+        if key == pendingSelectionKey,
+           let weakRangeSignature,
+           weakRangeSignature != pendingWeakSelectionRangeSignature {
+            pendingWeakSelectionRangeSignature = weakRangeSignature
+            trace("signal same range changed", signal: signal, key: key, extra: "rangeSignature=\(weakRangeSignature)")
+            viewModel.prepareForSelectionMove()
+            scheduleSelectionResolve(expectedKey: key, keepPendingKey: true)
+            return
+        }
+
         guard key != pendingSelectionKey else {
             trace("signal ignored same", signal: signal, key: key)
             return
@@ -187,6 +224,7 @@ final class SelectionAssistantController {
             extra: "pending=\(pendingSelectionKey ?? "nil")"
         )
         pendingSelectionKey = key
+        pendingWeakSelectionRangeSignature = weakRangeSignature
         viewModel.prepareForSelectionMove()
         scheduleSelectionResolve(expectedKey: key, keepPendingKey: true)
     }
@@ -197,6 +235,7 @@ final class SelectionAssistantController {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         pendingConsentKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
@@ -206,6 +245,7 @@ final class SelectionAssistantController {
         lockedPanelPlacementSide = nil
         fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = .distantPast
+        transientSelectionLossGraceUntil = .distantPast
         viewModel.clear()
         panel?.orderOut(nil)
         trace("hide no selection")
@@ -217,12 +257,14 @@ final class SelectionAssistantController {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
         stableSelectionKey = nil
         stableSelectionAnchor = nil
         lastSelectionGestureAnchor = nil
         lockedPanelPlacementSide = nil
+        transientSelectionLossGraceUntil = .distantPast
         viewModel.clear()
         panel?.orderOut(nil)
 
@@ -253,12 +295,19 @@ final class SelectionAssistantController {
                     self.trace("resolve skipped suppressed", key: expectedKey)
                     return
                 }
+                guard !self.isContextMenuSuppressed,
+                      !self.textService.isCurrentFocusInTransientPopupOrMenu() else {
+                    self.trace("resolve skipped context menu", key: expectedKey)
+                    self.hideForNoSelection()
+                    return
+                }
                 let context = self.readSelectedTextContextForToolbar()
                 guard let context else {
                     self.trace("resolve no context", key: expectedKey)
                     self.viewModel.clear()
                     return
                 }
+                self.extendTransientSelectionLossGrace()
                 let anchor = self.anchorForCurrentSelection(
                     key: expectedKey,
                     preferred: self.preferredAnchor(for: context),
@@ -314,6 +363,12 @@ final class SelectionAssistantController {
                 guard Date() >= self.suppressSelectionUntil else {
                     return
                 }
+                guard !self.isContextMenuSuppressed,
+                      !self.textService.isCurrentFocusInTransientPopupOrMenu() else {
+                    self.trace("fallback skipped context menu")
+                    self.hideForNoSelection()
+                    return
+                }
                 if let app = self.textService.frontmostAppInfo() {
                     switch self.textService.appConsentStatus(for: app.bundleID) {
                     case .allowed:
@@ -329,9 +384,13 @@ final class SelectionAssistantController {
                 }
                 guard let context = self.readSelectedTextContextForToolbar() else {
                     self.trace("fallback no context")
+                    if self.shouldHoldPanelDuringTransientSelectionLoss {
+                        return
+                    }
                     self.hideForNoSelection()
                     return
                 }
+                self.extendTransientSelectionLossGrace()
                 self.fallbackProbeAllowedUntil = .distantPast
                 let key = self.selectionKey(for: context)
                 let anchor = self.anchorForCurrentSelection(
@@ -462,6 +521,11 @@ final class SelectionAssistantController {
             if panel?.isVisible == true, !clickedInsidePanel {
                 hideForNoSelection()
             }
+            if isContextMenuSuppressed {
+                contextMenuSuppressionUntil = Date().addingTimeInterval(0.35)
+                suppressSelectionUntil = max(suppressSelectionUntil, contextMenuSuppressionUntil)
+                return
+            }
             if !clickedInsidePanel {
                 suppressSelectionUntil = Date().addingTimeInterval(0.35)
             }
@@ -485,6 +549,10 @@ final class SelectionAssistantController {
             if didDragSinceMouseDown {
                 lastSelectionGestureAnchor = mouseAnchor()
                 beginNewSelectionGesture("mouseDrag")
+                allowFallbackProbeBriefly()
+            } else if textService.isGoogleSheetsSelectionSurfaceFrontmost() {
+                lastSelectionGestureAnchor = mouseAnchor()
+                beginNewSelectionGesture("googleSheetsClick")
                 allowFallbackProbeBriefly()
             } else {
                 suppressSelectionUntil = Date().addingTimeInterval(0.35)
@@ -524,53 +592,78 @@ final class SelectionAssistantController {
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         pendingConsentKey = nil
         lockedPanelPlacementSide = nil
+        transientSelectionLossGraceUntil = .distantPast
         viewModel.clear()
         panel?.orderOut(nil)
         trace("suppress copy")
     }
 
     private func suppressForContextMenu() {
-        suppressSelectionUntil = Date().addingTimeInterval(0.9)
+        contextMenuSuppressionUntil = Date().addingTimeInterval(8.0)
+        suppressSelectionUntil = max(suppressSelectionUntil, contextMenuSuppressionUntil)
         selectionDebounceTask?.cancel()
         selectionDebounceTask = nil
         fallbackResolveTask?.cancel()
         fallbackResolveTask = nil
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         pendingConsentKey = nil
         lockedPanelPlacementSide = nil
+        transientSelectionLossGraceUntil = .distantPast
         viewModel.clear()
         panel?.orderOut(nil)
         trace("suppress context menu")
+    }
+
+    private var isContextMenuSuppressed: Bool {
+        Date() < contextMenuSuppressionUntil
     }
 
     private func allowFallbackProbeBriefly() {
         fallbackProbeAllowedUntil = Date().addingTimeInterval(1.0)
     }
 
+    private func extendTransientSelectionLossGrace() {
+        transientSelectionLossGraceUntil = Date().addingTimeInterval(Self.transientSelectionLossGrace)
+    }
+
+    private var shouldHoldPanelDuringTransientSelectionLoss: Bool {
+        guard panel?.isVisible == true else { return false }
+        guard Date() <= transientSelectionLossGraceUntil else { return false }
+        return isFrontmostWeakSelectionApp
+    }
+
     private func beginNewSelectionGesture(_ reason: String) {
         selectionGestureID += 1
+        pendingWeakSelectionRangeSignature = nil
         lastTraceSignature = nil
         trace("gesture new", extra: "reason=\(reason) id=\(selectionGestureID)")
     }
 
     private func resetResolvedSelectionState() {
         pendingSelectionKey = nil
+        pendingWeakSelectionRangeSignature = nil
         pendingConsentKey = nil
         lockedAnchorKey = nil
         lockedAnchor = nil
         stableSelectionKey = nil
         stableSelectionAnchor = nil
         lockedPanelPlacementSide = nil
+        transientSelectionLossGraceUntil = .distantPast
     }
 
-    private var isFrontmostBrowserLikeApp: Bool {
+    private var isFrontmostWeakSelectionApp: Bool {
         guard let bundleID = textService.frontmostAppInfo()?.bundleID.lowercased() else { return false }
         return bundleID == "com.google.chrome"
             || bundleID == "com.apple.safari"
+            || bundleID == "com.tinyspeck.slackmacgap"
             || bundleID.contains("chrome")
             || bundleID.contains("firefox")
+            || bundleID.contains("slack")
+            || bundleID.contains("tinyspeck")
             || bundleID.contains("brave")
             || bundleID.contains("opera")
             || bundleID.contains("arc")
@@ -841,6 +934,11 @@ final class SelectionAssistantController {
             range,
             normalizedSelectionText(context.text)
         ].joined(separator: "|")
+    }
+
+    private func weakSelectionRangeSignature(for signal: TextAccessService.SelectedTextSignal) -> String? {
+        guard usesWeakSelectionGeometry(bundleID: signal.targetBundleID) else { return nil }
+        return signal.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil"
     }
 
     private func normalizedSelectionText(_ text: String) -> String {

@@ -21,6 +21,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private let easySwitch = EasySwitchManager()
     private var easySwitchSettingsObserver: NSObjectProtocol?
     private var selectionAssistantSettingsObserver: NSObjectProtocol?
+    private var accessibilityPermissionObserver: NSObjectProtocol?
     private var easySwitchStartRetryTask: DispatchWorkItem?
     private var easySwitchStartRetryCount = 0
     private var primaryInteractionRetryTask: DispatchWorkItem?
@@ -47,6 +48,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if let selectionAssistantSettingsObserver {
             NotificationCenter.default.removeObserver(selectionAssistantSettingsObserver)
         }
+        if let accessibilityPermissionObserver {
+            NotificationCenter.default.removeObserver(accessibilityPermissionObserver)
+        }
         primaryInteractionRetryTask?.cancel()
         launchWarmupTask?.cancel()
         easySwitch.stop()
@@ -60,6 +64,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func start() {
+        AccessibilityPermissionMonitor.shared.start()
+        installAccessibilityPermissionObserverIfNeeded()
         installEasySwitchSettingsObserverIfNeeded()
         installSelectionAssistantSettingsObserverIfNeeded()
         rewritePanel.onHoverChanged = { [weak self] hovering in
@@ -176,6 +182,54 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 self?.configurePrimaryInteractionMode()
             }
         }
+    }
+
+    private func installAccessibilityPermissionObserverIfNeeded() {
+        guard accessibilityPermissionObserver == nil else { return }
+        accessibilityPermissionObserver = NotificationCenter.default.addObserver(
+            forName: .textoraAccessibilityPermissionDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let isTrusted = (notification.userInfo?["isTrusted"] as? Bool) ?? self.textAccess.hasAccessibilityPermission()
+                self.handleAccessibilityPermissionChanged(isTrusted: isTrusted)
+            }
+        }
+    }
+
+    private func handleAccessibilityPermissionChanged(isTrusted: Bool) {
+        logSelectionAssistantDiagnostic("accessibility changed trusted=\(isTrusted)")
+        if isTrusted {
+            dismissAccessibilityWizardIfVisibleWithoutRestartingOnboarding()
+            KeychainHelper.migrateIfNeeded()
+            KeychainHelper.warmUpCache()
+            cancelPrimaryInteractionRetry()
+            cancelEasySwitchStartRetry()
+            configureEasySwitch(forceRestart: false)
+            configurePrimaryInteractionMode()
+            scheduleLaunchWarmupRetry(reason: "accessibilityGranted")
+            showOnboardingIfNeededOnLaunch(afterAccessibility: true)
+        } else {
+            selectionAssistant.stop()
+            floatingHelper?.stop()
+            rewritePanel.hide()
+            consentPrompt.hide()
+            easySwitch.stop()
+            helperStatus = "Accessibility disabled"
+            schedulePrimaryInteractionRetry(reason: "accessibilityRevoked")
+            scheduleEasySwitchStartRetry(reason: "accessibilityRevoked")
+        }
+        settingsViewModel?.refreshAccessibilityPermissionStatus()
+        onboardingViewModel?.refreshAccessibilityPermissionStatus()
+    }
+
+    private func dismissAccessibilityWizardIfVisibleWithoutRestartingOnboarding() {
+        guard let accessibilityWizardWindow else { return }
+        accessibilityWizardWindow.delegate = nil
+        accessibilityWizardWindow.close()
+        self.accessibilityWizardWindow = nil
     }
 
     private var isToolboxEnabled: Bool {
@@ -392,8 +446,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func showAccessibilityWizard() {
         guard accessibilityWizardWindow == nil else { return }
         let content = AccessibilityWizardView {
-            // Native AX prompt registers the app in Privacy → Accessibility (URL alone does not).
-            self.textAccess.requestAccessibilityPermissionIfNeeded()
+            self.textAccess.openAccessibilityPermissionSettings()
             self.dismissAccessibilityWizard()
         }
         let hosting = NSHostingView(rootView: content)

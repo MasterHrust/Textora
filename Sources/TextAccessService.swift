@@ -1,6 +1,55 @@
 import AppKit
 import ApplicationServices
 
+extension Notification.Name {
+    static let textoraAccessibilityPermissionDidChange = Notification.Name("textoraAccessibilityPermissionDidChange")
+}
+
+@MainActor
+final class AccessibilityPermissionMonitor {
+    static let shared = AccessibilityPermissionMonitor()
+
+    private var timer: Timer?
+    private(set) var isTrusted: Bool
+
+    private init() {
+        isTrusted = AXIsProcessTrusted()
+    }
+
+    func start() {
+        guard timer == nil else {
+            refreshNow()
+            return
+        }
+        refreshNow()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] (_: Timer) in
+            Task { @MainActor in
+                self?.refreshNow()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    @discardableResult
+    func refreshNow() -> Bool {
+        let next = AXIsProcessTrusted()
+        guard next != isTrusted else { return next }
+        isTrusted = next
+        NotificationCenter.default.post(
+            name: .textoraAccessibilityPermissionDidChange,
+            object: self,
+            userInfo: ["isTrusted": next]
+        )
+        return next
+    }
+}
+
 // MARK: - Shared diagnostic log (/tmp/TextoraMarkerGeometry.log)
 //
 // Top-level helper used from both `TextAccessService` and
@@ -288,7 +337,21 @@ final class TextAccessService {
     ]
     private let sensitiveFieldHints: [String] = [
         "password", "passcode", "otp", "token", "2fa", "login", "log in", "sign in", "sign-in",
-        "signin", "username", "user name", "credential", "auth", "verification code"
+        "signin", "username", "user name", "credential", "auth", "authentication", "authorize",
+        "verification code", "secret", "passphrase", "unlock", "keychain",
+        "private key", "account password", "admin password"
+    ]
+    private let highRiskSensitiveFieldHints: [String] = [
+        "security", "secure", "certificate", "certificates", "signing", "code sign", "codesign",
+        "developer id", "apple id"
+    ]
+    private let highRiskSensitiveBundleIDs: Set<String> = [
+        "com.apple.dt.Xcode",
+        "com.apple.SecurityAgent",
+        "com.apple.keychainaccess"
+    ]
+    private let highRiskSensitiveBundleFragments: [String] = [
+        "xcode", "securityagent", "keychain"
     ]
     private let neverEditableRoles: Set<String> = [
         "AXApplication",
@@ -377,12 +440,114 @@ final class TextAccessService {
     ]
 
     func hasAccessibilityPermission() -> Bool {
-        AXIsProcessTrusted()
+        let trusted = AXIsProcessTrusted()
+        Task { @MainActor in
+            AccessibilityPermissionMonitor.shared.refreshNow()
+        }
+        return trusted
     }
 
     func requestAccessibilityPermissionIfNeeded() {
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+        registerForAccessibilityPermission()
+    }
+
+    private func registerForAccessibilityPermission() {
+        registerRunningAppForSystemServices()
+        touchAccessibilityAPIForTCCRegistration()
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+        touchAccessibilityAPIForTCCRegistration()
+    }
+
+    private func registerRunningAppForSystemServices() {
+        let bundleURL = Bundle.main.bundleURL
+        guard bundleURL.pathExtension == "app" else { return }
+        _ = LSRegisterURL(bundleURL as CFURL, true)
+    }
+
+    private func touchAccessibilityAPIForTCCRegistration() {
+        let selfElement = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        var selfRole: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(
+            selfElement,
+            kAXRoleAttribute as CFString,
+            &selfRole
+        )
+        var selfWindows: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(
+            selfElement,
+            kAXWindowsAttribute as CFString,
+            &selfWindows
+        )
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedApp: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedApplicationAttribute as CFString,
+            &focusedApp
+        )
+
+        if let focusedAppElement = focusedApp as! AXUIElement? {
+            var focusedRole: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(
+                focusedAppElement,
+                kAXRoleAttribute as CFString,
+                &focusedRole
+            )
+        }
+
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
+            var role: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(
+                appElement,
+                kAXRoleAttribute as CFString,
+                &role
+            )
+        }
+    }
+
+    func openAccessibilityPermissionSettings() {
+        requestAccessibilityPermissionIfNeeded()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApp.activate(ignoringOtherApps: true)
+            self.registerForAccessibilityPermission()
+            Self.openAccessibilitySettingsPane()
+            Task { @MainActor in
+                AccessibilityPermissionMonitor.shared.refreshNow()
+            }
+        }
+    }
+
+    private static func openAccessibilitySettingsPane() {
+        let settingsURLs = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+            "x-apple.systempreferences:com.apple.systempreferences"
+        ]
+
+        for rawURL in settingsURLs {
+            guard let url = URL(string: rawURL) else { continue }
+            if NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+
+        let appURLs = [
+            URL(fileURLWithPath: "/System/Applications/System Settings.app"),
+            URL(fileURLWithPath: "/System/Applications/System Preferences.app")
+        ]
+        for appURL in appURLs where FileManager.default.fileExists(atPath: appURL.path) {
+            if NSWorkspace.shared.open(appURL) {
+                return
+            }
+        }
     }
 
     func getSelectedText() -> String {
@@ -518,6 +683,10 @@ final class TextAccessService {
             if isTransientPopupLike(current) { return true }
         }
         return false
+    }
+
+    func isGoogleSheetsSelectionSurfaceFrontmost() -> Bool {
+        isGoogleSheetsFrontmost()
     }
 
     func currentFocusSurfaceSignature() -> String {
@@ -1177,9 +1346,9 @@ final class TextAccessService {
         if allowClipboardFallback,
            allowBrowserClipboardSelection,
            let front = frontmostAppInfo(),
-           isBrowserBundleID(front.bundleID) {
+           prefersClipboardSelectionContextForBundle(front.bundleID) {
             if let focused = focusedElement(),
-               shouldIgnoreCurrentFocusedInput(element: focused, includeAppConsent: false) {
+               shouldBlockBrowserClipboardSelectionProbe(focused) {
                 return nil
             }
             return selectedTextContextFromFrontmostClipboardSelection(
@@ -1292,6 +1461,16 @@ final class TextAccessService {
         return nil
     }
 
+    private func shouldBlockBrowserClipboardSelectionProbe(_ element: AXUIElement) -> Bool {
+        if isGoogleSheetsFrontmost() {
+            return isSecureInputField(element)
+                || isTransientPopupLike(element)
+                || hasSensitiveFieldHint(element)
+                || isBrowserChromeInputField(element)
+        }
+        return shouldIgnoreCurrentFocusedInput(element: element, includeAppConsent: false)
+    }
+
     private func selectedTextContextFromFrontmostClipboardSelection(
         minLength: Int,
         maxLength: Int
@@ -1311,8 +1490,24 @@ final class TextAccessService {
             return nil
         }
         let pid = app.processIdentifier
-        let target = AXUIElementCreateApplication(pid)
-        let frame = focusedWindowFrame()
+        let appElement = AXUIElementCreateApplication(pid)
+        let target: AXUIElement
+        if let focused = focusedElement() {
+            var focusedPID: pid_t = 0
+            AXUIElementGetPid(focused, &focusedPID)
+            if focusedPID == pid,
+               !isSecureInputField(focused),
+               !hasSensitiveFieldHint(focused) {
+                target = focused
+            } else {
+                target = appElement
+            }
+        } else {
+            target = appElement
+        }
+        let targetFrame = rectForTextContext(anchorElement: target)
+        let frame = (isUsableBrowserContextFrame(targetFrame) ? targetFrame : nil)
+            ?? focusedWindowFrame()
             ?? frontmostBrowserCGWindowFrame()
             ?? NSScreen.main?.visibleFrame
             ?? .zero
@@ -1936,6 +2131,10 @@ final class TextAccessService {
             || b.contains("zulip")
     }
 
+    private func prefersClipboardSelectionContextForBundle(_ bundleID: String) -> Bool {
+        isBrowserBundleID(bundleID) || isSlackBundleID(bundleID)
+    }
+
     private func prefersAtomicClipboardRangePaste(for context: FocusedTextContext) -> Bool {
         !context.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -1944,6 +2143,7 @@ final class TextAccessService {
         let pasteboard = NSPasteboard.general
         let snapshot = snapshotPasteboard(pasteboard)
         let baselineChangeCount = pasteboard.changeCount
+        let originalValue = valueText(of: context.targetElement)
 
         // Best effort: restore original selection before browser-native copy/paste.
         if let range = context.selectedRange {
@@ -1980,6 +2180,24 @@ final class TextAccessService {
         }
         usleep(140_000)
 
+        if let originalValue, let updatedValue = valueText(of: context.targetElement) {
+            let changed = normalized(updatedValue) != normalized(originalValue)
+            let containsReplacement = normalized(updatedValue).contains(normalized(rewritten))
+            textoraDiagLog(
+                "clipboardSelectionPasteReplace",
+                "post-paste valueChanged=\(changed) containsReplacement=\(containsReplacement) "
+                + "original=\(textoraDiagPreview(originalValue)) updated=\(textoraDiagPreview(updatedValue))"
+            )
+            if changed, containsReplacement {
+                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+                return true
+            }
+            if !changed {
+                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+                return false
+            }
+        }
+
         // 3) Verify by selecting previous range and copying again (best effort).
         if let range = context.selectedRange {
             var r = range
@@ -2001,13 +2219,12 @@ final class TextAccessService {
             || (!rewrittenNorm.isEmpty && copiedAfterNorm.contains(rewrittenNorm))
 
         // Always restore user clipboard after our flow.
-        if pasteboard.changeCount != baselineChangeCount {
-            restorePasteboard(pasteboard, snapshot: snapshot)
-        }
-        // Paste can succeed while verification copy returns stale/empty data in some hosts.
-        // If we reached this point, paste shortcut already fired; treat it as success.
-        _ = ok
-        return true
+        restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+        textoraDiagLog(
+            "clipboardSelectionPasteReplace",
+            "verify copiedAfterOK=\(ok) copiedAfter=\(textoraDiagPreview(copiedAfter))"
+        )
+        return ok
     }
 
     private func applyDiffBasedClipboardSelectionPaste(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
@@ -5976,9 +6193,13 @@ end tell
     }
 
     private func isSecureInputField(_ element: AXUIElement) -> Bool {
-        let role = axString(of: element, attribute: kAXRoleAttribute) ?? ""
-        let subrole = axString(of: element, attribute: kAXSubroleAttribute) ?? ""
-        return role == "AXSecureTextField" || subrole == "AXSecureTextField"
+        let role = (axString(of: element, attribute: kAXRoleAttribute) ?? "").lowercased()
+        let subrole = (axString(of: element, attribute: kAXSubroleAttribute) ?? "").lowercased()
+        if role.contains("secure") || subrole.contains("secure") {
+            return true
+        }
+        let secureAttributes = ["AXProtected", "AXSecure", "AXIsSecure"]
+        return secureAttributes.contains { axBool(of: element, attribute: $0) == true }
     }
 
     private func isTransientPopupLike(_ element: AXUIElement) -> Bool {
@@ -6028,16 +6249,35 @@ end tell
     }
 
     private func hasSensitiveFieldHint(_ element: AXUIElement) -> Bool {
-        let hintSource = [
-            axString(of: element, attribute: "AXPlaceholderValue"),
-            axString(of: element, attribute: kAXTitleAttribute),
-            axString(of: element, attribute: kAXDescriptionAttribute),
-            axString(of: element, attribute: "AXIdentifier")
-        ]
-        .compactMap { $0?.lowercased() }
-        .joined(separator: " ")
-        guard !hintSource.isEmpty else { return false }
-        return sensitiveFieldHints.contains(where: { hintSource.contains($0) })
+        var current: AXUIElement? = element
+        var depth = 0
+        while let candidate = current, depth < 10 {
+            if isSecureInputField(candidate) {
+                return true
+            }
+            let metadata = sensitiveMetadataText(of: candidate)
+            if sensitiveFieldHints.contains(where: { metadata.contains($0) }) {
+                return true
+            }
+            if isHighRiskSensitiveContext(candidate),
+               highRiskSensitiveFieldHints.contains(where: { metadata.contains($0) }) {
+                return true
+            }
+            current = axElement(of: candidate, attribute: kAXParentAttribute as String)
+            depth += 1
+        }
+        return false
+    }
+
+    private func isHighRiskSensitiveContext(_ element: AXUIElement) -> Bool {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return false }
+        let bundleID = resolvedBundleID(forOwningPID: pid)
+        if highRiskSensitiveBundleIDs.contains(bundleID) {
+            return true
+        }
+        let lowerBundleID = bundleID.lowercased()
+        return highRiskSensitiveBundleFragments.contains { lowerBundleID.contains($0) }
     }
 
     private func isBrowserChromeInputField(_ element: AXUIElement) -> Bool {
@@ -6111,6 +6351,31 @@ end tell
         let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard status == .success else { return nil }
         return value as? String
+    }
+
+    private func axBool(of element: AXUIElement, attribute: String) -> Bool? {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard status == .success else { return nil }
+        if let boolValue = value as? Bool {
+            return boolValue
+        }
+        return (value as? NSNumber)?.boolValue
+    }
+
+    private func sensitiveMetadataText(of element: AXUIElement) -> String {
+        [
+            axString(of: element, attribute: kAXRoleAttribute),
+            axString(of: element, attribute: kAXSubroleAttribute),
+            axString(of: element, attribute: kAXTitleAttribute),
+            axString(of: element, attribute: kAXDescriptionAttribute),
+            axString(of: element, attribute: kAXHelpAttribute),
+            axString(of: element, attribute: "AXPlaceholderValue"),
+            axString(of: element, attribute: "AXIdentifier"),
+            axString(of: element, attribute: "AXRoleDescription")
+        ]
+        .compactMap { $0?.lowercased() }
+        .joined(separator: " ")
     }
 
     private func isAXAttributeSettable(_ element: AXUIElement, attribute: String) -> Bool {

@@ -99,10 +99,29 @@ final class AppViewModel: ObservableObject {
     private let aiClient = AIClient()
     private var isReloadingFromDefaults = false
     private var autoSaveTask: DispatchWorkItem?
+    private var accessibilityPermissionObserver: NSObjectProtocol?
 
     init() {
+        AccessibilityPermissionMonitor.shared.start()
+        accessibilityPermissionObserver = NotificationCenter.default.addObserver(
+            forName: .textoraAccessibilityPermissionDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let isTrusted = (notification.userInfo?["isTrusted"] as? Bool) ?? false
+            Task { @MainActor [weak self] in
+                self?.hasAccessibilityPermission = isTrusted
+            }
+        }
         reloadFromUserDefaults()
         isOnboardingComplete = UserDefaults.standard.bool(forKey: OnboardingDefaults.completedKey)
+    }
+
+    deinit {
+        if let accessibilityPermissionObserver {
+            NotificationCenter.default.removeObserver(accessibilityPermissionObserver)
+        }
+        autoSaveTask?.cancel()
     }
 
     /// Sync fields when reopening Settings so keys/model match disk (avoids stale SwiftUI state).
@@ -412,9 +431,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func requestAccessibilityPermission() {
-        textService.requestAccessibilityPermissionIfNeeded()
+        textService.openAccessibilityPermissionSettings()
         // Permission is granted outside the app; re-check after a short delay.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.refreshAccessibilityPermissionStatus()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.refreshAccessibilityPermissionStatus()
         }
     }

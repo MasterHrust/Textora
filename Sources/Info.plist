@@ -16,5 +16,13 @@
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Textora reads visible text from Google Docs in Chrome to check only the current page.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>Textora needs Accessibility access to read selected text and replace text in apps when you ask it to rewrite, translate, or correct writing.</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 </dict>
 </plist>
