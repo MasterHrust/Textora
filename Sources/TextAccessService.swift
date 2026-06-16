@@ -451,13 +451,18 @@ final class TextAccessService {
         registerForAccessibilityPermission()
     }
 
-    private func registerForAccessibilityPermission() {
+    @discardableResult
+    private func registerForAccessibilityPermission(prompt: Bool = true) -> Bool {
         registerRunningAppForSystemServices()
         touchAccessibilityAPIForTCCRegistration()
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let options = [promptKey: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        let options = [promptKey: prompt] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
         touchAccessibilityAPIForTCCRegistration()
+        Task { @MainActor in
+            AccessibilityPermissionMonitor.shared.refreshNow()
+        }
+        return trusted
     }
 
     private func registerRunningAppForSystemServices() {
@@ -515,7 +520,7 @@ final class TextAccessService {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             NSApp.activate(ignoringOtherApps: true)
-            self.registerForAccessibilityPermission()
+            self.registerForAccessibilityPermission(prompt: true)
             Self.openAccessibilitySettingsPane()
             Task { @MainActor in
                 AccessibilityPermissionMonitor.shared.refreshNow()
@@ -525,8 +530,8 @@ final class TextAccessService {
 
     private static func openAccessibilitySettingsPane() {
         let settingsURLs = [
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             "x-apple.systempreferences:com.apple.preference.security?Privacy",
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
             "x-apple.systempreferences:com.apple.systempreferences"
@@ -554,7 +559,7 @@ final class TextAccessService {
         if let axText = readViaAccessibility(), !axText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return axText
         }
-        return readViaClipboardFallback()
+        return readClipboardAfterCopyIfSelectionLikely() ?? ""
     }
 
     func replaceSelectedText(with text: String) -> Bool {
@@ -1085,7 +1090,7 @@ final class TextAccessService {
 
         if full.isEmpty, allowClipboardFallback, bundleID != "com.apple.mail" {
             if (range?.length ?? 0) > 0 {
-                let copied = readViaClipboardFallback().trimmingCharacters(in: .whitespacesAndNewlines)
+                let copied = readClipboardAfterCopyIfSelectionLikely()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if copied.count >= minLength {
                     let anchor = textAnchor(
                         for: focused,
@@ -1218,8 +1223,7 @@ final class TextAccessService {
     }
 
     private func readClipboardAfterCopyIfSelectionLikely(
-        allowGoogleSheetsGrid: Bool = false,
-        acceptUnchangedPasteboard: Bool = false
+        allowGoogleSheetsGrid: Bool = false
     ) -> String? {
         if isGoogleSheetsFrontmost(), !allowGoogleSheetsGrid {
             let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
@@ -1247,7 +1251,10 @@ final class TextAccessService {
             usleep(50_000)
             if pasteboard.changeCount != oldChangeCount { break }
         }
-        guard pasteboard.changeCount != oldChangeCount || acceptUnchangedPasteboard else { return nil }
+        guard pasteboard.changeCount != oldChangeCount else {
+            textoraDiagLog("clipboardProbe", "no pasteboard change after copy; refusing stale clipboard")
+            return nil
+        }
         let copied = extractPlainTextFromPasteboard(pasteboard)
         restorePasteboard(pasteboard, snapshot: snapshot)
         return copied
@@ -1396,9 +1403,7 @@ final class TextAccessService {
                     allowGoogleSheetsGrid: allowBrowserClipboardSelection
                 )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if selected.isEmpty {
-                    selected = readViaClipboardFallback(
-                        allowGoogleSheetsGrid: allowBrowserClipboardSelection
-                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    textoraDiagLog("clipboardProbe", "live copy returned no plain text")
                 }
             }
 
@@ -1483,8 +1488,7 @@ final class TextAccessService {
             return nil
         }
         guard let copied = readClipboardAfterCopyIfSelectionLikely(
-            allowGoogleSheetsGrid: true,
-            acceptUnchangedPasteboard: true
+            allowGoogleSheetsGrid: true
         )?.trimmingCharacters(in: .whitespacesAndNewlines),
               copied.count >= minLength else {
             return nil
@@ -6472,29 +6476,6 @@ end tell
         let dy = max(0, abs(rect.midY - reference.midY) - reference.height / 2)
         score -= hypot(dx, dy)
         return score
-    }
-
-    private func readViaClipboardFallback(allowGoogleSheetsGrid: Bool = false) -> String {
-        if isGoogleSheetsFrontmost(), !allowGoogleSheetsGrid {
-            let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
-            guard isActiveCellEditor else {
-                textoraDiagLog("clipboardFallback", "blocked in Google Sheets outside active cell editor")
-                return ""
-            }
-        }
-        let pasteboard = NSPasteboard.general
-        let oldSnapshot = snapshotPasteboard(pasteboard)
-        let oldChangeCount = pasteboard.changeCount
-
-        triggerCopyShortcut()
-        usleep(120_000)
-
-        guard pasteboard.changeCount != oldChangeCount else {
-            return ""
-        }
-        let copied = extractPlainTextFromPasteboard(pasteboard)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        restorePasteboard(pasteboard, snapshot: oldSnapshot)
-        return copied
     }
 
     private func triggerCopyShortcut() {
