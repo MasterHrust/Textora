@@ -304,7 +304,7 @@ final class SelectionAssistantController {
                 let context = self.readSelectedTextContextForToolbar()
                 guard let context else {
                     self.trace("resolve no context", key: expectedKey)
-                    self.viewModel.clear()
+                    self.hideForNoSelection()
                     return
                 }
                 self.extendTransientSelectionLossGrace()
@@ -659,6 +659,9 @@ final class SelectionAssistantController {
         guard let bundleID = textService.frontmostAppInfo()?.bundleID.lowercased() else { return false }
         return bundleID == "com.google.chrome"
             || bundleID == "com.apple.safari"
+            || bundleID == "com.adobe.reader"
+            || bundleID == "com.adobe.acrobat.pro"
+            || bundleID == "com.apple.preview"
             || bundleID == "com.tinyspeck.slackmacgap"
             || bundleID.contains("chrome")
             || bundleID.contains("firefox")
@@ -667,6 +670,9 @@ final class SelectionAssistantController {
             || bundleID.contains("brave")
             || bundleID.contains("opera")
             || bundleID.contains("arc")
+            || bundleID.contains("adobe.reader")
+            || bundleID.contains("adobe.acrobat")
+            || bundleID.contains("pdf")
             || bundleID == "company.thebrowser.browser"
     }
 

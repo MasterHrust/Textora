@@ -1312,6 +1312,11 @@ final class TextAccessService {
             let bundleID = resolvedBundleID(forOwningPID: pid)
             let range = selectedRange(of: el)
             if let range, range.length > 0 {
+                guard hasTextualSelectionSignal(on: el, range: range, bundleID: bundleID) else {
+                    element = axElement(of: el, attribute: kAXParentAttribute as String)
+                    depth += 1
+                    continue
+                }
                 let fallback = elementFrame(of: el) ?? focusedWindowFrame()
                 let bounds = selectionBounds(of: el, rangeValue: selectedRangeValue(of: el), reference: fallback)
                     ?? elementFrame(of: el)
@@ -1340,6 +1345,30 @@ final class TextAccessService {
             targetAppPID: pid,
             targetBundleID: bundleID
         )
+    }
+
+    private func hasTextualSelectionSignal(on element: AXUIElement, range: CFRange, bundleID: String) -> Bool {
+        if let selected = selectedText(of: element)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !selected.isEmpty {
+            return true
+        }
+        if let value = valueText(of: element) {
+            let nsValue = value as NSString
+            let location = max(0, range.location)
+            let length = max(0, range.length)
+            if location < nsValue.length {
+                let boundedLength = min(length, nsValue.length - location)
+                if boundedLength > 0,
+                   !nsValue.substring(with: NSRange(location: location, length: boundedLength))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty {
+                    return true
+                }
+            }
+        }
+        // PDF readers often expose a range/bounds signal for text selection but hide
+        // the actual selected text from AX; the later context read verifies via Cmd+C.
+        return isPDFReaderBundleID(bundleID)
     }
 
     /// Reads the currently selected text even when the focused element is not an editable input.
@@ -2119,9 +2148,19 @@ final class TextAccessService {
             || b.contains("opera")
     }
 
+    private func isPDFReaderBundleID(_ bundleID: String) -> Bool {
+        let b = bundleID.lowercased()
+        return b == "com.adobe.reader"
+            || b == "com.adobe.acrobat.pro"
+            || b == "com.apple.preview"
+            || b.contains("adobe.reader")
+            || b.contains("adobe.acrobat")
+            || b.contains("pdf")
+    }
+
     /// Browsers and Electron/WebView messengers (Slack, Telegram, …) often ignore AX writes on selection; Cmd+C / Cmd+V works.
     private func prefersClipboardSelectionPasteReplaceForBundle(_ bundleID: String) -> Bool {
-        if isBrowserBundleID(bundleID) { return true }
+        if isBrowserBundleID(bundleID) || isPDFReaderBundleID(bundleID) { return true }
         let b = bundleID.lowercased()
         return b.contains("slack")
             || b.contains("telegram")
@@ -2136,7 +2175,7 @@ final class TextAccessService {
     }
 
     private func prefersClipboardSelectionContextForBundle(_ bundleID: String) -> Bool {
-        isBrowserBundleID(bundleID) || isSlackBundleID(bundleID)
+        isBrowserBundleID(bundleID) || isSlackBundleID(bundleID) || isPDFReaderBundleID(bundleID)
     }
 
     private func prefersAtomicClipboardRangePaste(for context: FocusedTextContext) -> Bool {
