@@ -40,10 +40,32 @@ struct AIClient {
 
     enum Defaults {
         static let openAIModel = "gpt-5.4"
-        static let geminiModel = "gemini-1.5-pro"
-        static let claudeModel = "claude-3-5-sonnet-latest"
+        static let geminiModel = "gemini-3.7-flash"
+        static let claudeModel = "claude-sonnet-5"
         /// Placeholder model id; your server may use a different id — set **Model** in Settings accordingly.
         static let customModel = "gpt-4o-mini"
+    }
+
+    func availableModels(provider: AIProvider, apiKey: String) async throws -> [AIModelOption] {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            throw NSError(
+                domain: "Textora",
+                code: 19,
+                userInfo: [NSLocalizedDescriptionKey: "Add an API key to load models"]
+            )
+        }
+
+        switch provider {
+        case .openai:
+            return try await availableOpenAIModels(apiKey: key)
+        case .gemini:
+            return try await availableGeminiModels(apiKey: key)
+        case .claude:
+            return try await availableClaudeModels(apiKey: key)
+        case .other:
+            return []
+        }
     }
 
     private func logAIRequest(
@@ -858,6 +880,139 @@ struct AIClient {
         "is", "it", "its", "of", "on", "or", "please", "so", "the", "then", "to", "with", "you", "your"
     ]
 
+    private func availableOpenAIModels(apiKey: String) async throws -> [AIModelOption] {
+        guard let url = URL(string: "https://api.openai.com/v1/models") else {
+            throw modelCatalogError(provider: "OpenAI", detail: "Invalid models URL")
+        }
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let data = try await modelCatalogData(for: request, provider: "OpenAI")
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let entries = json?["data"] as? [[String: Any]] ?? []
+        let models: [(option: AIModelOption, created: Int)] = entries.compactMap { entry in
+            guard let id = entry["id"] as? String, isOpenAITextModel(id) else { return nil }
+            return (
+                AIModelOption(id: id, displayName: id),
+                entry["created"] as? Int ?? 0
+            )
+        }
+        return uniqueModelOptions(
+            models.sorted {
+                $0.created == $1.created
+                    ? $0.option.id.localizedStandardCompare($1.option.id) == .orderedAscending
+                    : $0.created > $1.created
+            }.map(\.option)
+        )
+    }
+
+    private func availableGeminiModels(apiKey: String) async throws -> [AIModelOption] {
+        var components = URLComponents(string: "https://generativelanguage.googleapis.com/v1beta/models")
+        components?.queryItems = [
+            URLQueryItem(name: "pageSize", value: "1000"),
+            URLQueryItem(name: "key", value: apiKey)
+        ]
+        guard let url = components?.url else {
+            throw modelCatalogError(provider: "Gemini", detail: "Invalid models URL")
+        }
+
+        let data = try await modelCatalogData(
+            for: URLRequest(url: url, timeoutInterval: 20),
+            provider: "Gemini"
+        )
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let entries = json?["models"] as? [[String: Any]] ?? []
+        let models = entries.compactMap { entry -> AIModelOption? in
+            let methods = entry["supportedGenerationMethods"] as? [String] ?? []
+            guard methods.contains("generateContent") else { return nil }
+            let resourceName = entry["name"] as? String ?? ""
+            let id = (entry["baseModelId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? resourceName.replacingOccurrences(of: "models/", with: "")
+            guard isGeminiTextModel(id) else { return nil }
+            let displayName = (entry["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AIModelOption(id: id, displayName: displayName?.isEmpty == false ? displayName! : id)
+        }
+        return uniqueModelOptions(models).sorted {
+            $0.id.localizedStandardCompare($1.id) == .orderedDescending
+        }
+    }
+
+    private func availableClaudeModels(apiKey: String) async throws -> [AIModelOption] {
+        guard let url = URL(string: "https://api.anthropic.com/v1/models?limit=1000") else {
+            throw modelCatalogError(provider: "Claude", detail: "Invalid models URL")
+        }
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+
+        let data = try await modelCatalogData(for: request, provider: "Claude")
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let entries = json?["data"] as? [[String: Any]] ?? []
+        return uniqueModelOptions(entries.compactMap { entry -> AIModelOption? in
+            guard let id = entry["id"] as? String, !id.isEmpty else { return nil }
+            let displayName = entry["display_name"] as? String
+            return AIModelOption(id: id, displayName: displayName?.isEmpty == false ? displayName! : id)
+        })
+    }
+
+    private func modelCatalogData(for request: URLRequest, provider: String) async throws -> Data {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw modelCatalogError(provider: provider, detail: "No HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = providerErrorDetail(data) ?? "HTTP \(http.statusCode)"
+            throw modelCatalogError(provider: provider, detail: detail)
+        }
+        return data
+    }
+
+    private func providerErrorDetail(_ data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return String(data: data.prefix(280), encoding: .utf8)
+        }
+        if let error = json["error"] as? [String: Any] {
+            return (error["message"] as? String) ?? (error["status"] as? String)
+        }
+        return json["message"] as? String
+    }
+
+    private func modelCatalogError(provider: String, detail: String) -> NSError {
+        NSError(
+            domain: "Textora",
+            code: 20,
+            userInfo: [NSLocalizedDescriptionKey: "Could not load \(provider) models: \(detail)"]
+        )
+    }
+
+    private func uniqueModelOptions(_ options: [AIModelOption]) -> [AIModelOption] {
+        var seen = Set<String>()
+        return options.filter { seen.insert($0.id).inserted }
+    }
+
+    private func isOpenAITextModel(_ id: String) -> Bool {
+        let value = id.lowercased()
+        let isReasoningModel = value.first == "o" && value.dropFirst().first?.isNumber == true
+        let isSupportedFamily = value.hasPrefix("gpt-")
+            || isReasoningModel
+            || (value.hasPrefix("ft:") && value.contains("gpt"))
+        guard isSupportedFamily else { return false }
+        let excludedFragments = [
+            "audio", "codex", "computer-use", "deep-research", "image", "moderation",
+            "realtime", "search", "transcribe", "tts"
+        ]
+        return !excludedFragments.contains(where: value.contains)
+    }
+
+    private func isGeminiTextModel(_ id: String) -> Bool {
+        let value = id.lowercased()
+        guard value.hasPrefix("gemini-") || value.hasPrefix("gemma-") else { return false }
+        let excludedFragments = [
+            "audio", "computer-use", "deep-research", "image", "live", "robotics", "tts"
+        ]
+        return !excludedFragments.contains(where: value.contains)
+    }
+
     private func rewriteOpenAI(
         model: String,
         apiKey: String,
@@ -879,14 +1034,11 @@ struct AIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
-        let body: [String: Any] = [
-            "model": modelId,
-            "temperature": 0.2,
-            "messages": [
-                ["role": "system", "content": systemPromptOverride ?? operation.prompt],
-                ["role": "user", "content": text]
-            ]
-        ]
+        let body = chatCompletionsBody(
+            model: modelId,
+            systemPrompt: systemPromptOverride ?? operation.prompt,
+            userText: text
+        )
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -945,9 +1097,6 @@ struct AIClient {
         let body: [String: Any] = [
             "contents": [
                 ["parts": [["text": prompt]]]
-            ],
-            "generationConfig": [
-                "temperature": 0.2
             ]
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -990,7 +1139,6 @@ struct AIClient {
         let body: [String: Any] = [
             "model": model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Defaults.claudeModel : model,
             "max_tokens": 1024,
-            "temperature": 0.2,
             "system": systemPromptOverride ?? operation.prompt,
             "messages": [
                 ["role": "user", "content": text]
@@ -1046,14 +1194,14 @@ struct AIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(trimmedToken)", forHTTPHeaderField: "Authorization")
 
-        let body: [String: Any] = [
-            "model": model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Defaults.customModel : model,
-            "temperature": 0.2,
-            "messages": [
-                ["role": "system", "content": systemPromptOverride ?? operation.prompt],
-                ["role": "user", "content": text]
-            ]
-        ]
+        let resolvedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? Defaults.customModel
+            : model
+        let body = chatCompletionsBody(
+            model: resolvedModel,
+            systemPrompt: systemPromptOverride ?? operation.prompt,
+            userText: text
+        )
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -1091,5 +1239,22 @@ struct AIClient {
             return url.appendingPathComponent("chat").appendingPathComponent("completions")
         }
         return url.appendingPathComponent("v1").appendingPathComponent("chat").appendingPathComponent("completions")
+    }
+
+    /// Keep the shared Chat Completions payload model-neutral. Sampling and
+    /// reasoning parameters are intentionally omitted because their accepted
+    /// values vary by model and provider; each API applies its supported defaults.
+    private func chatCompletionsBody(
+        model: String,
+        systemPrompt: String,
+        userText: String
+    ) -> [String: Any] {
+        [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userText]
+            ]
+        ]
     }
 }

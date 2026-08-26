@@ -43,10 +43,21 @@ final class AppViewModel: ObservableObject {
     @Published var provider: AIProvider = .openai {
         didSet {
             guard !isReloadingFromDefaults else { return }
-            model = ""
+            UserDefaults.standard.set(
+                model.trimmingCharacters(in: .whitespacesAndNewlines),
+                forKey: oldValue.modelUserDefaultsKey
+            )
+            model = storedModel(for: provider, allowLegacyValue: false)
+            UserDefaults.standard.set(model, forKey: "model")
+            availableModels = []
+            modelCatalogError = ""
+            Task { await refreshAvailableModels() }
         }
     }
     @Published var model: String = ""
+    @Published var availableModels: [AIModelOption] = []
+    @Published var isLoadingModels = false
+    @Published var modelCatalogError = ""
     @Published var openAIKey: String = ""
     @Published var geminiKey: String = ""
     @Published var claudeKey: String = ""
@@ -100,6 +111,7 @@ final class AppViewModel: ObservableObject {
     private var isReloadingFromDefaults = false
     private var autoSaveTask: DispatchWorkItem?
     private var accessibilityPermissionObserver: NSObjectProtocol?
+    private var modelCatalogRequestID = UUID()
 
     init() {
         AccessibilityPermissionMonitor.shared.start()
@@ -208,6 +220,59 @@ final class AppViewModel: ObservableObject {
         isLoading = false
     }
 
+    var recommendedModel: String {
+        defaultModel(for: provider)
+    }
+
+    var hasCurrentProviderAPIKey: Bool {
+        !apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var modelPickerOptions: [AIModelOption] {
+        let selected = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty, !availableModels.contains(where: { $0.id == selected }) else {
+            return availableModels
+        }
+        return [AIModelOption(id: selected, displayName: selected)] + availableModels
+    }
+
+    func refreshAvailableModels() async {
+        let requestedProvider = provider
+        guard requestedProvider != .other else {
+            availableModels = []
+            modelCatalogError = ""
+            isLoadingModels = false
+            return
+        }
+
+        let key = apiKey(for: requestedProvider).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            availableModels = []
+            modelCatalogError = "Add the API key to load available models."
+            isLoadingModels = false
+            return
+        }
+
+        let requestID = UUID()
+        modelCatalogRequestID = requestID
+        isLoadingModels = true
+        modelCatalogError = ""
+        do {
+            let models = try await aiClient.availableModels(provider: requestedProvider, apiKey: key)
+            guard modelCatalogRequestID == requestID, provider == requestedProvider else { return }
+            availableModels = models
+            if models.isEmpty {
+                modelCatalogError = "The provider returned no compatible text models."
+            }
+        } catch {
+            guard modelCatalogRequestID == requestID, provider == requestedProvider else { return }
+            availableModels = []
+            modelCatalogError = friendlyModelCatalogError(error.localizedDescription)
+        }
+        guard modelCatalogRequestID == requestID, provider == requestedProvider else { return }
+        isLoadingModels = false
+    }
+
     func copyResult() {
         guard !rewrittenText.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -224,7 +289,9 @@ final class AppViewModel: ObservableObject {
 
     func saveSettings() {
         UserDefaults.standard.set(provider.rawValue, forKey: "provider")
-        UserDefaults.standard.set(model.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "model")
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(trimmedModel, forKey: provider.modelUserDefaultsKey)
+        UserDefaults.standard.set(trimmedModel, forKey: "model")
         UserDefaults.standard.set(
             customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
@@ -383,6 +450,17 @@ final class AppViewModel: ObservableObject {
         return "Validation failed: \(raw)"
     }
 
+    private func friendlyModelCatalogError(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if lower.contains("401") || lower.contains("403") || lower.contains("api key") || lower.contains("permission") {
+            return "Could not load models. Check the API key and its permissions."
+        }
+        if lower.contains("network") || lower.contains("timed out") || lower.contains("offline") {
+            return "Could not load models. Check your internet connection."
+        }
+        return raw
+    }
+
     /// Debounced auto-save: persists settings 0.5s after the last change.
     func debouncedSave() {
         guard !isReloadingFromDefaults else { return }
@@ -407,19 +485,44 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func apiKey(for provider: AIProvider) -> String {
+        switch provider {
+        case .openai:
+            return openAIKey
+        case .gemini:
+            return geminiKey
+        case .claude:
+            return claudeKey
+        case .other:
+            return customToken
+        }
+    }
+
     private func storedModelForCurrentProvider() -> String {
-        let stored = UserDefaults.standard.string(forKey: "model")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        storedModel(for: provider, allowLegacyValue: true)
+    }
+
+    private func storedModel(for provider: AIProvider, allowLegacyValue: Bool) -> String {
+        let defaultsStore = UserDefaults.standard
+        let providerValue = defaultsStore.string(forKey: provider.modelUserDefaultsKey)
+        let legacyValue = allowLegacyValue ? defaultsStore.string(forKey: "model") : nil
+        let stored = (providerValue ?? legacyValue ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stored.isEmpty else { return "" }
         let defaults: Set<String> = [
             AIClient.Defaults.openAIModel,
-            "gpt-5.4-mini",
+            "gemini-1.5-pro",
             AIClient.Defaults.geminiModel,
+            "claude-3-5-sonnet-latest",
             AIClient.Defaults.claudeModel,
             AIClient.Defaults.customModel
         ]
         if defaults.contains(stored) {
-            UserDefaults.standard.set("", forKey: "model")
+            defaultsStore.set("", forKey: provider.modelUserDefaultsKey)
             return ""
+        }
+        if providerValue == nil {
+            defaultsStore.set(stored, forKey: provider.modelUserDefaultsKey)
         }
         return stored
     }

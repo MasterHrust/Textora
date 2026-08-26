@@ -16,6 +16,7 @@ struct ContentView: View {
         .onAppear {
             viewModel.refreshAccessibilityPermissionStatus()
             viewModel.refreshAppConsents()
+            Task { await viewModel.refreshAvailableModels() }
         }
         .onChange(of: viewModel.settingsAutosaveToken) { _, _ in
             viewModel.debouncedSave()
@@ -56,13 +57,50 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Model (Auto, optional)", text: $viewModel.model)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            modelSelectionControl
             Text("Leave empty to let Textora use the recommended model for the selected provider.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             credentialFields
             providerSetupHelp
+        }
+    }
+
+    @ViewBuilder
+    private var modelSelectionControl: some View {
+        if viewModel.provider == .other {
+            TextField("Model", text: $viewModel.model)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Picker("Model", selection: $viewModel.model) {
+                        Text("Auto (\(viewModel.recommendedModel))").tag("")
+                        ForEach(viewModel.modelPickerOptions) { option in
+                            Text(option.pickerLabel).tag(option.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        Task { await viewModel.refreshAvailableModels() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh available models")
+                    .disabled(viewModel.isLoadingModels || !viewModel.hasCurrentProviderAPIKey)
+
+                    if viewModel.isLoadingModels {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                if !viewModel.modelCatalogError.isEmpty {
+                    Text(viewModel.modelCatalogError)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -656,9 +694,7 @@ struct OnboardingView: View {
 
     @ViewBuilder
     private var onboardingCredentialFields: some View {
-        TextField("Model (Auto, optional)", text: $viewModel.model)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textFieldStyle(.roundedBorder)
+        onboardingModelSelectionControl
         switch viewModel.provider {
         case .openai:
             SecureField("GPT API key", text: $viewModel.openAIKey)
@@ -689,6 +725,43 @@ struct OnboardingView: View {
             SecureField("API token", text: $viewModel.customToken)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    @ViewBuilder
+    private var onboardingModelSelectionControl: some View {
+        if viewModel.provider == .other {
+            TextField("Model", text: $viewModel.model)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textFieldStyle(.roundedBorder)
+        } else {
+            HStack(spacing: 8) {
+                Picker("Model", selection: $viewModel.model) {
+                    Text("Auto (\(viewModel.recommendedModel))").tag("")
+                    ForEach(viewModel.modelPickerOptions) { option in
+                        Text(option.pickerLabel).tag(option.id)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    Task { await viewModel.refreshAvailableModels() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh available models")
+                .disabled(viewModel.isLoadingModels || !viewModel.hasCurrentProviderAPIKey)
+
+                if viewModel.isLoadingModels {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            if !viewModel.modelCatalogError.isEmpty {
+                Text(viewModel.modelCatalogError)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.muted)
+            }
         }
     }
 }

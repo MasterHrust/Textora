@@ -8,6 +8,8 @@ enum AIProvider: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var modelUserDefaultsKey: String { "model.\(rawValue)" }
+
     /// UI label; `rawValue` stays stable for UserDefaults persistence.
     var displayName: String {
         switch self {
@@ -16,6 +18,17 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .claude: return "Claude"
         case .other: return "Other"
         }
+    }
+}
+
+struct AIModelOption: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+
+    var pickerLabel: String {
+        displayName.caseInsensitiveCompare(id) == .orderedSame
+            ? id
+            : "\(displayName) - \(id)"
     }
 }
 
