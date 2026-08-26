@@ -593,7 +593,7 @@ struct OnboardingView: View {
                     }
                     .buttonStyle(PrimaryButtonStyle())
                 } else if viewModel.onboardingStep == 3 {
-                    Button(viewModel.isOnboardingBusy ? "Checking..." : "Check and continue") {
+                    Button(viewModel.isOnboardingBusy ? "Connecting..." : "Continue") {
                         Task {
                             let valid = await viewModel.validateCurrentProviderSetup()
                             if valid {
@@ -630,7 +630,7 @@ struct OnboardingView: View {
             }
         }
         .padding(16)
-        .frame(width: 500, height: 430)
+        .frame(width: 500, height: 470)
         .background(popupBackground)
         .preferredColorScheme(.dark)
     }
@@ -694,7 +694,16 @@ struct OnboardingView: View {
 
     @ViewBuilder
     private var onboardingCredentialFields: some View {
-        onboardingModelSelectionControl
+        if viewModel.provider == .other {
+            Text("1. Add API details")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+        } else {
+            Text("1. Paste your API key")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+
         switch viewModel.provider {
         case .openai:
             SecureField("GPT API key", text: $viewModel.openAIKey)
@@ -726,42 +735,58 @@ struct OnboardingView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
         }
-    }
 
-    @ViewBuilder
-    private var onboardingModelSelectionControl: some View {
         if viewModel.provider == .other {
+            Text("2. Enter the model name")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
             TextField("Model", text: $viewModel.model)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
         } else {
-            HStack(spacing: 8) {
-                Picker("Model", selection: $viewModel.model) {
-                    Text("Auto (\(viewModel.recommendedModel))").tag("")
-                    ForEach(viewModel.modelPickerOptions) { option in
-                        Text(option.pickerLabel).tag(option.id)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("2. Check available models")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
 
+            HStack(spacing: 10) {
                 Button {
                     Task { await viewModel.refreshAvailableModels() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Label(
+                        viewModel.isLoadingModels ? "Checking..." : "Check key and load models",
+                        systemImage: "arrow.clockwise"
+                    )
                 }
-                .help("Refresh available models")
                 .disabled(viewModel.isLoadingModels || !viewModel.hasCurrentProviderAPIKey)
+                .buttonStyle(SecondaryButtonStyle())
 
                 if viewModel.isLoadingModels {
                     ProgressView()
                         .controlSize(.small)
+                } else if !viewModel.availableModels.isEmpty {
+                    Label("\(viewModel.availableModels.count) available", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Theme.success)
                 }
+                Spacer()
             }
             if !viewModel.modelCatalogError.isEmpty {
                 Text(viewModel.modelCatalogError)
                     .font(.caption2)
                     .foregroundStyle(Theme.muted)
             }
+
+            Text("3. Choose a model")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+            Picker("Model", selection: $viewModel.model) {
+                Text("Auto (\(viewModel.recommendedModel))").tag("")
+                ForEach(viewModel.modelPickerOptions) { option in
+                    Text(option.pickerLabel).tag(option.id)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(viewModel.availableModels.isEmpty)
         }
     }
 }

@@ -58,9 +58,15 @@ final class AppViewModel: ObservableObject {
     @Published var availableModels: [AIModelOption] = []
     @Published var isLoadingModels = false
     @Published var modelCatalogError = ""
-    @Published var openAIKey: String = ""
-    @Published var geminiKey: String = ""
-    @Published var claudeKey: String = ""
+    @Published var openAIKey: String = "" {
+        didSet { providerKeyDidChange(.openai, from: oldValue, to: openAIKey) }
+    }
+    @Published var geminiKey: String = "" {
+        didSet { providerKeyDidChange(.gemini, from: oldValue, to: geminiKey) }
+    }
+    @Published var claudeKey: String = "" {
+        didSet { providerKeyDidChange(.claude, from: oldValue, to: claudeKey) }
+    }
     @Published var customToken: String = ""
     /// OpenAI-compatible Chat Completions base URL (e.g. `https://api.example.com` or `https://host/v1`).
     @Published var customOpenAIBaseURL: String = ""
@@ -386,6 +392,10 @@ final class AppViewModel: ObservableObject {
         onboardingErrorText = ""
         isOnboardingBusy = false
         reloadFromUserDefaults()
+        modelCatalogRequestID = UUID()
+        availableModels = []
+        modelCatalogError = ""
+        isLoadingModels = false
     }
 
     func validateCurrentProviderSetup() async -> Bool {
@@ -496,6 +506,17 @@ final class AppViewModel: ObservableObject {
         case .other:
             return customToken
         }
+    }
+
+    private func providerKeyDidChange(_ keyProvider: AIProvider, from oldValue: String, to newValue: String) {
+        guard !isReloadingFromDefaults, provider == keyProvider else { return }
+        let oldKey = oldValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newKey = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard oldKey != newKey else { return }
+        modelCatalogRequestID = UUID()
+        availableModels = []
+        modelCatalogError = ""
+        isLoadingModels = false
     }
 
     private func storedModelForCurrentProvider() -> String {
