@@ -1,6 +1,12 @@
-# Textora
+<p align="center">
+  <img src="Resources/Assets.xcassets/AppLogo.imageset/applogo.png" alt="Textora app icon" width="180">
+</p>
 
-Textora is an open-source macOS writing assistant that helps you rewrite selected text directly inside other apps (mail, chats, browsers, editors, and more).
+<h1 align="center">Textora</h1>
+
+<p align="center">
+  A private, open-source writing assistant for macOS that rewrites, translates, and dictates text directly in the apps you already use.
+</p>
 
 [Support the project](https://paypal.me/RShytskou)
 
@@ -9,12 +15,40 @@ This repository does not include a Textora backend proxy.
 
 ## Features
 
-- Floating helper near focused text inputs (with Accessibility permission).
-- Rewrite modes: `Fix`, `Shorten`, `Formal`, `Humanize`.
-- Works in native apps and web/Electron apps (AX + clipboard fallback).
-- Per-app text access consent controls.
-- First-run setup wizard (API key first, then Accessibility).
-- Provider support: OpenAI, Gemini, Claude, and Other OpenAI-compatible APIs.
+### Rewrite and translate anywhere
+
+- Select text in native macOS apps, browsers, Electron apps, mail clients, chats, and editors.
+- Choose `Fix`, `Shorten`, `Formal`, or `Humanize`, or let SmartAI recommend the best rewrite mode.
+- Translate selected text into your configured target language.
+- Apply the result in place or copy it when direct replacement is unavailable.
+- Preserve surrounding rich-text formatting where the target app supports it.
+
+### Three ways to work
+
+- **Toolbox** appears automatically near the active text field.
+- **Floating icon** keeps Textora close without opening the full toolbox.
+- **Hotkeys** trigger rewrite, translation, or dictation without an on-screen helper.
+- Textora lives in the menu bar and can optionally launch automatically when you log in.
+
+### Private offline dictation
+
+- Hold a configurable shortcut to dictate into the active text field.
+- Speech recognition runs entirely on your Mac with the Parakeet V3 model.
+- Supports 25 languages, automatic keyboard-layout language selection, a fallback language, and microphone selection.
+- Audio is never uploaded or saved.
+
+### Bring your own AI provider
+
+- Supports OpenAI, Gemini, Claude, and OpenAI-compatible endpoints.
+- Loads available models from supported providers while still allowing an automatic recommended model.
+- API keys stay in the macOS Data Protection Keychain and requests go directly from your Mac to the selected provider.
+
+### Safety and app control
+
+- Per-app Allow, Deny, and Ask controls for text access.
+- First-run setup guides you through provider configuration, interface mode, shortcuts, and Accessibility permission.
+- HTTPS-only AI transport with same-host redirect enforcement.
+- Accessibility plus guarded clipboard fallbacks for apps that expose limited text metadata.
 
 ## Requirements
 
@@ -75,7 +109,8 @@ Expected:
 1. Open quick setup wizard.
 2. Add an API key (default provider: OpenAI).
 3. Verify connection.
-4. Complete setup and grant Accessibility permission.
+4. Choose Toolbox, Floating icon, or Hotkeys.
+5. Complete setup and grant Accessibility permission.
 
 Provider key links:
 
@@ -99,10 +134,17 @@ Textora requires **Accessibility** permission to:
 You can grant access in macOS Settings under:
 `Privacy & Security` -> `Accessibility`.
 
+macOS keeps Accessibility decisions in its protected privacy database. Removing the app does not automatically remove that system entry; remove Textora manually from the same Accessibility settings page if you want to clear it completely.
+
+## Launch at Login
+
+Enable **Launch Textora at login** under **Settings > System**. macOS may ask you to approve Textora under `General` -> `Login Items` the first time it is enabled.
+
 ## Privacy
 
 - API keys are stored locally in the Data Protection Keychain. Textora never falls back to the legacy login keychain.
 - Textora does not route your data through an app-owned backend in this repository.
+- Offline Dictation processes audio locally and does not save recordings.
 - Your provider's data policies and terms apply when using their API.
 
 ## Known Limitations

@@ -138,6 +138,10 @@ final class AppViewModel: ObservableObject {
             OfflineDictationSettings.microphoneUID = selectedMicrophoneUID
         }
     }
+    @Published private(set) var launchAtLoginEnabled = false
+    @Published private(set) var launchAtLoginRequiresApproval = false
+    @Published private(set) var launchAtLoginUnavailable = false
+    @Published private(set) var launchAtLoginErrorText = ""
     @Published private(set) var speechModelState: SpeechModelState = .notDownloaded
     @Published private(set) var microphones: [SpeechMicrophone] = []
     @Published var onboardingStep: Int = 1
@@ -207,8 +211,30 @@ final class AppViewModel: ObservableObject {
         selectedMicrophoneUID = OfflineDictationSettings.microphoneUID
         speechModelState = SpeechModelManager.shared.state
         microphones = SpeechAudioRecorder.microphones()
+        refreshLaunchAtLoginStatus()
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        let state = LaunchAtLoginManager.state
+        launchAtLoginEnabled = state.isRegistered
+        launchAtLoginRequiresApproval = state == .requiresApproval
+        launchAtLoginUnavailable = state == .unavailable
+    }
+
+    func setLaunchAtLoginEnabled(_ enabled: Bool) {
+        launchAtLoginErrorText = ""
+        do {
+            try LaunchAtLoginManager.setEnabled(enabled)
+        } catch {
+            launchAtLoginErrorText = "Could not update Login Items: \(error.localizedDescription)"
+        }
+        refreshLaunchAtLoginStatus()
+    }
+
+    func openLoginItemsSettings() {
+        LaunchAtLoginManager.openSystemSettings()
     }
 
     func refreshSelection() {

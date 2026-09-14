@@ -41,6 +41,7 @@
 		DCFB90292255A9F75617AD76 /* SpeechModelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16F2F2A9108BCEDEDB52B640 /* SpeechModelManager.swift */; };
 		E4A982EDDD503D59E3BA4E90 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 416D4536F89F3B7892ECC7D6 /* ContentView.swift */; };
 		F0B5D4AF1598B8AA952BAFB5 /* KeyboardInputSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F74B8A7F0C4CB0A0D05FBDC /* KeyboardInputSource.swift */; };
+		F2922758ABCCCBD235CD3E94 /* LaunchAtLoginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B05D52B01E1B982C6917E59 /* LaunchAtLoginManager.swift */; };
 		F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */; };
 		F731FD68419082BFC259436A /* OfflineSpeechTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDEDF9B5244F5F36C5BA612 /* OfflineSpeechTests.swift */; };
 		F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 691BD7E2D55CD14AA7B983F8 /* helper-icon.png */; };
@@ -82,6 +83,7 @@
 		71F2DB0CE514BFFBC3D00D9A /* OfflineDictationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineDictationController.swift; sourceTree = "<group>"; };
 		72CDDF25FD6A0084CE6C9149 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7B35A51BB5E68FD696502693 /* THIRD-PARTY-NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "THIRD-PARTY-NOTICES.md"; sourceTree = "<group>"; };
+		8B05D52B01E1B982C6917E59 /* LaunchAtLoginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginManager.swift; sourceTree = "<group>"; };
 		9793F10C2EE38A217E02A313 /* SelectionAssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantViewModel.swift; sourceTree = "<group>"; };
 		9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextAccessService.swift; sourceTree = "<group>"; };
 		B2DC8AC988823AE36D048CC7 /* FloatingButtonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingButtonView.swift; sourceTree = "<group>"; };
@@ -154,6 +156,7 @@
 				5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */,
 				3F74B8A7F0C4CB0A0D05FBDC /* KeyboardInputSource.swift */,
 				03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */,
+				8B05D52B01E1B982C6917E59 /* LaunchAtLoginManager.swift */,
 				B7EF71A9570085EEB3690569 /* MarkerViews.swift */,
 				F8F80F4CABD08C9775382E58 /* Models.swift */,
 				9A92B1B1A4B68C4794D7F706 /* TextAccessService.swift */,
@@ -344,6 +347,7 @@
 				C2A6A78088D1B9765015F188 /* InlineRewriteViewModel.swift in Sources */,
 				F0B5D4AF1598B8AA952BAFB5 /* KeyboardInputSource.swift in Sources */,
 				026AE038C3CC7104C457F4BC /* KeychainHelper.swift in Sources */,
+				F2922758ABCCCBD235CD3E94 /* LaunchAtLoginManager.swift in Sources */,
 				C196E96AD4B703765CB5CA65 /* MarkerViews.swift in Sources */,
 				FCADB3D2438B0EA37C9F0AC8 /* Models.swift in Sources */,
 				D2E8271EBFA2503A648A793A /* OfflineDictationController.swift in Sources */,

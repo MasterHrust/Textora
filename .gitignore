@@ -1,0 +1,23 @@
+node_modules
+dist
+.DS_Store
+*.log
+.deriveddata
+.deriveddata-*
+apps/macos-app/DerivedData
+apps/macos-app/DerivedDataBuild
+apps/macos-app/build.log
+apps/macos-app/build-last.log
+.xcbuild
+*.sh
+.swiftpm/
+*.xcodeproj/xcuserdata/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+tokens.json
+secrets.json
+Secrets.xcconfig
+*.private.xcconfig

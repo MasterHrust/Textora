@@ -17,6 +17,7 @@ struct ContentView: View {
         .onAppear {
             viewModel.refreshAccessibilityPermissionStatus()
             viewModel.refreshAppConsents()
+            viewModel.refreshLaunchAtLoginStatus()
             Task { await viewModel.refreshAvailableModels() }
         }
         .onChange(of: viewModel.settingsAutosaveToken) { _, _ in
@@ -31,6 +32,8 @@ struct ContentView: View {
             interfaceSection
             Divider().padding(.vertical, 4)
             offlineDictationSection
+            Divider().padding(.vertical, 4)
+            systemSection
             Button("Save settings") {
                 viewModel.saveSettings()
             }
@@ -40,6 +43,41 @@ struct ContentView: View {
             appPermissionsSection
         }
         .padding(12)
+    }
+
+    private var systemSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("System")
+                .font(.headline)
+            Toggle("Launch Textora at login", isOn: Binding(
+                get: { viewModel.launchAtLoginEnabled },
+                set: { viewModel.setLaunchAtLoginEnabled($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .disabled(viewModel.launchAtLoginUnavailable)
+
+            if viewModel.launchAtLoginRequiresApproval {
+                HStack {
+                    Text("Allow Textora in System Settings > General > Login Items to finish enabling automatic launch.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Open Login Items") {
+                        viewModel.openLoginItemsSettings()
+                    }
+                }
+            } else if viewModel.launchAtLoginUnavailable {
+                Text("Automatic launch is unavailable. Move Textora to Applications and try again.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.launchAtLoginErrorText.isEmpty {
+                Text(viewModel.launchAtLoginErrorText)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
     }
 
     private var offlineDictationSection: some View {
