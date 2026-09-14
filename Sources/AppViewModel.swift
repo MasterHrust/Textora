@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Combine
 import Foundation
 
 @MainActor
@@ -113,6 +114,32 @@ final class AppViewModel: ObservableObject {
             SelectionAssistantSettings.setHotKey(translateHotKey, for: .translate)
         }
     }
+    @Published var offlineDictationEnabled = false {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != offlineDictationEnabled else { return }
+            OfflineDictationSettings.isEnabled = offlineDictationEnabled
+        }
+    }
+    @Published var dictationHotKey = TextoraHotKey(keyCode: 1, modifiers: UInt32(cmdKey | optionKey), isEnabled: true) {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != dictationHotKey else { return }
+            SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
+        }
+    }
+    @Published var dictationFallbackLanguage: SpeechLanguage = .english {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != dictationFallbackLanguage else { return }
+            OfflineDictationSettings.fallbackLanguage = dictationFallbackLanguage
+        }
+    }
+    @Published var selectedMicrophoneUID = "" {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != selectedMicrophoneUID else { return }
+            OfflineDictationSettings.microphoneUID = selectedMicrophoneUID
+        }
+    }
+    @Published private(set) var speechModelState: SpeechModelState = .notDownloaded
+    @Published private(set) var microphones: [SpeechMicrophone] = []
     @Published var onboardingStep: Int = 1
     @Published var onboardingErrorText: String = ""
     @Published var isOnboardingBusy: Bool = false
@@ -124,6 +151,7 @@ final class AppViewModel: ObservableObject {
     private var autoSaveTask: DispatchWorkItem?
     private var accessibilityPermissionObserver: NSObjectProtocol?
     private var modelCatalogRequestID = UUID()
+    private var speechModelCancellable: AnyCancellable?
 
     init() {
         AccessibilityPermissionMonitor.shared.start()
@@ -138,6 +166,9 @@ final class AppViewModel: ObservableObject {
             }
         }
         reloadFromUserDefaults()
+        speechModelCancellable = SpeechModelManager.shared.$state.sink { [weak self] state in
+            self?.speechModelState = state
+        }
         isOnboardingComplete = UserDefaults.standard.bool(forKey: OnboardingDefaults.completedKey)
     }
 
@@ -169,6 +200,13 @@ final class AppViewModel: ObservableObject {
         translationLanguage = SelectionAssistantSettings.translationLanguage()
         rewriteHotKey = SelectionAssistantSettings.hotKey(for: .rewrite)
         translateHotKey = SelectionAssistantSettings.hotKey(for: .translate)
+        OfflineDictationSettings.registerDefaults()
+        offlineDictationEnabled = OfflineDictationSettings.isEnabled
+        dictationHotKey = SelectionAssistantSettings.hotKey(for: .dictate)
+        dictationFallbackLanguage = OfflineDictationSettings.fallbackLanguage
+        selectedMicrophoneUID = OfflineDictationSettings.microphoneUID
+        speechModelState = SpeechModelManager.shared.state
+        microphones = SpeechAudioRecorder.microphones()
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
     }
@@ -308,6 +346,10 @@ final class AppViewModel: ObservableObject {
         )
         SelectionAssistantSettings.setSelectedOperation(operation)
         SelectionAssistantSettings.setTranslationLanguage(translationLanguage)
+        OfflineDictationSettings.isEnabled = offlineDictationEnabled
+        OfflineDictationSettings.microphoneUID = selectedMicrophoneUID
+        OfflineDictationSettings.fallbackLanguage = dictationFallbackLanguage
+        SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
         NotificationCenter.default.post(name: SelectionAssistantSettings.settingsDidChangeNotification, object: nil)
         let keyResult: Result<Void, KeychainHelper.KeychainError>
         switch provider {
@@ -347,7 +389,11 @@ final class AppViewModel: ObservableObject {
             operation.rawValue,
             translationLanguage.rawValue,
             String(rewriteHotKey.keyCode), String(rewriteHotKey.modifiers), String(rewriteHotKey.isEnabled),
-            String(translateHotKey.keyCode), String(translateHotKey.modifiers), String(translateHotKey.isEnabled)
+            String(translateHotKey.keyCode), String(translateHotKey.modifiers), String(translateHotKey.isEnabled),
+            String(offlineDictationEnabled),
+            String(dictationHotKey.keyCode), String(dictationHotKey.modifiers), String(dictationHotKey.isEnabled),
+            dictationFallbackLanguage.rawValue,
+            selectedMicrophoneUID
         ].joined(separator: "\u{1F}")
     }
 
@@ -362,7 +408,7 @@ final class AppViewModel: ObservableObject {
 
     func moveOnboardingNext() {
         onboardingErrorText = ""
-        onboardingStep = min(5, onboardingStep + 1)
+        onboardingStep = min(6, onboardingStep + 1)
     }
 
     var onboardingInterfaceMode: OnboardingInterfaceMode {
@@ -430,6 +476,30 @@ final class AppViewModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: OnboardingDefaults.skippedKey)
         return true
     }
+
+    func continueWithoutCloudAI() {
+        onboardingErrorText = ""
+        moveOnboardingNext()
+    }
+
+    func setOfflineDictationEnabled(_ enabled: Bool) {
+        offlineDictationEnabled = enabled
+        if enabled {
+            dictationHotKey.isEnabled = true
+            Task { _ = await SpeechAudioRecorder.requestPermission() }
+        }
+    }
+
+    func downloadSpeechModel() {
+        setOfflineDictationEnabled(true)
+        SpeechModelManager.shared.download()
+    }
+
+    func pauseSpeechModelDownload() { SpeechModelManager.shared.pause() }
+    func cancelSpeechModelDownload() { SpeechModelManager.shared.cancel() }
+    func verifySpeechModel() { SpeechModelManager.shared.verify() }
+    func deleteSpeechModel() { SpeechModelManager.shared.deleteModel() }
+    func refreshMicrophones() { microphones = SpeechAudioRecorder.microphones() }
 
     func prepareOnboardingSession() {
         onboardingStep = 1

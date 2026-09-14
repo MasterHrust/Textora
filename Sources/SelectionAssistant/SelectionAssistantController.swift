@@ -139,6 +139,13 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func tick() {
+        guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
+        textService.withCoalescedFocusQueries {
+            tickWithCoalescedFocus()
+        }
+    }
+
+    private func tickWithCoalescedFocus() {
         guard UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled) else {
             stop()
             return
@@ -317,6 +324,10 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                     )
                     return
                 }
+                guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else {
+                    self.pendingSelectionKey = nil
+                    return
+                }
                 guard Date() >= self.suppressSelectionUntil else {
                     self.trace("resolve skipped suppressed", key: expectedKey)
                     return
@@ -377,6 +388,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fallbackResolveTask = nil
+                guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
                 self.lastFallbackProbeAt = Date()
                 guard UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled) else {
                     self.stop()
@@ -540,6 +552,11 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func handleSelectionGestureEvent(_ event: NSEvent) {
+        if DraggableFloatingPanel.isAnyPanelTrackingPointer || event.window is DraggableFloatingPanel {
+            mouseDownPoint = nil
+            didDragSinceMouseDown = false
+            return
+        }
         guard UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled) else { return }
         if event.type == .keyDown, event.keyCode == 53 {
             hideForNoSelection()
@@ -736,6 +753,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             }
         )
         let host = NSHostingView(rootView: root)
+        host.focusRingType = .none
         host.frame = NSRect(origin: .zero, size: currentPanelSize)
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
@@ -962,6 +980,8 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         case .translate:
             viewModel.setSelectionContext(context, automaticallyCheck: false, preservePresentation: true)
             viewModel.translate()
+        case .dictate:
+            return
         }
         showOrMovePanel(near: anchor)
     }

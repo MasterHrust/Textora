@@ -126,7 +126,7 @@ private struct AppConsentPromptView: View {
                 }
                 .padding(.bottom, 12)
 
-                Text("Textora will only read focused text fields in \(appName) to suggest rewrites. You can change this later in Settings.")
+                Text("Textora will only access the focused text field in \(appName) when you rewrite, translate, or dictate. You can change this later in Settings.")
                     .font(.system(size: 14))
                     .lineSpacing(3)
                     .foregroundStyle(.white.opacity(0.75))

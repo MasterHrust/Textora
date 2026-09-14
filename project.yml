@@ -5,6 +5,9 @@ settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.textora.app
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+packages:
+  TranscribeCppBinary:
+    path: Packages/TranscribeCppBinary
 targets:
   Textora:
     type: application
@@ -15,6 +18,7 @@ targets:
     settings:
       base:
         INFOPLIST_FILE: Sources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/Textora.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.textora.app
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 35Q2T38T7Q
@@ -24,6 +28,9 @@ targets:
           ENABLE_HARDENED_RUNTIME: YES
           ENABLE_OUTGOING_NETWORK_CONNECTIONS: NO
           ENABLE_USER_SELECTED_FILES: NO
+    dependencies:
+      - package: TranscribeCppBinary
+        product: CTranscribe
     scheme:
       testTargets:
         - TextoraTests

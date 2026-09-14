@@ -24,9 +24,6 @@ struct TextoraApp: App {
     var body: some Scene {
         MenuBarExtra {
             Text("Textora is active")
-            Text("Select text to open the toolbar")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Text("Status: \(coordinator.helperStatus)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)

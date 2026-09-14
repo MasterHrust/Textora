@@ -18,7 +18,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var accessibilityWizardWindow: NSWindow?
     private let consentPrompt = AppConsentPromptController()
     private let textAccess = TextAccessService()
+    private lazy var dictationController = OfflineDictationController(textAccess: textAccess)
+    private lazy var dictationMicController = DictationMicController(
+        textAccess: textAccess,
+        onStart: { [weak self] in self?.dictationController.startFromUI() },
+        onStop: { [weak self] in self?.dictationController.stopFromUI() },
+        floatingCompanionFrame: { [weak self] in self?.floatingHelper?.visibleFrame }
+    )
     private var selectionAssistantSettingsObserver: NSObjectProtocol?
+    private var offlineDictationSettingsObserver: NSObjectProtocol?
     private var accessibilityPermissionObserver: NSObjectProtocol?
     private var primaryInteractionRetryTask: DispatchWorkItem?
     private var primaryInteractionRetryCount = 0
@@ -29,6 +37,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var isConsentPromptHovered = false
     private var isHidingFloatingPanels = false
     private var floatingPanelsHideTask: DispatchWorkItem?
+    private var pendingDictationConsentBundleID: String?
+    private var isDictationInteractionActive = false
     @Published private(set) var helperStatus: String = "Initializing"
     private var didRunLaunchFlow = false
     private var shouldOpenAccessibilityAfterOnboarding = false
@@ -43,6 +53,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         if let accessibilityPermissionObserver {
             NotificationCenter.default.removeObserver(accessibilityPermissionObserver)
+        }
+        if let offlineDictationSettingsObserver {
+            NotificationCenter.default.removeObserver(offlineDictationSettingsObserver)
         }
         primaryInteractionRetryTask?.cancel()
         launchWarmupTask?.cancel()
@@ -60,6 +73,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         AccessibilityPermissionMonitor.shared.start()
         installAccessibilityPermissionObserverIfNeeded()
         installSelectionAssistantSettingsObserverIfNeeded()
+        installOfflineDictationSettingsObserverIfNeeded()
         rewritePanel.onHoverChanged = { [weak self] hovering in
             self?.handleRewritePopupHoverChanged(hovering)
         }
@@ -83,10 +97,28 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.handleConsentPromptHoverChanged(hovering)
         }
         selectionAssistant.onConsentRequired = { [weak self] anchor, bundleID in
+            self?.pendingDictationConsentBundleID = nil
             self?.handleSelectionAssistantConsentRequired(anchor: anchor, bundleID: bundleID)
         }
-        GlobalHotKeyManager.shared.onAction = { [weak self] action in
-            self?.handleGlobalHotKey(action)
+        dictationController.onNeedsAccessibility = { [weak self] in self?.showAccessibilityWizardDeferred() }
+        dictationController.onNeedsModelSettings = { [weak self] in self?.showSettingsWindow() }
+        dictationController.onConsentRequired = { [weak self] anchor, bundleID in
+            self?.handleDictationConsentRequired(anchor: anchor, bundleID: bundleID)
+        }
+        dictationController.onActivityChanged = { [weak self] isActive, source in
+            self?.handleDictationActivityChanged(isActive: isActive, source: source)
+        }
+        dictationController.onMiniMicrophoneStateChanged = { [weak self] state in
+            self?.dictationMicController.setActivityState(state)
+        }
+        dictationController.onMiniMicrophoneLevelChanged = { [weak self] level in
+            self?.dictationMicController.updateLevel(level)
+        }
+        dictationController.onMiniMicrophoneElapsedChanged = { [weak self] elapsed in
+            self?.dictationMicController.updateElapsed(elapsed)
+        }
+        GlobalHotKeyManager.shared.onEvent = { [weak self] event in
+            self?.handleGlobalHotKey(event)
         }
         GlobalHotKeyManager.shared.reload()
         if floatingHelper == nil {
@@ -135,14 +167,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             showOnboardingWindow()
             return
         }
-        if !hasAnyConfiguredKey() {
-            shouldOpenAccessibilityAfterOnboarding = true
-            configurePrimaryInteractionMode()
-            schedulePrimaryInteractionRetry(reason: "waitingForKey")
-            showOnboardingWindow()
-            return
-        }
-        if !textAccess.hasAccessibilityPermission() {
+        if (hasAnyConfiguredKey() || OfflineDictationSettings.isEnabled), !textAccess.hasAccessibilityPermission() {
             configurePrimaryInteractionMode()
             schedulePrimaryInteractionRetry(reason: "accessibilityUnavailable")
             showAccessibilityWizardDeferred()
@@ -151,6 +176,17 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         configurePrimaryInteractionMode()
         schedulePrimaryInteractionRetry(reason: "launchWarmup")
         showOnboardingIfNeededOnLaunch()
+    }
+
+    private func installOfflineDictationSettingsObserverIfNeeded() {
+        guard offlineDictationSettingsObserver == nil else { return }
+        offlineDictationSettingsObserver = NotificationCenter.default.addObserver(
+            forName: OfflineDictationSettings.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.configurePrimaryInteractionMode() }
+        }
     }
 
     private func installSelectionAssistantSettingsObserverIfNeeded() {
@@ -194,6 +230,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         } else {
             selectionAssistant.stop()
             floatingHelper?.stop()
+            dictationMicController.stop()
             rewritePanel.hide()
             consentPrompt.hide()
             helperStatus = "Accessibility disabled"
@@ -225,6 +262,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func configurePrimaryInteractionMode() {
+        if !OfflineDictationSettings.isEnabled {
+            dictationController.disableAndUnload()
+        }
         cancelScheduledFloatingPanelsHide()
         isHelperHovered = false
         isRewritePopupHovered = false
@@ -234,8 +274,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         floatingHelper?.setKeepBelowWindow(nil)
 
         GlobalHotKeyManager.shared.reload()
+        configureDictationMic()
+        if isDictationInteractionActive {
+            selectionAssistant.stop()
+            floatingHelper?.stop()
+            helperStatus = "Offline dictation active"
+            return
+        }
         guard hasAnyConfiguredKey() else {
-            helperStatus = "API key required"
+            helperStatus = OfflineDictationSettings.isEnabled ? "Offline dictation active" : "API key required"
             selectionAssistant.stop()
             floatingHelper?.stop()
             return
@@ -278,7 +325,43 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    private func handleGlobalHotKey(_ action: TextoraHotKeyAction) {
+    private func handleDictationActivityChanged(
+        isActive: Bool,
+        source: OfflineDictationController.TriggerSource
+    ) {
+        dictationMicController.setExternallySuppressed(isActive && source == .hotKey)
+        guard isDictationInteractionActive != isActive else { return }
+        isDictationInteractionActive = isActive
+        if isActive {
+            selectionAssistant.stop()
+            floatingHelper?.stop()
+            rewritePanel.hide()
+            helperStatus = "Offline dictation active"
+        } else {
+            configurePrimaryInteractionMode()
+        }
+    }
+
+    private func configureDictationMic() {
+        guard DictationMicVisibilityPolicy.shouldRun(
+            isEnabled: OfflineDictationSettings.isEnabled,
+            accessibilityGranted: textAccess.hasAccessibilityPermission(),
+            hotKeysOnly: isHotKeysEnabled
+        ) else {
+            dictationMicController.stop()
+            return
+        }
+        let mode: DictationMicController.InterfaceMode = isFloatingIconEnabled ? .floatingIcon : .toolbox
+        dictationMicController.start(mode: mode)
+        dictationMicController.setExternallySuppressed(false)
+    }
+
+    private func handleGlobalHotKey(_ event: TextoraHotKeyEvent) {
+        if event.action == .dictate {
+            dictationController.handle(event.phase)
+            return
+        }
+        guard event.phase == .pressed else { return }
         guard hasAnyConfiguredKey() else {
             showOnboardingWindow()
             return
@@ -287,7 +370,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             showAccessibilityWizardDeferred()
             return
         }
-        selectionAssistant.performHotKeyAction(action)
+        selectionAssistant.performHotKeyAction(event.action)
     }
 
     func warmPrimaryInteractionsIfPossible() {
@@ -299,6 +382,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     func prepareForTermination() {
         settingsViewModel?.flushPendingSave()
         onboardingViewModel?.flushPendingSave()
+        dictationMicController.stop()
+        dictationController.prepareForTermination()
         GlobalHotKeyManager.shared.stop()
     }
 
@@ -476,6 +561,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 rewritePanel.hide()
                 floatingHelper?.setKeepBelowWindow(nil)
                 if let app = textAccess.frontmostAppInfo() {
+                    pendingDictationConsentBundleID = nil
                     consentPrompt.show(near: frame, appName: app.displayName, targetBundleID: app.bundleID)
                 }
             }
@@ -571,9 +657,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             consentPrompt.hide()
             return
         }
+        let wasDictationRequest = pendingDictationConsentBundleID == bundleID
+        pendingDictationConsentBundleID = nil
         textAccess.setAppConsentStatus(.allowed, for: bundleID)
         consentPrompt.hide()
         selectionAssistant.resolvePendingHotKeyConsent(for: bundleID, allowed: true)
+        if wasDictationRequest {
+            dictationMicController.setExternallySuppressed(false)
+            return
+        }
         if isFloatingIconEnabled, let frame = floatingHelper?.currentFrame, !frame.isEmpty {
             showRewritePopupFromFloatingState(frame: frame)
         }
@@ -585,6 +677,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             consentPrompt.hide()
             return
         }
+        if pendingDictationConsentBundleID == bundleID {
+            pendingDictationConsentBundleID = nil
+        }
         textAccess.setAppConsentStatus(.denied, for: bundleID)
         rewritePanel.hide()
         consentPrompt.hide()
@@ -594,6 +689,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func handleConsentLater() {
         isConsentPromptHovered = false
         if let bundleID = consentPrompt.capturedConsentBundleID {
+            if pendingDictationConsentBundleID == bundleID {
+                pendingDictationConsentBundleID = nil
+            }
             selectionAssistant.resolvePendingHotKeyConsent(for: bundleID, allowed: false)
         }
         consentPrompt.hide()
@@ -603,7 +701,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func handleSelectionAssistantConsentRequired(anchor: CGRect, bundleID: String) {
-        guard isToolboxEnabled || isHotKeysEnabled else { return }
+        guard isToolboxEnabled || isHotKeysEnabled || OfflineDictationSettings.isEnabled else { return }
         cancelScheduledFloatingPanelsHide()
         rewritePanel.hide()
         floatingHelper?.setKeepBelowWindow(nil)
@@ -611,6 +709,11 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         let frontmost = textAccess.frontmostAppInfo()
         let appName = frontmost?.bundleID == bundleID ? frontmost?.displayName ?? bundleID : bundleID
         consentPrompt.show(near: anchor, appName: appName, targetBundleID: bundleID)
+    }
+
+    private func handleDictationConsentRequired(anchor: CGRect, bundleID: String) {
+        pendingDictationConsentBundleID = bundleID
+        handleSelectionAssistantConsentRequired(anchor: anchor, bundleID: bundleID)
     }
 
     func showSettingsWindow() {
@@ -646,18 +749,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func showOnboardingIfNeededOnLaunch(afterAccessibility: Bool = false) {
         let defaults = UserDefaults.standard
         let completed = defaults.bool(forKey: Self.onboardingCompletedKey)
-        let hasAnyConfiguredKey = hasAnyConfiguredKey()
 
-        // If there are no configured keys, always show quick setup regardless of previous skip/completed flags.
-        // This prevents "silent no-op" state when onboarding was previously dismissed.
-        if !hasAnyConfiguredKey {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.showOnboardingWindow()
-            }
-            return
-        }
-
-        // If keys are present, keep previous onboarding behavior.
         guard !completed else { return }
         if afterAccessibility {
             return
@@ -685,7 +777,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                     guard let self else { return }
                     guard self.onboardingViewModel?.completeOnboarding() == true else { return }
                     self.closeOnboardingWindow()
-                    if self.shouldOpenAccessibilityAfterOnboarding || !self.textAccess.hasAccessibilityPermission() {
+                    let needsAccessibility = self.hasAnyConfiguredKey() || OfflineDictationSettings.isEnabled
+                    if needsAccessibility && (self.shouldOpenAccessibilityAfterOnboarding || !self.textAccess.hasAccessibilityPermission()) {
                         self.shouldOpenAccessibilityAfterOnboarding = false
                         self.showAccessibilityWizardDeferred()
                     } else {

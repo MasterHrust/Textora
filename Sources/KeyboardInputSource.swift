@@ -21,6 +21,19 @@ enum TextKeyboardLayoutMapper {
 }
 
 enum KeyboardInputSource {
+    static func currentLanguageIdentifier() -> String? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
+        if let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages) {
+            let languages = Unmanaged<CFArray>.fromOpaque(pointer).takeUnretainedValue() as? [String] ?? []
+            if let language = languages.first, !language.isEmpty { return language }
+        }
+        return nil
+    }
+
+    static func currentSpeechLanguage(fallback: SpeechLanguage) -> SpeechLanguage {
+        SpeechLanguage.matching(languageIdentifier: currentLanguageIdentifier()) ?? fallback
+    }
+
     static func currentLayout() -> TextInputKeyboardLayout {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return .other }
         return keyboardLayout(of: source)

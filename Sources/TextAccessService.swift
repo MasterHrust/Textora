@@ -279,6 +279,37 @@ final class TextAccessService {
         case denied
     }
 
+    struct DictationTarget {
+        let element: AXUIElement
+        let appPID: pid_t
+        let bundleID: String
+        let selectedRange: CFRange?
+        let anchor: CGRect
+        let elementFrame: CGRect?
+        let role: String
+        let subrole: String
+        let identifier: String?
+    }
+
+    struct DictationMicPlacement {
+        let caretFrame: CGRect?
+        let fieldFrame: CGRect
+        let appPID: pid_t
+        let bundleID: String
+
+        var preferredAnchor: CGRect {
+            guard let caretFrame, !caretFrame.isEmpty else { return fieldFrame }
+            return caretFrame
+        }
+    }
+
+    enum DictationTargetResult {
+        case success(DictationTarget)
+        case permissionRequired(bundleID: String, anchor: CGRect)
+        case secureField
+        case unavailable
+    }
+
     enum ApplyResult: Equatable {
         case success
         case failed
@@ -531,6 +562,277 @@ final class TextAccessService {
             return true
         }
         return false
+    }
+
+    func captureDictationTarget() -> DictationTargetResult {
+        guard hasAccessibilityPermission(), let element = focusedDictationElement() else { return .unavailable }
+        guard !shouldIgnoreDictationInput(element: element, includeAppConsent: false) else {
+            return isSecureInputField(element) || hasSensitiveFieldHint(element) ? .secureField : .unavailable
+        }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return .unavailable }
+        let bundleID = resolvedBundleID(forOwningPID: pid)
+        let capturedElementFrame = elementFrame(of: element)
+        let anchor = capturedElementFrame ?? focusedWindowFrame() ?? .zero
+        switch appConsentStatus(for: bundleID) {
+        case .unknown: return .permissionRequired(bundleID: bundleID, anchor: anchor)
+        case .denied: return .unavailable
+        case .allowed: break
+        }
+        return .success(DictationTarget(
+            element: element,
+            appPID: pid,
+            bundleID: bundleID,
+            selectedRange: selectedRange(of: element),
+            anchor: anchor,
+            elementFrame: capturedElementFrame,
+            role: axString(of: element, attribute: kAXRoleAttribute) ?? "",
+            subrole: axString(of: element, attribute: kAXSubroleAttribute) ?? "",
+            identifier: axString(of: element, attribute: "AXIdentifier")
+        ))
+    }
+
+    /// Lightweight visibility/geometry check for the dictation affordance. It deliberately
+    /// avoids clipboard probes and does not require per-app consent so the first click can
+    /// present that consent request.
+    func dictationMicPlacement() -> DictationMicPlacement? {
+        guard hasAccessibilityPermission(), let element = focusedDictationElement() else { return nil }
+        guard !shouldIgnoreDictationInput(element: element, includeAppConsent: false) else { return nil }
+
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              pid != 0,
+              pid != ProcessInfo.processInfo.processIdentifier,
+              let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == pid else {
+            return nil
+        }
+
+        let bundleID = resolvedBundleID(forOwningPID: pid)
+        guard appConsentStatus(for: bundleID) != .denied else { return nil }
+        let fieldFrame = elementFrame(of: element) ?? focusedWindowFrame() ?? .zero
+        guard !fieldFrame.isEmpty else { return nil }
+
+        return DictationMicPlacement(
+            caretFrame: dictationCaretFrame(of: element),
+            fieldFrame: fieldFrame,
+            appPID: pid,
+            bundleID: bundleID
+        )
+    }
+
+    func insertDictatedText(
+        _ text: String,
+        into target: DictationTarget,
+        reactivateTarget: Bool = false
+    ) -> Bool {
+        guard !text.isEmpty, appConsentStatus(for: target.bundleID) == .allowed else { return false }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.appPID {
+            guard reactivateTarget, activateDictationTargetApp(target) else { return false }
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication,
+              frontmost.processIdentifier == target.appPID,
+              frontmost.bundleIdentifier == target.bundleID,
+              let focused = focusedDictationElement(),
+              dictationElement(focused, matches: target),
+              !shouldIgnoreDictationInput(element: focused, includeAppConsent: true) else { return false }
+
+        let activeTarget = DictationTarget(
+            element: focused,
+            appPID: target.appPID,
+            bundleID: target.bundleID,
+            selectedRange: target.selectedRange,
+            anchor: target.anchor,
+            elementFrame: elementFrame(of: focused),
+            role: axString(of: focused, attribute: kAXRoleAttribute) ?? target.role,
+            subrole: axString(of: focused, attribute: kAXSubroleAttribute) ?? target.subrole,
+            identifier: axString(of: focused, attribute: "AXIdentifier") ?? target.identifier
+        )
+
+        _ = AXUIElementSetAttributeValue(activeTarget.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        if var range = target.selectedRange,
+           let rangeValue = AXValueCreate(.cfRange, &range) {
+            _ = AXUIElementSetAttributeValue(
+                activeTarget.element,
+                kAXSelectedTextRangeAttribute as CFString,
+                rangeValue
+            )
+            usleep(45_000)
+        }
+
+        let prefersClipboard = shouldPreferClipboardForDictation(bundleID: target.bundleID)
+        let valueBeforeInsertion = valueText(of: activeTarget.element)
+        if !prefersClipboard {
+            let status = AXUIElementSetAttributeValue(
+                activeTarget.element,
+                kAXSelectedTextAttribute as CFString,
+                text as CFTypeRef
+            )
+            if status == .success {
+                usleep(60_000)
+                if let valueBeforeInsertion,
+                   let valueAfterInsertion = valueText(of: activeTarget.element) {
+                    if dictationValueChanged(
+                        from: valueBeforeInsertion,
+                        to: valueAfterInsertion,
+                        inserting: text,
+                        at: target.selectedRange
+                    ) {
+                        return true
+                    }
+                } else {
+                    // Native controls without AXValue generally honour a
+                    // successful AXSelectedText write.
+                    return true
+                }
+            }
+        }
+
+        return insertDictatedTextUsingClipboard(
+            text,
+            into: activeTarget,
+            valueBeforeInsertion: valueBeforeInsertion,
+            prefersClipboard: prefersClipboard
+        )
+    }
+
+    private func activateDictationTargetApp(_ target: DictationTarget) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: target.appPID), !app.isTerminated else {
+            return false
+        }
+        app.activate(options: [.activateAllWindows])
+        let appElement = AXUIElementCreateApplication(target.appPID)
+        _ = AXUIElementSetAttributeValue(
+            appElement,
+            kAXFrontmostAttribute as CFString,
+            kCFBooleanTrue as CFTypeRef
+        )
+        usleep(140_000)
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.appPID
+    }
+
+    /// Chromium can recreate the AX wrapper for an unchanged DOM input while dictation is
+    /// running. Match the fresh wrapper to the captured field without allowing insertion into
+    /// another field that the user focused in the meantime.
+    private func dictationElement(_ current: AXUIElement, matches target: DictationTarget) -> Bool {
+        if CFEqual(current, target.element) { return true }
+
+        var currentPID: pid_t = 0
+        guard AXUIElementGetPid(current, &currentPID) == .success, currentPID == target.appPID else {
+            return false
+        }
+
+        let currentRange = selectedRange(of: current)
+        if let capturedRange = target.selectedRange, let currentRange,
+           (capturedRange.location != currentRange.location || capturedRange.length != currentRange.length) {
+            return false
+        }
+
+        let currentIdentifier = axString(of: current, attribute: "AXIdentifier")
+        if let capturedIdentifier = target.identifier, !capturedIdentifier.isEmpty,
+           let currentIdentifier, !currentIdentifier.isEmpty {
+            return capturedIdentifier == currentIdentifier
+        }
+
+        let currentRole = axString(of: current, attribute: kAXRoleAttribute) ?? ""
+        let currentSubrole = axString(of: current, attribute: kAXSubroleAttribute) ?? ""
+        guard (target.role.isEmpty || currentRole.isEmpty || target.role == currentRole),
+              (target.subrole.isEmpty || currentSubrole.isEmpty || target.subrole == currentSubrole),
+              let capturedFrame = target.elementFrame,
+              let currentFrame = elementFrame(of: current) else {
+            return false
+        }
+
+        let tolerance: CGFloat = 6
+        let expandedCapturedFrame = capturedFrame.insetBy(dx: -tolerance, dy: -tolerance)
+        let dimensionsAreStable = abs(capturedFrame.width - currentFrame.width) <= tolerance
+            && abs(capturedFrame.height - currentFrame.height) <= tolerance
+        return dimensionsAreStable && expandedCapturedFrame.contains(currentFrame)
+    }
+
+    func shouldPreferClipboardForDictation(bundleID: String) -> Bool {
+        prefersClipboardSelectionPasteReplaceForBundle(bundleID)
+    }
+
+    private func dictationValueChanged(
+        from original: String,
+        to updated: String,
+        inserting text: String,
+        at selectedRange: CFRange?
+    ) -> Bool {
+        guard normalized(original) != normalized(updated) else { return false }
+        if let selectedRange {
+            let originalNS = original as NSString
+            let location = max(0, min(selectedRange.location, originalNS.length))
+            let length = max(0, min(selectedRange.length, originalNS.length - location))
+            let expected = originalNS.replacingCharacters(
+                in: NSRange(location: location, length: length),
+                with: text
+            )
+            if normalized(updated) == normalized(expected) { return true }
+        }
+        return normalized(updated).contains(normalized(text))
+    }
+
+    private func insertDictatedTextUsingClipboard(
+        _ text: String,
+        into target: DictationTarget,
+        valueBeforeInsertion: String?,
+        prefersClipboard: Bool
+    ) -> Bool {
+        // Electron contenteditables may report a successful AX write while
+        // ignoring it. Their native paste command is the reliable path.
+        if var range = target.selectedRange,
+           let rangeValue = AXValueCreate(.cfRange, &range) {
+            _ = AXUIElementSetAttributeValue(
+                target.element,
+                kAXSelectedTextRangeAttribute as CFString,
+                rangeValue
+            )
+            usleep(prefersClipboard ? 80_000 : 45_000)
+        }
+
+        let rangeBeforePaste = selectedRange(of: target.element)
+        let pasteboard = NSPasteboard.general
+        let snapshot = snapshotPasteboard(pasteboard)
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            restorePasteboard(pasteboard, snapshot: snapshot)
+            return false
+        }
+        let temporaryChangeCount = pasteboard.changeCount
+        guard triggerPasteShortcut() else {
+            restorePasteboard(pasteboard, snapshot: snapshot)
+            return false
+        }
+        usleep(prefersClipboard ? 360_000 : 180_000)
+
+        let inserted: Bool
+        if let valueBeforeInsertion,
+           let valueAfterInsertion = valueText(of: target.element) {
+            inserted = dictationValueChanged(
+                from: valueBeforeInsertion,
+                to: valueAfterInsertion,
+                inserting: text,
+                at: target.selectedRange
+            )
+        } else if let rangeBeforePaste,
+                  let rangeAfterPaste = selectedRange(of: target.element) {
+            let expectedLocation = rangeBeforePaste.location + (text as NSString).length
+            inserted = rangeAfterPaste.length == 0 && rangeAfterPaste.location >= expectedLocation
+        } else {
+            // Slack can hide both AXValue and a trustworthy caret range.
+            // After a posted native paste event this is the best available
+            // confirmation without selecting or copying the user's text.
+            inserted = prefersClipboard
+        }
+
+        // Restore only while the temporary payload is still ours, so a copy
+        // made by the user during insertion is never overwritten.
+        if pasteboard.changeCount == temporaryChangeCount {
+            restorePasteboard(pasteboard, snapshot: snapshot)
+        }
+        return inserted
     }
 
     func focusedEditableFrame() -> CGRect? {
@@ -938,12 +1240,16 @@ final class TextAccessService {
 
     func focusedCaretFrame() -> CGRect? {
         guard let focused = focusedEditableElement() else { return nil }
-        guard let selectedRangeValue = selectedRangeValue(of: focused) else { return nil }
-        let rawFrame = elementFrame(of: focused)
-        let reference = geometryReference(for: focused, rawFrame: rawFrame)
+        return dictationCaretFrame(of: focused)
+    }
+
+    private func dictationCaretFrame(of element: AXUIElement) -> CGRect? {
+        guard let selectedRangeValue = selectedRangeValue(of: element) else { return nil }
+        let rawFrame = elementFrame(of: element)
+        let reference = geometryReference(for: element, rawFrame: rawFrame)
         var boundsRef: CFTypeRef?
         let status = AXUIElementCopyParameterizedAttributeValue(
-            focused,
+            element,
             kAXBoundsForRangeParameterizedAttribute as CFString,
             selectedRangeValue,
             &boundsRef
@@ -6367,6 +6673,45 @@ end tell
         return resolveFocusedEditableElement()
     }
 
+    private func focusedDictationElement() -> AXUIElement? {
+        if let editable = focusedEditableElement() {
+            return editable
+        }
+        guard isGoogleDocsFrontmost() || isGoogleSheetsFrontmost() || isGoogleWorkspaceEditorFrontmost(),
+              let focused = focusedElement() else {
+            return nil
+        }
+        let role = axString(of: focused, attribute: kAXRoleAttribute) ?? ""
+        let supportedCanvasRoles: Set<String> = [
+            "AXWebArea",
+            "AXGroup",
+            "AXGenericElement",
+            "AXScrollArea",
+            "AXLayoutArea"
+        ]
+        guard supportedCanvasRoles.contains(role) else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(focused, &pid) == .success,
+              pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else {
+            return nil
+        }
+        return focused
+    }
+
+    private func isGoogleWorkspaceEditorFrontmost() -> Bool {
+        guard let front = frontmostAppInfo(), isBrowserBundleID(front.bundleID),
+              let window = queryFocusedWindowElementFromSystem() else {
+            return false
+        }
+        let title = (axString(of: window, attribute: kAXTitleAttribute) ?? "").lowercased()
+        return title.contains("google docs")
+            || title.contains("google sheets")
+            || title.contains("docs.google.com")
+            || title.contains("sheets.google.com")
+            || title.contains("google документ")
+            || title.contains("google табли")
+    }
+
     private func resolveFocusedEditableElement() -> AXUIElement? {
         guard var current = focusedElement() else { return nil }
         if isEditable(element: current) {
@@ -6432,6 +6777,24 @@ end tell
             if helperSuppressedBundleIDs.contains(bundleID) {
                 return true
             }
+        }
+        let ownerConsent = consentStatus(forOwningAXElement: element)
+        if ownerConsent == .denied { return true }
+        if includeAppConsent, ownerConsent != .allowed { return true }
+        return false
+    }
+
+    /// Dictation can be useful in browser search/address fields and in Docs/Sheets canvas
+    /// editors. Keep the security exclusions, but do not inherit presentation-specific
+    /// filters used by the automatic rewrite overlays.
+    private func shouldIgnoreDictationInput(element: AXUIElement, includeAppConsent: Bool) -> Bool {
+        if isSecureInputField(element) { return true }
+        if isTransientPopupLike(element) { return true }
+        if hasSensitiveFieldHint(element) { return true }
+        var pid: pid_t = 0
+        if AXUIElementGetPid(element, &pid) == .success, pid != 0 {
+            let bundleID = resolvedBundleID(forOwningPID: pid)
+            if helperSuppressedBundleIDs.contains(bundleID) { return true }
         }
         let ownerConsent = consentStatus(forOwningAXElement: element)
         if ownerConsent == .denied { return true }

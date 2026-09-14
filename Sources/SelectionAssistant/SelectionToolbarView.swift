@@ -82,8 +82,7 @@ struct SelectionToolbarView: View {
             .frame(width: panelWidth, height: panelHeight, alignment: .topLeading)
             .background(panelBackground)
             .overlay(panelStroke)
-            .shadow(color: Color(red: 0.36, green: 0.67, blue: 1.0).opacity(0.10), radius: 22, x: 0, y: 0)
-            .shadow(color: .black.opacity(0.42), radius: 22, x: 0, y: 14)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .offset(y: Self.tooltipTopReserve)
 
         }
@@ -899,7 +898,7 @@ struct SelectionToolbarView: View {
 
     private var panelStroke: some View {
         RoundedRectangle(cornerRadius: 24, style: .continuous)
-            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+            .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
     }
 
     private var applyButtonBackground: some View {

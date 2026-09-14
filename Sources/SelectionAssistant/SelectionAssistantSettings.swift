@@ -12,6 +12,17 @@ enum SelectionActivationMode: String, CaseIterable, Identifiable {
 enum TextoraHotKeyAction: UInt32 {
     case rewrite = 1
     case translate = 2
+    case dictate = 3
+}
+
+enum TextoraHotKeyPhase {
+    case pressed
+    case released
+}
+
+struct TextoraHotKeyEvent {
+    let action: TextoraHotKeyAction
+    let phase: TextoraHotKeyPhase
 }
 
 struct TextoraHotKey: Equatable {
@@ -60,6 +71,9 @@ enum SelectionAssistantSettings {
         static let translateHotKeyCode = "hotkey.translate.keyCode"
         static let translateHotKeyModifiers = "hotkey.translate.modifiers"
         static let translateHotKeyEnabled = "hotkey.translate.enabled"
+        static let dictateHotKeyCode = "hotkey.dictate.keyCode"
+        static let dictateHotKeyModifiers = "hotkey.dictate.modifiers"
+        static let dictateHotKeyEnabled = "hotkey.dictate.enabled"
     }
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
@@ -78,7 +92,10 @@ enum SelectionAssistantSettings {
             Keys.rewriteHotKeyEnabled: true,
             Keys.translateHotKeyCode: 17,
             Keys.translateHotKeyModifiers: UInt32(cmdKey | optionKey),
-            Keys.translateHotKeyEnabled: true
+            Keys.translateHotKeyEnabled: true,
+            Keys.dictateHotKeyCode: 1,
+            Keys.dictateHotKeyModifiers: UInt32(cmdKey | optionKey),
+            Keys.dictateHotKeyEnabled: true
         ])
         if !defaults.bool(forKey: Keys.hotKeysModeMigration) {
             let migratedValue = existingHotKeysMode
@@ -236,9 +253,7 @@ enum SelectionAssistantSettings {
 
     static func hotKey(for action: TextoraHotKeyAction, defaults: UserDefaults = .standard) -> TextoraHotKey {
         registerDefaults(defaults: defaults)
-        let prefix: (String, String, String) = action == .rewrite
-            ? (Keys.rewriteHotKeyCode, Keys.rewriteHotKeyModifiers, Keys.rewriteHotKeyEnabled)
-            : (Keys.translateHotKeyCode, Keys.translateHotKeyModifiers, Keys.translateHotKeyEnabled)
+        let prefix = hotKeyKeys(for: action)
         return TextoraHotKey(
             keyCode: UInt32(defaults.integer(forKey: prefix.0)),
             modifiers: UInt32(defaults.integer(forKey: prefix.1)),
@@ -247,13 +262,22 @@ enum SelectionAssistantSettings {
     }
 
     static func setHotKey(_ hotKey: TextoraHotKey, for action: TextoraHotKeyAction, defaults: UserDefaults = .standard) {
-        let prefix: (String, String, String) = action == .rewrite
-            ? (Keys.rewriteHotKeyCode, Keys.rewriteHotKeyModifiers, Keys.rewriteHotKeyEnabled)
-            : (Keys.translateHotKeyCode, Keys.translateHotKeyModifiers, Keys.translateHotKeyEnabled)
+        let prefix = hotKeyKeys(for: action)
         defaults.set(hotKey.keyCode, forKey: prefix.0)
         defaults.set(hotKey.modifiers, forKey: prefix.1)
         defaults.set(hotKey.isEnabled, forKey: prefix.2)
         NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
+    }
+
+    private static func hotKeyKeys(for action: TextoraHotKeyAction) -> (String, String, String) {
+        switch action {
+        case .rewrite:
+            return (Keys.rewriteHotKeyCode, Keys.rewriteHotKeyModifiers, Keys.rewriteHotKeyEnabled)
+        case .translate:
+            return (Keys.translateHotKeyCode, Keys.translateHotKeyModifiers, Keys.translateHotKeyEnabled)
+        case .dictate:
+            return (Keys.dictateHotKeyCode, Keys.dictateHotKeyModifiers, Keys.dictateHotKeyEnabled)
+        }
     }
 }
 
@@ -261,15 +285,22 @@ enum SelectionAssistantSettings {
 final class GlobalHotKeyManager {
     static let shared = GlobalHotKeyManager()
 
-    var onAction: ((TextoraHotKeyAction) -> Void)?
+    var onEvent: ((TextoraHotKeyEvent) -> Void)?
     private var handler: EventHandlerRef?
     private var registrations: [TextoraHotKeyAction: EventHotKeyRef] = [:]
+    private var activeActions: Set<TextoraHotKeyAction> = []
     private(set) var registrationError: String?
+    private(set) var registrationErrors: [TextoraHotKeyAction: String] = [:]
 
     func reload() {
         stop()
-        guard SelectionAssistantSettings.hotKeysModeEnabled() else { return }
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let cloudHotKeysEnabled = SelectionAssistantSettings.hotKeysModeEnabled()
+        let dictationEnabled = OfflineDictationSettings.isEnabled
+        guard cloudHotKeysEnabled || dictationEnabled else { return }
+        var eventTypes = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+        ]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
             var id = EventHotKeyID()
             let status = GetEventParameter(
@@ -281,12 +312,17 @@ final class GlobalHotKeyManager {
                   let action = TextoraHotKeyAction(rawValue: id.id) else {
                 return OSStatus(eventNotHandledErr)
             }
-            Task { @MainActor in GlobalHotKeyManager.shared.onAction?(action) }
+            let kind = GetEventKind(event)
+            let phase: TextoraHotKeyPhase = kind == UInt32(kEventHotKeyReleased) ? .released : .pressed
+            Task { @MainActor in GlobalHotKeyManager.shared.deliver(action: action, phase: phase) }
             return noErr
-        }, 1, &eventType, nil, &handler)
+        }, eventTypes.count, &eventTypes, nil, &handler)
 
         registrationError = nil
-        for action in [TextoraHotKeyAction.rewrite, .translate] {
+        registrationErrors.removeAll()
+        var actions: [TextoraHotKeyAction] = cloudHotKeysEnabled ? [.rewrite, .translate] : []
+        if dictationEnabled { actions.append(.dictate) }
+        for action in actions {
             let shortcut = SelectionAssistantSettings.hotKey(for: action)
             guard shortcut.isEnabled else { continue }
             var ref: EventHotKeyRef?
@@ -297,13 +333,32 @@ final class GlobalHotKeyManager {
                 GetApplicationEventTarget(), 0, &ref
             )
             if status == noErr, let ref { registrations[action] = ref }
-            else { registrationError = "Shortcut \(shortcut.displayName) is already used by another app." }
+            else {
+                let message = "Shortcut \(shortcut.displayName) is already used by another app."
+                registrationError = message
+                registrationErrors[action] = message
+            }
         }
+    }
+
+    func registrationError(for action: TextoraHotKeyAction) -> String? {
+        registrationErrors[action]
+    }
+
+    private func deliver(action: TextoraHotKeyAction, phase: TextoraHotKeyPhase) {
+        switch phase {
+        case .pressed:
+            guard activeActions.insert(action).inserted else { return }
+        case .released:
+            guard activeActions.remove(action) != nil else { return }
+        }
+        onEvent?(TextoraHotKeyEvent(action: action, phase: phase))
     }
 
     func stop() {
         registrations.values.forEach { UnregisterEventHotKey($0) }
         registrations.removeAll()
+        activeActions.removeAll()
         if let handler { RemoveEventHandler(handler) }
         handler = nil
     }

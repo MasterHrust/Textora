@@ -29,6 +29,8 @@ struct ContentView: View {
             providerSection
             Divider().padding(.vertical, 4)
             interfaceSection
+            Divider().padding(.vertical, 4)
+            offlineDictationSection
             Button("Save settings") {
                 viewModel.saveSettings()
             }
@@ -38,6 +40,100 @@ struct ContentView: View {
             appPermissionsSection
         }
         .padding(12)
+    }
+
+    private var offlineDictationSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Offline Dictation")
+                .font(.headline)
+            Text("Use the microphone near an active text field, or hold the shortcut. Audio is processed locally and is never saved or uploaded.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Enable Offline Dictation", isOn: Binding(
+                get: { viewModel.offlineDictationEnabled },
+                set: { viewModel.setOfflineDictationEnabled($0) }
+            ))
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Parakeet V3 Q4_K_M")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("25 languages · about 500 MB · runs entirely on this Mac")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                speechModelActions
+            }
+            if let progress = viewModel.speechModelState.progress {
+                ProgressView(value: progress)
+                Text("\(Int(progress * 100))%")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if viewModel.offlineDictationEnabled {
+                Picker("Microphone", selection: $viewModel.selectedMicrophoneUID) {
+                    Text("System Default").tag("")
+                    ForEach(viewModel.microphones) { microphone in
+                        Text(microphone.name).tag(microphone.id)
+                    }
+                }
+                HStack {
+                    Picker("Fallback language", selection: $viewModel.dictationFallbackLanguage) {
+                        ForEach(SpeechLanguage.allCases) { language in
+                            Text("\(language.flag) \(language.displayName)").tag(language)
+                        }
+                    }
+                    Button { viewModel.refreshMicrophones() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("Refresh microphones")
+                }
+                Text("The current keyboard layout chooses the language. Fallback is used for unknown layouts.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                HotKeySettingRow(title: "Hold to dictate", hotKey: $viewModel.dictationHotKey)
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .dictate) {
+                    Text(error).font(.caption2).foregroundStyle(.red)
+                }
+                HStack(spacing: 12) {
+                    Link("Engine license (MIT)", destination: URL(string: "https://github.com/handy-computer/transcribe.cpp/blob/main/LICENSE")!)
+                    Link("Model attribution (CC BY 4.0)", destination: URL(string: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3")!)
+                }
+                .font(.caption)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var speechModelActions: some View {
+        switch viewModel.speechModelState {
+        case .notDownloaded:
+            Button("Download") { viewModel.downloadSpeechModel() }
+        case .downloading:
+            HStack {
+                Button("Pause") { viewModel.pauseSpeechModelDownload() }
+                Button("Cancel") { viewModel.cancelSpeechModelDownload() }
+            }
+        case .paused:
+            HStack {
+                Button("Resume") { viewModel.downloadSpeechModel() }
+                Button("Cancel") { viewModel.cancelSpeechModelDownload() }
+            }
+        case .verifying:
+            ProgressView().controlSize(.small)
+        case .ready:
+            HStack {
+                Button("Verify") { viewModel.verifySpeechModel() }
+                Button("Delete") { viewModel.deleteSpeechModel() }
+            }
+        case .failed(let message):
+            VStack(alignment: .trailing, spacing: 3) {
+                Button("Retry") { viewModel.downloadSpeechModel() }
+                Text(message).font(.caption2).foregroundStyle(.red).lineLimit(2)
+            }
+        }
     }
 
     private var providerSection: some View {
@@ -114,6 +210,7 @@ struct ContentView: View {
                 toolboxEnabled: settingsModeBinding(.toolbox),
                 floatingIconEnabled: settingsModeBinding(.floatingIcon),
                 hotKeysEnabled: settingsModeBinding(.hotKeys),
+                showsDictation: viewModel.offlineDictationEnabled,
                 compact: true
             )
 
@@ -345,24 +442,31 @@ private struct InterfaceModeCards: View {
     @Binding var toolboxEnabled: Bool
     @Binding var floatingIconEnabled: Bool
     var hotKeysEnabled: Binding<Bool>? = nil
+    var showsDictation = false
     var compact = false
 
     var body: some View {
         HStack(spacing: 10) {
             InterfaceModeCard(
                 title: "Toolbox",
-                subtitle: compact ? "Panel above selection" : "A focused toolbar above selected text with Fix, Formal, Humanize, and Translate.",
+                subtitle: showsDictation
+                    ? (compact ? "Selection panel + dictation mic" : "A focused toolbar for selected text, with a dictation microphone near editable fields.")
+                    : (compact ? "Panel above selection" : "A focused toolbar above selected text with Fix, Formal, Humanize, and Translate."),
                 isOn: $toolboxEnabled,
                 accent: Color(red: 0.27, green: 0.73, blue: 1.0),
                 preview: .toolbox,
+                showsDictation: showsDictation,
                 compact: compact
             )
             InterfaceModeCard(
                 title: "Floating icon",
-                subtitle: compact ? "Classic marker" : "The classic Textora marker near editable fields, with a pop-up for quick corrections.",
+                subtitle: showsDictation
+                    ? (compact ? "Marker + dictation mic" : "The Textora correction marker and a separate dictation microphone near editable fields.")
+                    : (compact ? "Classic marker" : "The classic Textora marker near editable fields, with a pop-up for quick corrections."),
                 isOn: $floatingIconEnabled,
                 accent: Color(red: 0.89, green: 0.24, blue: 0.93),
                 preview: .floating,
+                showsDictation: showsDictation,
                 compact: compact
             )
             if let hotKeysEnabled {
@@ -372,6 +476,7 @@ private struct InterfaceModeCards: View {
                     isOn: hotKeysEnabled,
                     accent: Color(red: 0.30, green: 0.78, blue: 0.62),
                     preview: .hotkeys,
+                    showsDictation: false,
                     compact: compact
                 )
             }
@@ -391,6 +496,7 @@ private struct InterfaceModeCard: View {
     @Binding var isOn: Bool
     let accent: Color
     let preview: PreviewKind
+    var showsDictation = false
     var compact = false
     @Environment(\.colorScheme) private var colorScheme
 
@@ -465,27 +571,33 @@ private struct InterfaceModeCard: View {
     }
 
     private var toolboxPreview: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
-                            startPoint: .leading,
-                            endPoint: .trailing
+        ZStack(alignment: .bottomTrailing) {
+            VStack(spacing: 5) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
                         )
-                    )
-                    .frame(width: 14, height: 14)
-                previewPill("Fix", color: Color(red: 0.25, green: 0.72, blue: 1.0))
-                previewPill("Formal", color: Color(red: 0.66, green: 0.29, blue: 1.0))
-                Spacer(minLength: 0)
+                        .frame(width: 14, height: 14)
+                    previewPill("Fix", color: Color(red: 0.25, green: 0.72, blue: 1.0))
+                    previewPill("Formal", color: Color(red: 0.66, green: 0.29, blue: 1.0))
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 5) {
+                    previewTextBox(label: "Before", color: Color.white.opacity(0.52), lineColor: Color.white.opacity(0.42))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 8, weight: .heavy))
+                        .foregroundStyle(Color.white.opacity(0.32))
+                    previewTextBox(label: "After", color: Color(red: 0.25, green: 0.72, blue: 1.0), lineColor: Color(red: 0.25, green: 0.84, blue: 0.34))
+                }
             }
-            HStack(spacing: 5) {
-                previewTextBox(label: "Before", color: Color.white.opacity(0.52), lineColor: Color.white.opacity(0.42))
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 8, weight: .heavy))
-                    .foregroundStyle(Color.white.opacity(0.32))
-                previewTextBox(label: "After", color: Color(red: 0.25, green: 0.72, blue: 1.0), lineColor: Color(red: 0.25, green: 0.84, blue: 0.34))
+            if showsDictation {
+                previewMic
+                    .offset(x: 5, y: 5)
             }
         }
         .padding(7)
@@ -535,7 +647,30 @@ private struct InterfaceModeCard: View {
                 .overlay(Image(systemName: "wand.and.stars").font(.system(size: compact ? 9 : 10, weight: .bold)).foregroundStyle(.white))
                 .shadow(color: accent.opacity(0.45), radius: 9, x: 0, y: 0)
                 .offset(x: 5, y: 5)
+            if showsDictation {
+                previewMic
+                    .offset(x: compact ? -19 : -23, y: 5)
+            }
         }
+    }
+
+    private var previewMic: some View {
+        Circle()
+            .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+            .frame(width: compact ? 20 : 24, height: compact ? 20 : 24)
+            .overlay(
+                Image(systemName: "mic.fill")
+                    .font(.system(size: compact ? 9 : 10, weight: .bold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
+            .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.24), radius: 4, y: 2)
     }
 
     private var hotKeysPreview: some View {
@@ -621,6 +756,22 @@ struct OnboardingView: View {
         static let success = Color(red: 40 / 255, green: 205 / 255, blue: 65 / 255)
     }
 
+    @ViewBuilder
+    private var speechModelStateBadge: some View {
+        switch viewModel.speechModelState {
+        case .notDownloaded:
+            Text("Optional").foregroundStyle(.secondary)
+        case .downloading(let progress), .paused(let progress):
+            Text("\(Int(progress * 100))%").foregroundStyle(.blue)
+        case .verifying:
+            ProgressView().controlSize(.small)
+        case .ready:
+            Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .failed:
+            Text("Retry available").foregroundStyle(.red)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
@@ -630,7 +781,7 @@ struct OnboardingView: View {
                 Text("Textora helps you fix and improve text in any app, including email, chats, documents, and browsers.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                Text("Before you start, add your API key. The setup wizard will guide you step by step.")
+                Text("Cloud writing tools use your own API key. Offline Dictation can be used without one.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             case 2:
@@ -664,6 +815,7 @@ struct OnboardingView: View {
                     toolboxEnabled: onboardingModeBinding(.toolbox),
                     floatingIconEnabled: onboardingModeBinding(.floatingIcon),
                     hotKeysEnabled: onboardingModeBinding(.hotKeys),
+                    showsDictation: true,
                     compact: false
                 )
                 if viewModel.onboardingInterfaceMode == .hotKeys {
@@ -683,8 +835,31 @@ struct OnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(Color.red.opacity(0.95))
                 }
+            case 5:
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Offline Dictation", systemImage: "waveform")
+                        .font(.system(size: 20, weight: .bold))
+                    Text("In Toolbox or Floating icon mode, use the microphone near an active field. In Hotkeys mode, hold ⌥⌘S and release to insert the transcription.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Parakeet V3 Q4_K_M").font(.system(size: 14, weight: .semibold))
+                            Text("25 European languages · about 500 MB · fully offline")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        speechModelStateBadge
+                    }
+                    if let progress = viewModel.speechModelState.progress {
+                        ProgressView(value: progress)
+                    }
+                    Text("The download continues if you close this window. Microphone access is requested only when you enable dictation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             default:
-                Text("Done. Next, Accessibility will open to complete setup.")
+                Text("Done. Textora will request only the permissions needed for the features you enabled.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             }
@@ -693,7 +868,7 @@ struct OnboardingView: View {
             Divider()
 
             HStack(spacing: 8) {
-                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 5 {
+                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 6 {
                     Button("Back") {
                         viewModel.moveOnboardingBack()
                     }
@@ -705,17 +880,21 @@ struct OnboardingView: View {
                     .buttonStyle(PrimaryButtonStyle())
                     .focusEffectDisabled()
                 } else if viewModel.onboardingStep == 3 {
-                    Button(viewModel.isOnboardingBusy ? "Connecting..." : "Continue") {
-                        Task {
-                            let valid = await viewModel.validateCurrentProviderSetup()
-                            if valid {
-                                viewModel.moveOnboardingNext()
+                    HStack(spacing: 8) {
+                        Button(viewModel.isOnboardingBusy ? "Connecting..." : "Continue") {
+                            Task {
+                                let valid = await viewModel.validateCurrentProviderSetup()
+                                if valid {
+                                    viewModel.moveOnboardingNext()
+                                }
                             }
                         }
+                        .disabled(viewModel.isOnboardingBusy)
+                        .buttonStyle(PrimaryButtonStyle())
+                        .focusEffectDisabled()
+                        Button("Set up later") { viewModel.continueWithoutCloudAI() }
+                            .buttonStyle(SecondaryButtonStyle())
                     }
-                    .disabled(viewModel.isOnboardingBusy)
-                    .buttonStyle(PrimaryButtonStyle())
-                    .focusEffectDisabled()
                 } else if viewModel.onboardingStep == 4 {
                     Button("Continue") {
                         viewModel.moveOnboardingNext()
@@ -723,6 +902,18 @@ struct OnboardingView: View {
                     .disabled(!viewModel.hasValidOnboardingInterfaceSelection)
                     .buttonStyle(PrimaryButtonStyle())
                     .focusEffectDisabled()
+                } else if viewModel.onboardingStep == 5 {
+                    Button("Download model") {
+                        viewModel.downloadSpeechModel()
+                        viewModel.moveOnboardingNext()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .focusEffectDisabled()
+                    Button("Skip") {
+                        viewModel.setOfflineDictationEnabled(false)
+                        viewModel.moveOnboardingNext()
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
                 } else {
                     Button("Finish") {
                         onFinish()
@@ -736,7 +927,7 @@ struct OnboardingView: View {
                     .focusEffectDisabled()
                 }
                 Spacer()
-                if viewModel.onboardingStep < 5 {
+                if viewModel.onboardingStep < 6 {
                     Button("Skip for now") {
                         viewModel.skipOnboardingForNow()
                         onClose()
@@ -770,7 +961,7 @@ struct OnboardingView: View {
                 Text("Textora Quick setup")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.primary)
-                Text("Step \(viewModel.onboardingStep) of 5")
+                Text("Step \(viewModel.onboardingStep) of 6")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -789,7 +980,7 @@ struct OnboardingView: View {
     }
     
     private var stepBadge: some View {
-        Text("\(viewModel.onboardingStep)/5")
+        Text("\(viewModel.onboardingStep)/6")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 8)

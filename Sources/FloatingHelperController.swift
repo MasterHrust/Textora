@@ -86,6 +86,7 @@ final class FloatingHelperController {
     private let onFloatingHoverChanged: (Bool, CGRect) -> Void
     private var lastFrame: CGRect = .zero
     var onStatusChange: ((String) -> Void)?
+    private var lastPostedStatus: String?
     private var isDragging = false
     private var isFloatingHovered = false
     private var dragBoundaryWindowFrame: CGRect?
@@ -261,6 +262,11 @@ final class FloatingHelperController {
         floatingBubbleFrameForRewritePopup()
     }
 
+    var visibleFrame: CGRect? {
+        guard panel?.isVisible == true else { return nil }
+        return panel?.frame
+    }
+
     /// `focusedTextSignature()` is `range|valueText`.
     private func valueSegment(ofFocusedSignature full: String) -> String {
         guard let idx = full.firstIndex(of: "|") else { return full }
@@ -268,6 +274,8 @@ final class FloatingHelperController {
     }
 
     private func postStatus(_ message: String) {
+        guard message != lastPostedStatus else { return }
+        lastPostedStatus = message
         let now = Date()
         if message.hasPrefix("Showing helper at") {
             if let t = lastLayoutStatusPostedAt, now.timeIntervalSince(t) < 1.2 {
@@ -579,6 +587,7 @@ final class FloatingHelperController {
     }
 
     private func updateVisibilityAndPosition() {
+        guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
         guard isRunning else {
             hideFloatingHelperImmediately()
             return
