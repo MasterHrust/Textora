@@ -54,7 +54,6 @@ struct ContentView: View {
                 set: { viewModel.setLaunchAtLoginEnabled($0) }
             ))
             .toggleStyle(.checkbox)
-            .disabled(viewModel.launchAtLoginUnavailable)
 
             if viewModel.launchAtLoginRequiresApproval {
                 HStack {
@@ -66,10 +65,6 @@ struct ContentView: View {
                         viewModel.openLoginItemsSettings()
                     }
                 }
-            } else if viewModel.launchAtLoginUnavailable {
-                Text("Automatic launch is unavailable. Move Textora to Applications and try again.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
 
             if !viewModel.launchAtLoginErrorText.isEmpty {

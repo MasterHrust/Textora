@@ -4,7 +4,6 @@ enum LaunchAtLoginState: Equatable {
     case disabled
     case enabled
     case requiresApproval
-    case unavailable
 
     var isRegistered: Bool {
         self == .enabled || self == .requiresApproval
@@ -13,7 +12,11 @@ enum LaunchAtLoginState: Equatable {
 
 enum LaunchAtLoginManager {
     static var state: LaunchAtLoginState {
-        switch SMAppService.mainApp.status {
+        state(for: SMAppService.mainApp.status)
+    }
+
+    static func state(for status: SMAppService.Status) -> LaunchAtLoginState {
+        switch status {
         case .notRegistered:
             return .disabled
         case .enabled:
@@ -21,9 +24,12 @@ enum LaunchAtLoginManager {
         case .requiresApproval:
             return .requiresApproval
         case .notFound:
-            return .unavailable
+            // ServiceManagement also reports `notFound` before the main app
+            // has ever been registered. Treat it as the initial off state so
+            // the user can make the first call to `register()`.
+            return .disabled
         @unknown default:
-            return .unavailable
+            return .disabled
         }
     }
 

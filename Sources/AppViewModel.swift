@@ -140,7 +140,6 @@ final class AppViewModel: ObservableObject {
     }
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var launchAtLoginRequiresApproval = false
-    @Published private(set) var launchAtLoginUnavailable = false
     @Published private(set) var launchAtLoginErrorText = ""
     @Published private(set) var speechModelState: SpeechModelState = .notDownloaded
     @Published private(set) var microphones: [SpeechMicrophone] = []
@@ -220,7 +219,6 @@ final class AppViewModel: ObservableObject {
         let state = LaunchAtLoginManager.state
         launchAtLoginEnabled = state.isRegistered
         launchAtLoginRequiresApproval = state == .requiresApproval
-        launchAtLoginUnavailable = state == .unavailable
     }
 
     func setLaunchAtLoginEnabled(_ enabled: Bool) {

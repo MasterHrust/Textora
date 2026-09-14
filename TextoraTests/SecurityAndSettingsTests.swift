@@ -4,6 +4,10 @@ import XCTest
 @testable import Textora
 
 final class SecurityAndSettingsTests: XCTestCase {
+    func testUnseenMainAppLoginItemCanBeRegistered() {
+        XCTAssertEqual(LaunchAtLoginManager.state(for: .notFound), .disabled)
+    }
+
     func testCompatibleURLAddsHTTPSAndChatCompletionsPath() {
         let url = AIClient.validatedOpenAICompatibleURL(from: "api.example.com")
         XCTAssertEqual(url?.absoluteString, "https://api.example.com/v1/chat/completions")
