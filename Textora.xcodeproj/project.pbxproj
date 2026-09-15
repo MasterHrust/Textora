@@ -29,11 +29,12 @@
 		7DABCA309A6C1978537546FA /* GrammarlyRewritePlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516E4F6FEEB97CFE93043069 /* GrammarlyRewritePlanner.swift */; };
 		82F55A9228CEA2D272E11F47 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */; };
 		90EFED5ED4A2F5D1365178DB /* SelectionToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04D0CA50B7FDCE31F262571 /* SelectionToolbarView.swift */; };
-		9619BC675CE9F5A8ECECDFCD /* CTranscribe in Frameworks */ = {isa = PBXBuildFile; productRef = A6FFF9F2832C7D177D9B6066 /* CTranscribe */; };
+		9619BC675CE9F5A8ECECDFCD /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 77CC5DAF204882A7FFA617D9 /* Sparkle */; };
 		9821610AB0F68301987A6BBD /* SelectionAssistantController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BC2704F44FAB730B898089B /* SelectionAssistantController.swift */; };
 		A315AADAD3FB2D3F434A2BC3 /* TextoraApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4072587BAA8858F50B0BEF4D /* TextoraApp.swift */; };
 		A8EAFF5A91AD75479D3AD02D /* InlineRewriteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118D4E1534298FDDBD25D49B /* InlineRewriteView.swift */; };
 		AA8B0863398E255BDCF66DDE /* FloatingHelperController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E43A2D871EF7E4395D8B177B /* FloatingHelperController.swift */; };
+		AF5C8E1C62742DA34FE2D006 /* CTranscribe in Frameworks */ = {isa = PBXBuildFile; productRef = A6FFF9F2832C7D177D9B6066 /* CTranscribe */; };
 		B034A1D8121367E6BFDC6FAA /* SecurityAndSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7C86F8004EA584FC0993CCE /* SecurityAndSettingsTests.swift */; };
 		C196E96AD4B703765CB5CA65 /* MarkerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7EF71A9570085EEB3690569 /* MarkerViews.swift */; };
 		C2A6A78088D1B9765015F188 /* InlineRewriteViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */; };
@@ -42,6 +43,7 @@
 		E4A982EDDD503D59E3BA4E90 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 416D4536F89F3B7892ECC7D6 /* ContentView.swift */; };
 		F0B5D4AF1598B8AA952BAFB5 /* KeyboardInputSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F74B8A7F0C4CB0A0D05FBDC /* KeyboardInputSource.swift */; };
 		F2922758ABCCCBD235CD3E94 /* LaunchAtLoginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B05D52B01E1B982C6917E59 /* LaunchAtLoginManager.swift */; };
+		F612E12C534B0F1CF804127A /* AppUpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5679AEE985C26B761E2A75F4 /* AppUpdateManager.swift */; };
 		F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */; };
 		F731FD68419082BFC259436A /* OfflineSpeechTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CDEDF9B5244F5F36C5BA612 /* OfflineSpeechTests.swift */; };
 		F9EDDDA0B5B5FB8EA7DC2D7A /* helper-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 691BD7E2D55CD14AA7B983F8 /* helper-icon.png */; };
@@ -74,6 +76,7 @@
 		416D4536F89F3B7892ECC7D6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		446D2CF0556E2DD61A433796 /* DictationMicController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationMicController.swift; sourceTree = "<group>"; };
 		516E4F6FEEB97CFE93043069 /* GrammarlyRewritePlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrammarlyRewritePlanner.swift; sourceTree = "<group>"; };
+		5679AEE985C26B761E2A75F4 /* AppUpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateManager.swift; sourceTree = "<group>"; };
 		58521F6930CFB7E7B24BC752 /* TextoraTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TextoraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5BC2704F44FAB730B898089B /* SelectionAssistantController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAssistantController.swift; sourceTree = "<group>"; };
 		5E2401B55C33648192CDAB73 /* InlineRewriteViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRewriteViewModel.swift; sourceTree = "<group>"; };
@@ -110,7 +113,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				9619BC675CE9F5A8ECECDFCD /* CTranscribe in Frameworks */,
+				9619BC675CE9F5A8ECECDFCD /* Sparkle in Frameworks */,
+				AF5C8E1C62742DA34FE2D006 /* CTranscribe in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -144,6 +148,7 @@
 				FDFA3B38183BC8A18BB52F2B /* AIClient.swift */,
 				B7E06223B72C034D28D7097A /* AppConsentPromptController.swift */,
 				DD53487A6560FD81FE7DE9E1 /* AppCoordinator.swift */,
+				5679AEE985C26B761E2A75F4 /* AppUpdateManager.swift */,
 				0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */,
 				416D4536F89F3B7892ECC7D6 /* ContentView.swift */,
 				F46C7329329CAE8DEDC7379E /* DraggableFloatingPanel.swift */,
@@ -239,6 +244,7 @@
 			);
 			name = Textora;
 			packageProductDependencies = (
+				77CC5DAF204882A7FFA617D9 /* Sparkle */,
 				A6FFF9F2832C7D177D9B6066 /* CTranscribe */,
 			);
 			productName = Textora;
@@ -288,6 +294,7 @@
 			mainGroup = F87EF749618C8AADA767F968;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				3A577A7AA8C94F27BBA59F30 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				65B0F8026D52E1B2D7C6A19D /* XCLocalSwiftPackageReference "Packages/TranscribeCppBinary" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -334,6 +341,7 @@
 				6B10DC809A0563BD2748674E /* AccessibilityWizardView.swift in Sources */,
 				F7131511098F7CCBD1A9A743 /* AppConsentPromptController.swift in Sources */,
 				695BAC4B6A71A3E4F464661C /* AppCoordinator.swift in Sources */,
+				F612E12C534B0F1CF804127A /* AppUpdateManager.swift in Sources */,
 				82F55A9228CEA2D272E11F47 /* AppViewModel.swift in Sources */,
 				E4A982EDDD503D59E3BA4E90 /* ContentView.swift in Sources */,
 				437ED721E7A6DD029C16CAED /* DictationMicController.swift in Sources */,
@@ -610,7 +618,23 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		3A577A7AA8C94F27BBA59F30 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		77CC5DAF204882A7FFA617D9 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3A577A7AA8C94F27BBA59F30 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
 		A6FFF9F2832C7D177D9B6066 /* CTranscribe */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CTranscribe;

@@ -10,6 +10,7 @@ apps/macos-app/build.log
 apps/macos-app/build-last.log
 .xcbuild
 *.sh
+!Scripts/prepare-update.sh
 .swiftpm/
 *.xcodeproj/xcuserdata/
 

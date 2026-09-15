@@ -5,6 +5,7 @@ import AppKit
 final class TextoraAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppCoordinator.shared.startAfterApplicationReady()
+        AppUpdateManager.shared.start()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

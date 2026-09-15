@@ -90,6 +90,8 @@ xcodebuild -project Textora.xcodeproj -scheme Textora -configuration Debug -sdk 
 
 ### Release Verification (DMG/App)
 
+For in-app updates and the GitHub Release workflow, see [UPDATES.md](UPDATES.md).
+
 After installing `Textora.app`, verify macOS sees the correct app identity:
 
 ```bash

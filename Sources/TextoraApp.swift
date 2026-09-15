@@ -4,6 +4,7 @@ import SwiftUI
 struct TextoraApp: App {
     @NSApplicationDelegateAdaptor(TextoraAppDelegate.self) private var appDelegate
     @StateObject private var coordinator = AppCoordinator.shared
+    @ObservedObject private var updates = AppUpdateManager.shared
     private let donateURL = "https://paypal.me/RShytskou"
 
     init() {
@@ -38,6 +39,10 @@ struct TextoraApp: App {
                 guard let url = URL(string: donateURL) else { return }
                 NSWorkspace.shared.open(url)
             }
+            Button("Check for Updates…") {
+                updates.checkForUpdates()
+            }
+            .disabled(!updates.canCheckForUpdates)
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }

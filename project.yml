@@ -6,6 +6,9 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: com.textora.app
     MACOSX_DEPLOYMENT_TARGET: "14.0"
 packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
   TranscribeCppBinary:
     path: Packages/TranscribeCppBinary
 targets:
@@ -29,6 +32,7 @@ targets:
           ENABLE_OUTGOING_NETWORK_CONNECTIONS: NO
           ENABLE_USER_SELECTED_FILES: NO
     dependencies:
+      - package: Sparkle
       - package: TranscribeCppBinary
         product: CTranscribe
     scheme:

@@ -9,11 +9,19 @@
 	<key>CFBundleName</key>
 	<string>Textora</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/MasterHrust/Textora/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>rvO/IG/UzwI+kpbTZ3316yYdtCjxLr13UVW/h9+pu54=</string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Textora reads visible text from Google Docs in Chrome to check only the current page.</string>
 	<key>NSAccessibilityUsageDescription</key>

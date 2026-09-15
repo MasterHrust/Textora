@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
+    @ObservedObject private var updates = AppUpdateManager.shared
 
     private let bundleIDTextWidth: CGFloat = 210
     private let actionPickerWidth: CGFloat = 140
@@ -49,6 +50,24 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("System")
                 .font(.headline)
+            HStack {
+                Text("Textora \(updates.versionDescription)")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Check for Updates…") { updates.checkForUpdates() }
+                    .disabled(!updates.canCheckForUpdates)
+            }
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { updates.automaticallyChecksForUpdates },
+                set: { updates.setAutomaticallyChecksForUpdates($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .disabled(!updates.isReady)
+            if let message = updates.unavailableMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("Launch Textora at login", isOn: Binding(
                 get: { viewModel.launchAtLoginEnabled },
                 set: { viewModel.setLaunchAtLoginEnabled($0) }
