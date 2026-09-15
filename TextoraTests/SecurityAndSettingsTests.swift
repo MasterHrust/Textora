@@ -74,6 +74,10 @@ final class SecurityAndSettingsTests: XCTestCase {
         XCTAssertLessThanOrEqual(longHeight, 535)
     }
 
+    func testHotKeyResultUsesSameBodyFontSizeAsOriginal() {
+        XCTAssertEqual(SelectionToolbarView.hotKeyBodyFontSize, 13.5)
+    }
+
     @MainActor
     func testObjectPasteboardTypesAreRejected() {
         XCTAssertFalse(TextAccessService.containsObjectPasteboardType([

@@ -12,6 +12,7 @@ struct SelectionToolbarView: View {
 
     private let panelWidth: CGFloat = 680
     static let hotKeyPanelWidth: CGFloat = 510
+    static let hotKeyBodyFontSize: CGFloat = 13.5
     static let tooltipTopReserve: CGFloat = 0
 
     static func hotKeyPanelHeight(for viewModel: SelectionAssistantViewModel) -> CGFloat {
@@ -25,14 +26,14 @@ struct SelectionToolbarView: View {
         let textWidth = hotKeyPanelWidth - 64
         let originalHeight = hotKeyCardHeight(
             text: originalText,
-            font: .systemFont(ofSize: 13.5),
+            font: .systemFont(ofSize: hotKeyBodyFontSize),
             width: textWidth,
             minimum: 62,
             maximum: 126
         )
         let resultHeight = hotKeyCardHeight(
             text: resultText,
-            font: .systemFont(ofSize: 15.5, weight: .semibold),
+            font: .systemFont(ofSize: hotKeyBodyFontSize),
             width: textWidth,
             minimum: 80,
             maximum: 230
@@ -307,7 +308,7 @@ struct SelectionToolbarView: View {
         hotKeyCard(title: viewModel.presentationMode == .hotKeyTranslate ? "Original" : "Before") {
             ScrollView {
                 Text(viewModel.originalText)
-                    .font(.system(size: 13.5))
+                    .font(.system(size: Self.hotKeyBodyFontSize))
                     .foregroundStyle(.white.opacity(0.66))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -335,7 +336,10 @@ struct SelectionToolbarView: View {
                     case .idle, .waiting, .checking:
                         hotKeyProgress("Improving...")
                     case .ready:
-                        hotKeyResultText(highlightedAfterText(fontSize: 15.5))
+                        hotKeyResultText(highlightedAfterText(
+                            fontSize: Self.hotKeyBodyFontSize,
+                            emphasizesChanges: false
+                        ))
                     case .noChanges:
                         hotKeyResultText(AttributedString("No changes needed."))
                     case .applying:
@@ -375,7 +379,7 @@ struct SelectionToolbarView: View {
     private func hotKeyResultText(_ text: AttributedString) -> some View {
         ScrollView {
             Text(text)
-                .font(.system(size: 15.5, weight: .semibold))
+                .font(.system(size: Self.hotKeyBodyFontSize))
                 .foregroundStyle(.white.opacity(0.94))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -481,7 +485,7 @@ struct SelectionToolbarView: View {
     private var hotKeyOriginalCardHeight: CGFloat {
         Self.hotKeyCardHeight(
             text: viewModel.originalText,
-            font: .systemFont(ofSize: 13.5),
+            font: .systemFont(ofSize: Self.hotKeyBodyFontSize),
             width: Self.hotKeyPanelWidth - 64,
             minimum: 62,
             maximum: 126
@@ -494,7 +498,7 @@ struct SelectionToolbarView: View {
             : viewModel.rewrittenText
         return Self.hotKeyCardHeight(
             text: text,
-            font: .systemFont(ofSize: 15.5, weight: .semibold),
+            font: .systemFont(ofSize: Self.hotKeyBodyFontSize),
             width: Self.hotKeyPanelWidth - 64,
             minimum: 80,
             maximum: 230
@@ -935,7 +939,10 @@ struct SelectionToolbarView: View {
         }
     }
 
-    private func highlightedAfterText(fontSize: CGFloat = 12.5) -> AttributedString {
+    private func highlightedAfterText(
+        fontSize: CGFloat = 12.5,
+        emphasizesChanges: Bool = true
+    ) -> AttributedString {
         let text = viewModel.rewrittenText
         let ns = NSMutableAttributedString(
             string: text,
@@ -947,13 +954,11 @@ struct SelectionToolbarView: View {
         let success = NSColor(red: 40 / 255, green: 205 / 255, blue: 65 / 255, alpha: 1)
         let ranges = PreviewDiff.changedRangesInCorrected(original: viewModel.originalText, corrected: text)
         for range in ranges where range.location >= 0 && range.location + range.length <= ns.length {
-            ns.addAttributes(
-                [
-                    .font: NSFont.systemFont(ofSize: fontSize, weight: .bold),
-                    .foregroundColor: success
-                ],
-                range: range
-            )
+            var attributes: [NSAttributedString.Key: Any] = [.foregroundColor: success]
+            if emphasizesChanges {
+                attributes[.font] = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+            }
+            ns.addAttributes(attributes, range: range)
         }
         return AttributedString(ns)
     }
