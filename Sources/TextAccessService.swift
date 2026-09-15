@@ -754,6 +754,25 @@ final class TextAccessService {
         prefersClipboardSelectionPasteReplaceForBundle(bundleID)
     }
 
+    static func dictationPasteWasAccepted(
+        valueChanged: Bool?,
+        caretAdvanced: Bool?,
+        prefersClipboard: Bool,
+        isGoogleDocs: Bool
+    ) -> Bool {
+        let acceptsPostedPasteWithoutAXConfirmation = prefersClipboard && isGoogleDocs
+        if let valueChanged {
+            return valueChanged || acceptsPostedPasteWithoutAXConfirmation
+        }
+        if let caretAdvanced {
+            return caretAdvanced || acceptsPostedPasteWithoutAXConfirmation
+        }
+        // Slack and similar contenteditables expose neither a useful value
+        // nor a caret range. A successfully posted native paste is the only
+        // non-destructive confirmation available there.
+        return prefersClipboard
+    }
+
     private func dictationValueChanged(
         from original: String,
         to updated: String,
@@ -793,6 +812,7 @@ final class TextAccessService {
         }
 
         let rangeBeforePaste = selectedRange(of: target.element)
+        let isGoogleDocs = prefersClipboard && isGoogleDocsFrontmost()
         let pasteboard = NSPasteboard.general
         let snapshot = snapshotPasteboard(pasteboard)
         pasteboard.clearContents()
@@ -807,25 +827,34 @@ final class TextAccessService {
         }
         usleep(prefersClipboard ? 360_000 : 180_000)
 
-        let inserted: Bool
+        let valueChanged: Bool?
         if let valueBeforeInsertion,
            let valueAfterInsertion = valueText(of: target.element) {
-            inserted = dictationValueChanged(
+            valueChanged = dictationValueChanged(
                 from: valueBeforeInsertion,
                 to: valueAfterInsertion,
                 inserting: text,
                 at: target.selectedRange
             )
-        } else if let rangeBeforePaste,
-                  let rangeAfterPaste = selectedRange(of: target.element) {
-            let expectedLocation = rangeBeforePaste.location + (text as NSString).length
-            inserted = rangeAfterPaste.length == 0 && rangeAfterPaste.location >= expectedLocation
         } else {
-            // Slack can hide both AXValue and a trustworthy caret range.
-            // After a posted native paste event this is the best available
-            // confirmation without selecting or copying the user's text.
-            inserted = prefersClipboard
+            valueChanged = nil
         }
+
+        let caretAdvanced: Bool?
+        if valueChanged == nil,
+           let rangeBeforePaste,
+           let rangeAfterPaste = selectedRange(of: target.element) {
+            let expectedLocation = rangeBeforePaste.location + (text as NSString).length
+            caretAdvanced = rangeAfterPaste.length == 0 && rangeAfterPaste.location >= expectedLocation
+        } else {
+            caretAdvanced = nil
+        }
+        let inserted = Self.dictationPasteWasAccepted(
+            valueChanged: valueChanged,
+            caretAdvanced: caretAdvanced,
+            prefersClipboard: prefersClipboard,
+            isGoogleDocs: isGoogleDocs
+        )
 
         // Restore only while the temporary payload is still ours, so a copy
         // made by the user during insertion is never overwritten.
@@ -2175,8 +2204,11 @@ final class TextAccessService {
             "applyRewrittenText",
             "enter bundle=\(context.targetBundleID) usesSelection=\(context.usesSelection) "
             + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
-            + "strategy=unifiedPhysicalRewrite"
+            + "strategy=\(shouldPreserveBrowserFormattingForRewrite(bundleID: context.targetBundleID) ? "browserRichPaste" : "unifiedPhysicalRewrite")"
         )
+        if shouldPreserveBrowserFormattingForRewrite(bundleID: context.targetBundleID) {
+            return applyBrowserRewrittenText(rewritten, basedOn: context)
+        }
         if context.usesSelection {
             let shouldUseClipboardSelectionPaste = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
                 || context.anchor.source == .clipboardFallback
@@ -2201,83 +2233,52 @@ final class TextAccessService {
 
     // MARK: - Browser Rewrite Apply
 
-    /// Browser editors (Gmail, web mail, docs-like composers) expose AX
-    /// ranges that can drift from the physical DOM caret. Keep them out of
-    /// the general Electron path: no caret-backspace rewrite, no Cmd+A full
-    /// replacement. The primary browser strategy is the same physical
-    /// retyping path: select the changed range, then type the replacement
-    /// over that selection without touching the pasteboard.
+    /// Browser editors (Gmail, web mail, docs-like composers) keep character
+    /// formatting in their DOM. Replacing a range by simulated typing can make
+    /// the editor fall back to its default font, so browsers use a native
+    /// copy/paste replacement that carries the source range's RTF/HTML style.
     private func applyBrowserRewrittenText(
         _ rewritten: String,
-        basedOn context: FocusedTextContext,
-        envelopeWouldTouchRichTokens: Bool
+        basedOn context: FocusedTextContext
     ) -> ApplyResult {
         textoraDiagLog(
             "applyBrowserRewrittenText",
             "enter bundle=\(context.targetBundleID) usesSelection=\(context.usesSelection) "
-            + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil") "
-            + "envelopeTouchesRichTokens=\(envelopeWouldTouchRichTokens)"
+            + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil")"
         )
 
-        if applyBrowserRewriteStrategies(
-            rewritten,
-            basedOn: context,
-            envelopeWouldTouchRichTokens: envelopeWouldTouchRichTokens
-        ) {
+        if applyBrowserRewriteStrategies(rewritten, basedOn: context) {
             return .success
         }
-
-        guard let fresh = focusedElement(), isEditable(element: fresh) else {
-            textoraDiagLog("applyBrowserRewrittenText", "no editable fresh element -> failed")
-            return .failed
-        }
-        let refreshed = FocusedTextContext(
-            text: context.text,
-            frame: context.frame,
-            usesSelection: context.usesSelection,
-            selectedRange: context.selectedRange,
-            targetElement: fresh,
-            targetAppPID: context.targetAppPID,
-            targetBundleID: context.targetBundleID,
-            anchor: context.anchor,
-            textFragments: context.textFragments
-        )
-        focusTargetAppAndElement(refreshed)
-        textoraDiagLog("applyBrowserRewrittenText", "retrying with refreshed element")
-        if applyBrowserRewriteStrategies(
-            rewritten,
-            basedOn: refreshed,
-            envelopeWouldTouchRichTokens: envelopeWouldTouchRichTokens
-        ) {
-            return .success
-        }
-
-        textoraDiagLog("applyBrowserRewrittenText", "exhausted browser strategies -> failed")
+        // Do not fall back to simulated typing here. Besides losing Gmail
+        // formatting, a retry is unsafe when the browser accepted the paste
+        // but exposed a stale AX value during verification.
+        textoraDiagLog("applyBrowserRewrittenText", "rich paste was not confirmed -> failed")
         return .failed
     }
 
     private func applyBrowserRewriteStrategies(
         _ rewritten: String,
-        basedOn context: FocusedTextContext,
-        envelopeWouldTouchRichTokens: Bool
+        basedOn context: FocusedTextContext
     ) -> Bool {
         guard normalized(rewritten) != normalized(context.text) else {
             textoraDiagLog("applyBrowserRewrittenText", "no-op: rewritten equals original")
             return true
         }
 
-        if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
-            textoraDiagLog("applyBrowserRewrittenText", "success via protectedPhysicalRewritePlan")
-            return true
+        if context.usesSelection {
+            let applied = applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
+            if applied {
+                textoraDiagLog("applyBrowserRewrittenText", "success via rich selection paste")
+            }
+            return applied
         }
 
-        if context.usesSelection,
-           applySelectedTextDirect(rewritten, basedOn: context) {
-            textoraDiagLog("applyBrowserRewrittenText", "success via selectedTextDirect")
-            return true
+        let applied = applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: context)
+        if applied {
+            textoraDiagLog("applyBrowserRewrittenText", "success via rich range paste")
         }
-
-        return false
+        return applied
     }
 
     func applyLocalizedRewrite(
@@ -2297,6 +2298,10 @@ final class TextAccessService {
             "enter bundle=\(context.targetBundleID) preferredLocal=\(preferredLocalRange.map { "\($0.location):\($0.length)" } ?? "nil") "
             + "original=\(textoraDiagPreview(context.text)) rewritten=\(textoraDiagPreview(rewritten))"
         )
+        focusTargetAppAndElement(context)
+        if shouldPreserveBrowserFormattingForRewrite(bundleID: context.targetBundleID) {
+            return applyBrowserRewrittenText(rewritten, basedOn: context)
+        }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyLocalizedRewrite", "success via unifiedPhysicalRewrite")
             return .success
@@ -2313,6 +2318,10 @@ final class TextAccessService {
             "applyIterativeLocalizedRewrite",
             "enter bundle=\(context.targetBundleID) original=\(textoraDiagPreview(context.text)) rewritten=\(textoraDiagPreview(rewritten))"
         )
+        focusTargetAppAndElement(context)
+        if shouldPreserveBrowserFormattingForRewrite(bundleID: context.targetBundleID) {
+            return applyBrowserRewrittenText(rewritten, basedOn: context)
+        }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyIterativeLocalizedRewrite", "success via unifiedPhysicalRewrite")
             return .success
@@ -2539,6 +2548,10 @@ final class TextAccessService {
             || b.contains("firefox")
             || b.contains("brave")
             || b.contains("opera")
+    }
+
+    func shouldPreserveBrowserFormattingForRewrite(bundleID: String) -> Bool {
+        isBrowserBundleID(bundleID)
     }
 
     private func isPDFReaderBundleID(_ bundleID: String) -> Bool {

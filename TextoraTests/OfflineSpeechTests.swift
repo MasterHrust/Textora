@@ -36,6 +36,35 @@ final class OfflineSpeechTests: XCTestCase {
         XCTAssertFalse(service.shouldPreferClipboardForDictation(bundleID: "com.apple.Notes"))
     }
 
+    func testGoogleDocsAcceptsPostedDictationPasteWhenAXValueIsStale() {
+        XCTAssertTrue(TextAccessService.dictationPasteWasAccepted(
+            valueChanged: false,
+            caretAdvanced: nil,
+            prefersClipboard: true,
+            isGoogleDocs: true
+        ))
+        XCTAssertFalse(TextAccessService.dictationPasteWasAccepted(
+            valueChanged: false,
+            caretAdvanced: nil,
+            prefersClipboard: true,
+            isGoogleDocs: false
+        ))
+        XCTAssertTrue(TextAccessService.dictationPasteWasAccepted(
+            valueChanged: nil,
+            caretAdvanced: nil,
+            prefersClipboard: true,
+            isGoogleDocs: false
+        ))
+    }
+
+    func testBrowserRewritePreservesFormattingWithRichPaste() {
+        let service = TextAccessService()
+        XCTAssertTrue(service.shouldPreserveBrowserFormattingForRewrite(bundleID: "com.google.Chrome"))
+        XCTAssertTrue(service.shouldPreserveBrowserFormattingForRewrite(bundleID: "com.apple.Safari"))
+        XCTAssertFalse(service.shouldPreserveBrowserFormattingForRewrite(bundleID: "com.tinyspeck.slackmacgap"))
+        XCTAssertFalse(service.shouldPreserveBrowserFormattingForRewrite(bundleID: "com.apple.Notes"))
+    }
+
     func testOfflineSettingsPersistInDefaults() throws {
         let suiteName = "TextoraTests.OfflineDictation.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
