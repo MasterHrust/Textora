@@ -4,35 +4,35 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>Textora</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
 	<string>Textora</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1</string>
+	<string>1.2</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>Textora needs Accessibility access to read selected text and replace text in apps when you ask it to rewrite, translate, or correct writing.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Textora reads visible text from Google Docs in Chrome to check only the current page.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Textora uses the microphone only while you hold the dictation shortcut. Audio is transcribed locally and is never uploaded or saved.</string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
 	<key>SUFeedURL</key>
 	<string>https://github.com/MasterHrust/Textora/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>rvO/IG/UzwI+kpbTZ3316yYdtCjxLr13UVW/h9+pu54=</string>
-	<key>SUAutomaticallyUpdate</key>
-	<false/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Textora reads visible text from Google Docs in Chrome to check only the current page.</string>
-	<key>NSAccessibilityUsageDescription</key>
-	<string>Textora needs Accessibility access to read selected text and replace text in apps when you ask it to rewrite, translate, or correct writing.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Textora uses the microphone only while you hold the dictation shortcut. Audio is transcribed locally and is never uploaded or saved.</string>
-	<key>CFBundleExecutable</key>
-	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.utilities</string>
 </dict>
 </plist>
