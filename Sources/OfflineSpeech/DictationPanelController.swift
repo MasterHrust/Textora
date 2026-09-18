@@ -15,6 +15,8 @@ final class DictationOverlayModel: ObservableObject {
     @Published var level: Float = 0
     @Published var elapsed: TimeInterval = 0
     @Published var language: SpeechLanguage = .english
+    @Published var resultMessage = "Textora could not insert it into the original field."
+    @Published var retryTitle = "Retry Insert"
     var onRetry: (() -> Void)?
     var onCopy: (() -> Void)?
     var onClose: (() -> Void)?
@@ -27,6 +29,8 @@ final class DictationPanelController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
 
     func show(state: DictationOverlayModel.State, language: SpeechLanguage, anchor: CGRect?) {
+        model.resultMessage = "Textora could not insert it into the original field."
+        model.retryTitle = "Retry Insert"
         model.state = state
         model.language = language
         let isResult: Bool
@@ -51,12 +55,14 @@ final class DictationPanelController: NSObject, NSWindowDelegate {
             self.panel = panel
         }
         panel?.setContentSize(size)
+        if !(panel?.contentView is NSHostingView<DictationOverlayView>) {
         let host = NSHostingView(rootView: DictationOverlayView(model: model))
         host.focusRingType = .none
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
         host.layer?.isOpaque = false
         panel?.contentView = host
+        }
         positionPanel(size: size, anchor: anchor)
         panel?.orderFrontRegardless()
     }
@@ -67,6 +73,10 @@ final class DictationPanelController: NSObject, NSWindowDelegate {
     }
 
     func updateLevel(_ value: Float) { model.level = value }
+    func setResultMessage(_ message: String, retryTitle: String) {
+        model.resultMessage = message
+        model.retryTitle = retryTitle
+    }
     func updateElapsed(_ value: TimeInterval) { model.elapsed = value }
 
     func configureActions(
@@ -148,9 +158,6 @@ private struct DictationOverlayView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("\(model.language.flag) \(model.language.displayName)")
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
             Button {
                 model.onStop?()
             } label: {
@@ -191,7 +198,7 @@ private struct DictationOverlayView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Dictation ready").font(.system(size: 18, weight: .bold))
-                    Text("Textora could not insert it into the original field.")
+                    Text(model.resultMessage)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -210,7 +217,7 @@ private struct DictationOverlayView: View {
                 Button("Close") { model.onClose?() }
                 Spacer()
                 Button { model.onCopy?() } label: { Label("Copy", systemImage: "doc.on.doc") }
-                Button { model.onRetry?() } label: { Label("Retry Insert", systemImage: "arrow.clockwise") }
+                Button { model.onRetry?() } label: { Label(model.retryTitle, systemImage: "arrow.clockwise") }
                     .buttonStyle(.borderedProminent)
             }
         }

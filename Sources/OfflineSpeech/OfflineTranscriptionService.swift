@@ -27,26 +27,32 @@ final class OfflineTranscriptionService: @unchecked Sendable {
 
     private init() {}
 
-    func transcribe(samples: [Float], modelURL: URL, language: SpeechLanguage) async throws -> String {
+    func transcribe(samples: [Float], modelURL: URL) async throws -> String {
         guard !samples.isEmpty else { throw OfflineTranscriptionError.emptyAudio }
-        return try await withCheckedThrowingContinuation { continuation in
+        let cancellation = InteractionCancellation()
+        return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
             queue.async { [weak self] in
                 guard let self else { return }
                 do {
-                    let value = try self.transcribeSynchronously(samples: samples, modelURL: modelURL, language: language)
+                    guard !cancellation.isCancelled else { throw CancellationError() }
+                    let value = try self.transcribeSynchronously(samples: samples, modelURL: modelURL, cancellation: cancellation)
                     continuation.resume(returning: value)
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
         }
+        } onCancel: { cancellation.cancel() }
     }
 
     func unload() {
         queue.async { [weak self] in self?.unloadSynchronously() }
     }
 
-    private func transcribeSynchronously(samples: [Float], modelURL: URL, language: SpeechLanguage) throws -> String {
+    private func transcribeSynchronously(samples: [Float], modelURL: URL, cancellation: InteractionCancellation) throws -> String {
+        let start = ProcessInfo.processInfo.systemUptime
+        defer { InteractionTiming.record("transcription", since: start) }
         unloadWorkItem?.cancel()
         if session == nil || loadedModelPath != modelURL.path {
             unloadSynchronously()
@@ -69,15 +75,24 @@ final class OfflineTranscriptionService: @unchecked Sendable {
             loadedModelPath = modelURL.path
         }
         guard let session else { throw OfflineTranscriptionError.modelLoad("Unknown model error") }
+        guard !cancellation.isCancelled else { scheduleUnload(); throw CancellationError() }
+        let token = Unmanaged.passUnretained(cancellation).toOpaque()
+        transcribe_set_abort_callback(session, { pointer in
+            guard let pointer else { return false }
+            return Unmanaged<InteractionCancellation>.fromOpaque(pointer).takeUnretainedValue().isCancelled
+        }, token)
+        defer {
+            transcribe_set_abort_callback(session, nil, nil)
+            scheduleUnload()
+        }
 
         var params = transcribe_run_params()
         transcribe_run_params_init(&params)
-        let status = language.rawValue.withCString { code in
-            params.language = code
-            return samples.withUnsafeBufferPointer { buffer in
-                transcribe_run(session, buffer.baseAddress, Int32(buffer.count), &params)
-            }
+        params.language = nil
+        let status = samples.withUnsafeBufferPointer { buffer in
+            transcribe_run(session, buffer.baseAddress, Int32(buffer.count), &params)
         }
+        guard !cancellation.isCancelled else { throw CancellationError() }
         guard status == TRANSCRIBE_OK else {
             throw OfflineTranscriptionError.transcription(statusDescription(status))
         }
@@ -86,7 +101,6 @@ final class OfflineTranscriptionService: @unchecked Sendable {
         }
         let result = String(cString: resultPointer).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !result.isEmpty else { throw OfflineTranscriptionError.noSpeech }
-        scheduleUnload()
         return result
     }
 

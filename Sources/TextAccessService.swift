@@ -289,6 +289,7 @@ final class TextAccessService {
         let role: String
         let subrole: String
         let identifier: String?
+        var originalValue: String? = nil
     }
 
     struct DictationMicPlacement {
@@ -431,17 +432,6 @@ final class TextAccessService {
     private var googleDocsFrontmostCache: (createdAt: Date, isDocs: Bool)?
     private var googleSheetsFrontmostCache: (createdAt: Date, isSheets: Bool)?
     private var lastGoogleDocsDebugSignature: String?
-    private let transientPopupRoles: Set<String> = [
-        "AXComboBox",
-        "AXHelpTag",
-        "AXMenu",
-        "AXMenuBar",
-        "AXMenuBarItem",
-        "AXMenuItem",
-        "AXMenuButton",
-        "AXPopover",
-        "AXPopUpButton"
-    ]
 
     func hasAccessibilityPermission() -> Bool {
         let trusted = AXIsProcessTrusted()
@@ -588,7 +578,8 @@ final class TextAccessService {
             elementFrame: capturedElementFrame,
             role: axString(of: element, attribute: kAXRoleAttribute) ?? "",
             subrole: axString(of: element, attribute: kAXSubroleAttribute) ?? "",
-            identifier: axString(of: element, attribute: "AXIdentifier")
+            identifier: axString(of: element, attribute: "AXIdentifier"),
+            originalValue: valueText(of: element)
         ))
     }
 
@@ -625,10 +616,10 @@ final class TextAccessService {
         _ text: String,
         into target: DictationTarget,
         reactivateTarget: Bool = false
-    ) -> Bool {
+    ) async -> Bool {
         guard !text.isEmpty, appConsentStatus(for: target.bundleID) == .allowed else { return false }
         if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.appPID {
-            guard reactivateTarget, activateDictationTargetApp(target) else { return false }
+            guard reactivateTarget, await activateDictationTargetApp(target) else { return false }
         }
         guard let frontmost = NSWorkspace.shared.frontmostApplication,
               frontmost.processIdentifier == target.appPID,
@@ -636,6 +627,9 @@ final class TextAccessService {
               let focused = focusedDictationElement(),
               dictationElement(focused, matches: target),
               !shouldIgnoreDictationInput(element: focused, includeAppConsent: true) else { return false }
+        if let expected = target.originalValue, let current = valueText(of: focused), expected != current { return false }
+        if let expected = target.selectedRange, let current = selectedRange(of: focused),
+           expected.location != current.location || expected.length != current.length { return false }
 
         let activeTarget = DictationTarget(
             element: focused,
@@ -646,7 +640,8 @@ final class TextAccessService {
             elementFrame: elementFrame(of: focused),
             role: axString(of: focused, attribute: kAXRoleAttribute) ?? target.role,
             subrole: axString(of: focused, attribute: kAXSubroleAttribute) ?? target.subrole,
-            identifier: axString(of: focused, attribute: "AXIdentifier") ?? target.identifier
+            identifier: axString(of: focused, attribute: "AXIdentifier") ?? target.identifier,
+            originalValue: target.originalValue
         )
 
         _ = AXUIElementSetAttributeValue(activeTarget.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -657,7 +652,8 @@ final class TextAccessService {
                 kAXSelectedTextRangeAttribute as CFString,
                 rangeValue
             )
-            usleep(45_000)
+            try? await Task.sleep(for: .milliseconds(45))
+            guard !Task.isCancelled else { return false }
         }
 
         let prefersClipboard = shouldPreferClipboardForDictation(bundleID: target.bundleID)
@@ -669,7 +665,7 @@ final class TextAccessService {
                 text as CFTypeRef
             )
             if status == .success {
-                usleep(60_000)
+                try? await Task.sleep(for: .milliseconds(60))
                 if let valueBeforeInsertion,
                    let valueAfterInsertion = valueText(of: activeTarget.element) {
                     if dictationValueChanged(
@@ -688,7 +684,8 @@ final class TextAccessService {
             }
         }
 
-        return insertDictatedTextUsingClipboard(
+        guard !Task.isCancelled else { return false }
+        return await insertDictatedTextUsingClipboard(
             text,
             into: activeTarget,
             valueBeforeInsertion: valueBeforeInsertion,
@@ -696,18 +693,18 @@ final class TextAccessService {
         )
     }
 
-    private func activateDictationTargetApp(_ target: DictationTarget) -> Bool {
+    private func activateDictationTargetApp(_ target: DictationTarget) async -> Bool {
         guard let app = NSRunningApplication(processIdentifier: target.appPID), !app.isTerminated else {
             return false
         }
-        app.activate(options: [.activateAllWindows])
+        _ = await MainActor.run { app.activate(options: [.activateAllWindows]) }
         let appElement = AXUIElementCreateApplication(target.appPID)
         _ = AXUIElementSetAttributeValue(
             appElement,
             kAXFrontmostAttribute as CFString,
             kCFBooleanTrue as CFTypeRef
         )
-        usleep(140_000)
+        try? await Task.sleep(for: .milliseconds(140))
         return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.appPID
     }
 
@@ -798,7 +795,7 @@ final class TextAccessService {
         into target: DictationTarget,
         valueBeforeInsertion: String?,
         prefersClipboard: Bool
-    ) -> Bool {
+    ) async -> Bool {
         // Electron contenteditables may report a successful AX write while
         // ignoring it. Their native paste command is the reliable path.
         if var range = target.selectedRange,
@@ -808,9 +805,12 @@ final class TextAccessService {
                 kAXSelectedTextRangeAttribute as CFString,
                 rangeValue
             )
-            usleep(prefersClipboard ? 80_000 : 45_000)
+            try? await Task.sleep(for: .milliseconds(prefersClipboard ? 80 : 45))
         }
 
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.appPID,
+              let current = focusedDictationElement(), dictationElement(current, matches: target) else { return false }
         let rangeBeforePaste = selectedRange(of: target.element)
         let isGoogleDocs = prefersClipboard && isGoogleDocsFrontmost()
         let pasteboard = NSPasteboard.general
@@ -825,7 +825,7 @@ final class TextAccessService {
             restorePasteboard(pasteboard, snapshot: snapshot)
             return false
         }
-        usleep(prefersClipboard ? 360_000 : 180_000)
+        try? await Task.sleep(for: .milliseconds(prefersClipboard ? 360 : 180))
 
         let valueChanged: Bool?
         if let valueBeforeInsertion,
@@ -1604,6 +1604,9 @@ final class TextAccessService {
 
     /// After a successful copy, plain `NSStringPboardType` may still be empty (rich text only).
     private func extractPlainTextFromPasteboard(_ pasteboard: NSPasteboard) -> String? {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { self.extractPlainTextFromPasteboard(pasteboard) }
+        }
         if let s = pasteboard.string(forType: .string)?
             .trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
             return s
@@ -2212,16 +2215,12 @@ final class TextAccessService {
         if context.usesSelection {
             let shouldUseClipboardSelectionPaste = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
                 || context.anchor.source == .clipboardFallback
-            if shouldUseClipboardSelectionPaste,
-               applyClipboardSelectionPasteReplace(rewritten, basedOn: context) {
-                textoraDiagLog("applyRewrittenText", "success via clipboardSelectionPasteReplace")
-                return .success
-            }
-            if !shouldUseClipboardSelectionPaste,
-               applySelectedTextDirect(rewritten, basedOn: context) {
-                textoraDiagLog("applyRewrittenText", "success via selectedTextDirect")
-                return .success
-            }
+            // Do not attempt a second mutation after an unconfirmed write:
+            // the target may have accepted it but delayed its AX readback.
+            let confirmed = shouldUseClipboardSelectionPaste
+                ? applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
+                : applySelectedTextDirect(rewritten, basedOn: context)
+            return confirmed ? .success : .failed
         }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyRewrittenText", "success via unifiedPhysicalRewrite")
@@ -2613,8 +2612,9 @@ final class TextAccessService {
         let copiedBefore = pasteboard.string(forType: .string) ?? ""
         // In Docs multi-line selections can serialize differently (\n vs paragraph separators),
         // so keep this guard minimal: only require some selection signal.
-        let hasSelectionSignal = !copiedBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || (context.selectedRange?.length ?? 0) > 0
+        let hasSelectionSignal = pasteboard.changeCount != baselineChangeCount
+            && !copiedBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && normalized(copiedBefore) == normalized(context.text)
         guard hasSelectionSignal else {
             restorePasteboard(pasteboard, snapshot: snapshot)
             return false
@@ -2630,29 +2630,15 @@ final class TextAccessService {
             restorePasteboard(pasteboard, snapshot: snapshot)
             return false
         }
-        usleep(140_000)
-
-        if let originalValue, let updatedValue = valueText(of: context.targetElement) {
-            let changed = normalized(updatedValue) != normalized(originalValue)
-            let containsReplacement = normalized(updatedValue).contains(normalized(rewritten))
-            textoraDiagLog(
-                "clipboardSelectionPasteReplace",
-                "post-paste valueChanged=\(changed) containsReplacement=\(containsReplacement) "
-                + "original=\(textoraDiagPreview(originalValue)) updated=\(textoraDiagPreview(updatedValue))"
-            )
-            if changed, containsReplacement {
-                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
-                return true
-            }
-            if !changed {
-                restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
-                return false
-            }
+        if waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context) {
+            restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
+            return true
         }
 
         // 3) Verify by selecting previous range and copying again (best effort).
         if let range = context.selectedRange {
             var r = range
+            r.length = (rewritten as NSString).length
             if let value = AXValueCreate(.cfRange, &r) {
                 _ = AXUIElementSetAttributeValue(
                     context.targetElement,
@@ -2662,13 +2648,12 @@ final class TextAccessService {
                 usleep(35_000)
             }
         }
+        let beforeVerificationCopy = pasteboard.changeCount
         triggerCopyShortcut()
         usleep(120_000)
         let copiedAfter = pasteboard.string(forType: .string) ?? ""
-        let rewrittenNorm = normalized(rewritten)
-        let copiedAfterNorm = normalized(copiedAfter)
-        let ok = copiedAfterNorm == rewrittenNorm
-            || (!rewrittenNorm.isEmpty && copiedAfterNorm.contains(rewrittenNorm))
+        let ok = Self.copiedReplacementWasConfirmed(replacement: rewritten, copied: copiedAfter,
+            changeCountBefore: beforeVerificationCopy, changeCountAfter: pasteboard.changeCount)
 
         // Always restore user clipboard after our flow.
         restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
@@ -4095,8 +4080,8 @@ final class TextAccessService {
             expectedValue: expectedValue,
             originalValue: originalValue
         ) else {
-            textoraDiagLog("backspacePhysicalRewrite", "exit true (no value readback after typing)")
-            return true
+            textoraDiagLog("backspacePhysicalRewrite", "unconfirmed (no value readback after typing)")
+            return false
         }
         if matchesExpectedValuePreservingCase(updatedValue, expectedValue) {
             textoraDiagLog("backspacePhysicalRewrite", "exit true (confirmed)")
@@ -5586,24 +5571,81 @@ final class TextAccessService {
 
     private func applySelectedTextDirect(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
         let target = context.targetElement
+        let originalValue = valueText(of: target)
         let status = AXUIElementSetAttributeValue(
             target,
             kAXSelectedTextAttribute as CFString,
             rewritten as CFTypeRef
         )
         guard status == .success else { return false }
-        usleep(40_000)
+        return waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context)
+    }
 
-        // Best-effort verification for editors that expose value.
-        if let current = valueText(of: target) {
-            let currentNorm = normalized(current)
-            let expectedNorm = normalized(rewritten)
-            if !expectedNorm.isEmpty, currentNorm.contains(expectedNorm) {
-                return true
-            }
+    private func waitForSelectionReplacement(originalValue: String?, rewritten: String, context: FocusedTextContext) -> Bool {
+        // Electron may publish the new value late or replace its AX node after
+        // paste. Poll on the text worker; never issue a second write here.
+        for _ in 0..<12 {
+            guard !Task.isCancelled,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else { return false }
+            if Self.directReplacementWasConfirmed(before: originalValue, after: valueText(of: context.targetElement),
+                selection: context.selectedRange, original: context.text, replacement: rewritten) { return true }
+            if let focused = focusedEditableElement(),
+               Self.directReplacementWasConfirmed(before: originalValue, after: valueText(of: focused),
+                selection: context.selectedRange, original: context.text, replacement: rewritten) { return true }
+            usleep(60_000)
         }
-        // If value is not exposed, AX already reported success for selected replacement.
-        return true
+        return false
+    }
+
+    static func directReplacementWasConfirmed(before: String?, after: String?, selection: CFRange?, original: String, replacement: String) -> Bool {
+        guard let before, let after, before != after, !original.isEmpty else { return false }
+        let text = before as NSString
+        var range: NSRange?
+        if let selection, selection.location >= 0, selection.length >= 0,
+           selection.location <= text.length, selection.length <= text.length - selection.location {
+            let candidate = NSRange(location: selection.location, length: selection.length)
+            if Self.canonicalApplyText(text.substring(with: candidate)) == Self.canonicalApplyText(original) { range = candidate }
+        }
+        // Some web editors expose selection offsets relative to a child node,
+        // but AXValue belongs to the whole composer. Infer only a UNIQUE match.
+        if range == nil {
+            // Clipboard and AX may serialize the same emoji as a shortcode
+            // and a Unicode character. Resolve only an unambiguous occurrence.
+            let canonicalBefore = Self.canonicalApplyText(before) as NSString
+            let canonicalOriginal = Self.canonicalApplyText(original)
+            let first = canonicalBefore.range(of: canonicalOriginal)
+            guard !canonicalOriginal.isEmpty, first.location != NSNotFound else { return false }
+            let remaining = NSRange(location: NSMaxRange(first), length: canonicalBefore.length - NSMaxRange(first))
+            guard canonicalBefore.range(of: canonicalOriginal, range: remaining).location == NSNotFound else { return false }
+            let expected = canonicalBefore.replacingCharacters(in: first, with: Self.canonicalApplyText(replacement))
+            return expected != canonicalBefore as String && expected == Self.canonicalApplyText(after)
+        }
+        guard let range else { return false }
+        let expected = text.replacingCharacters(in: range, with: replacement)
+        return Self.canonicalApplyText(expected) != Self.canonicalApplyText(before)
+            && Self.canonicalApplyText(expected) == Self.canonicalApplyText(after)
+    }
+
+    static func copiedReplacementWasConfirmed(replacement: String, copied: String, changeCountBefore: Int, changeCountAfter: Int) -> Bool {
+        changeCountBefore != changeCountAfter && !replacement.isEmpty
+            && canonicalApplyText(copied) == canonicalApplyText(replacement)
+    }
+
+    /// Known lossless editor serializations only. Never strip arbitrary emoji,
+    /// unknown/custom shortcodes, mentions or punctuation to force confirmation.
+    static func canonicalApplyText(_ value: String) -> String {
+        let aliases = [
+            ":slightly_smiling_face:": "🙂", ":slightly_frowning_face:": "🙁",
+            ":smile:": "😄", ":smiley:": "😃", ":grinning:": "😀",
+            ":blush:": "😊", ":wink:": "😉", ":joy:": "😂",
+            ":thinking_face:": "🤔", ":sob:": "😭", ":cry:": "😢",
+            ":thumbsup:": "👍", ":+1:": "👍", ":thumbsdown:": "👎", ":-1:": "👎",
+            ":tada:": "🎉", ":rocket:": "🚀", ":fire:": "🔥"
+        ]
+        var text = value
+        for (alias, emoji) in aliases { text = text.replacingOccurrences(of: alias, with: emoji) }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
 
     private func normalized(_ text: String) -> String {
@@ -5622,6 +5664,9 @@ final class TextAccessService {
         _ pasteboard: NSPasteboard,
         matching expectedText: String
     ) -> NSAttributedString? {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { self.richTextFromPasteboard(pasteboard, matching: expectedText) }
+        }
         let candidates: [(NSPasteboard.PasteboardType, NSAttributedString.DocumentType)] = [
             (.rtf, .rtf),
             (.html, .html)
@@ -5727,8 +5772,11 @@ final class TextAccessService {
 
     private func focusTargetAppAndElement(_ context: FocusedTextContext) {
         if context.targetAppPID != 0, context.targetAppPID != getpid() {
-            NSRunningApplication(processIdentifier: context.targetAppPID)?
-                .activate(options: [.activateAllWindows])
+            let activate = {
+                NSRunningApplication(processIdentifier: context.targetAppPID)?.activate(options: [.activateAllWindows])
+            }
+            if Thread.isMainThread { _ = activate() }
+            else { _ = DispatchQueue.main.sync(execute: activate) }
             let appElement = AXUIElementCreateApplication(context.targetAppPID)
             AXUIElementSetAttributeValue(
                 appElement,
@@ -6546,6 +6594,7 @@ final class TextAccessService {
     }
 
     private func chromeActiveTabURL() -> String? {
+        if !Thread.isMainThread { return DispatchQueue.main.sync { self.chromeActiveTabURL() } }
         let script = """
 tell application "Google Chrome"
     if not (exists front window) then return ""
@@ -6565,6 +6614,7 @@ end tell
     }
 
     private func googleDocsViewportPayloadFromChrome() -> GoogleDocsViewportPayload? {
+        if !Thread.isMainThread { return DispatchQueue.main.sync { self.googleDocsViewportPayloadFromChrome() } }
         let js = #"""
 (() => {
   if (!location.href.includes('docs.google.com/document')) return JSON.stringify({href: location.href, outerWidth: outerWidth, outerHeight: outerHeight, chromeLeft: 0, chromeTop: 0, lines: []});
@@ -6667,8 +6717,18 @@ end tell
         let systemWide = AXUIElementCreateSystemWide()
         var focusedObject: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedObject)
-        guard status == .success, let focusedObject else { return nil }
-        return (focusedObject as! AXUIElement)
+        if status == .success, let focusedObject {
+            return (focusedObject as! AXUIElement)
+        }
+        // Popup focus may be available on the application/window even when
+        // the system-wide query is temporarily empty. No page-wide scanning.
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        if let focused = axElement(of: application, attribute: kAXFocusedUIElementAttribute as String) {
+            return focused
+        }
+        guard let window = axElement(of: application, attribute: kAXFocusedWindowAttribute as String) else { return nil }
+        return axElement(of: window, attribute: kAXFocusedUIElementAttribute as String)
     }
 
     /// Some hosts (notably Electron/WebView on newer macOS) focus a nested text node while
@@ -6826,39 +6886,30 @@ end tell
     }
 
     private func isTransientPopupLike(_ element: AXUIElement) -> Bool {
-        let role = axString(of: element, attribute: kAXRoleAttribute) ?? ""
-        let subrole = axString(of: element, attribute: kAXSubroleAttribute) ?? ""
-        if transientPopupRoles.contains(role) || transientPopupRoles.contains(subrole) {
-            return true
+        Self.isTransientSelectionSurface(
+            role: axString(of: element, attribute: kAXRoleAttribute) ?? "",
+            subrole: axString(of: element, attribute: kAXSubroleAttribute) ?? "")
+    }
+
+    /// Dialogs, sheets, popovers and editable comboboxes can contain real
+    /// user text. Neither their size nor a page-supplied title identifies a menu.
+    static func isTransientSelectionSurface(role: String, subrole: String) -> Bool {
+        let menuRoles: Set<String> = [
+            "AXMenu", "AXMenuBar", "AXMenuBarItem", "AXMenuItem",
+            "AXMenuButton", "AXPopUpButton", "AXHelpTag"
+        ]
+        return menuRoles.contains(role) || menuRoles.contains(subrole)
+            || subrole == "AXSystemMenu"
+    }
+
+    private func isInsideWebContent(_ element: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        for _ in 0..<32 {
+            guard let node = current else { break }
+            if axString(of: node, attribute: kAXRoleAttribute) == "AXWebArea" { return true }
+            current = axElement(of: node, attribute: kAXParentAttribute as String)
         }
-        let lowerRole = role.lowercased()
-        let lowerSubrole = subrole.lowercased()
-        if lowerRole.contains("menu") || lowerSubrole.contains("menu") || lowerRole.contains("popover") || lowerSubrole.contains("popover") {
-            return true
-        }
-        let title = (axString(of: element, attribute: kAXTitleAttribute) ?? "").lowercased()
-        let description = (axString(of: element, attribute: kAXDescriptionAttribute) ?? "").lowercased()
-        let identifier = (axString(of: element, attribute: "AXIdentifier") ?? "").lowercased()
-        let popupHints = ["menu", "popover", "popup", "suggestion", "autocomplete", "completion", "dropdown"]
-        if popupHints.contains(where: { title.contains($0) || description.contains($0) || identifier.contains($0) }) {
-            return true
-        }
-        if role == "AXList" || role == "AXTable" || role == "AXOutline" {
-            guard let frame = elementFrame(of: element) else { return false }
-            return isSmallDetachedPopupFrame(frame)
-        }
-        guard role == "AXDialog" || role == "AXWindow" || role == "AXSheet" else { return false }
-        guard lowerSubrole.contains("dialog")
-                || lowerSubrole.contains("floating")
-                || lowerSubrole.contains("system")
-                || lowerSubrole.contains("unknown")
-                || lowerSubrole.contains("popover")
-                || lowerSubrole.contains("popup")
-                || subrole.isEmpty else {
-            return false
-        }
-        guard let frame = elementFrame(of: element) else { return false }
-        return isSmallDetachedPopupFrame(frame)
+        return false
     }
 
     private func isSmallDetachedPopupFrame(_ frame: CGRect) -> Bool {
@@ -6909,6 +6960,9 @@ end tell
     }
 
     private func isBrowserChromeInputField(_ element: AXUIElement) -> Bool {
+        // Site fields may be at the top of a popup or named Search/Location/URL.
+        // Their AXWebArea ancestor distinguishes them from browser chrome.
+        if isInsideWebContent(element) { return false }
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return false }
         let bundleID = resolvedBundleID(forOwningPID: pid)

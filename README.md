@@ -23,10 +23,9 @@ This repository does not include a Textora backend proxy.
 - Apply the result in place or copy it when direct replacement is unavailable.
 - Preserve surrounding rich-text formatting where the target app supports it.
 
-### Three ways to work
+### Two ways to work
 
 - **Toolbox** appears automatically near the active text field.
-- **Floating icon** keeps Textora close without opening the full toolbox.
 - **Hotkeys** trigger rewrite, translation, or dictation without an on-screen helper.
 - Textora lives in the menu bar and can optionally launch automatically when you log in.
 
@@ -34,7 +33,8 @@ This repository does not include a Textora backend proxy.
 
 - Hold a configurable shortcut to dictate into the active text field.
 - Speech recognition runs entirely on your Mac with the Parakeet V3 model.
-- Supports 25 languages, automatic keyboard-layout language selection, a fallback language, and microphone selection.
+- Supports 25 languages with automatic recognition independent of keyboard layout, and microphone selection.
+- Optional speech translation sends only the recognized text to your selected AI provider; audio stays local. Translation preferences are shared between Toolbox and Hotkeys.
 - Audio is never uploaded or saved.
 
 ### Bring your own AI provider
@@ -111,7 +111,7 @@ Expected:
 1. Open quick setup wizard.
 2. Add an API key (default provider: OpenAI).
 3. Verify connection.
-4. Choose Toolbox, Floating icon, or Hotkeys.
+4. Choose Toolbox or Hotkeys.
 5. Complete setup and grant Accessibility permission.
 
 Provider key links:

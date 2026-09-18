@@ -69,9 +69,9 @@ final class SecurityAndSettingsTests: XCTestCase {
             resultText: longText
         )
 
-        XCTAssertEqual(shortHeight, 292)
+        XCTAssertEqual(shortHeight, 240)
         XCTAssertGreaterThan(longHeight, shortHeight)
-        XCTAssertLessThanOrEqual(longHeight, 535)
+        XCTAssertLessThanOrEqual(longHeight, 483)
     }
 
     func testHotKeyResultUsesSameBodyFontSizeAsOriginal() {
@@ -216,14 +216,13 @@ final class SecurityAndSettingsTests: XCTestCase {
 
         SelectionAssistantSettings.setInterfaceModes(
             toolbox: false,
-            floatingIcon: true,
             hotKeys: true,
             defaults: defaults
         )
 
         XCTAssertFalse(defaults.bool(forKey: SelectionAssistantSettings.Keys.toolboxEnabled))
-        XCTAssertTrue(defaults.bool(forKey: SelectionAssistantSettings.Keys.floatingIconEnabled))
-        XCTAssertFalse(defaults.bool(forKey: SelectionAssistantSettings.Keys.hotKeysModeEnabled))
+        XCTAssertFalse(defaults.bool(forKey: SelectionAssistantSettings.Keys.floatingIconEnabled))
+        XCTAssertTrue(defaults.bool(forKey: SelectionAssistantSettings.Keys.hotKeysModeEnabled))
     }
 
     @MainActor

@@ -57,7 +57,6 @@ enum OfflineDictationSettings {
     private enum Keys {
         static let enabled = "offlineDictation.enabled"
         static let microphoneUID = "offlineDictation.microphoneUID"
-        static let fallbackLanguage = "offlineDictation.fallbackLanguage"
         static let capsuleOriginX = "offlineDictation.capsule.originX"
         static let capsuleOriginY = "offlineDictation.capsule.originY"
         static let microphoneDockOriginX = "offlineDictation.microphoneDock.originX"
@@ -67,8 +66,7 @@ enum OfflineDictationSettings {
     static func registerDefaults(_ defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
             Keys.enabled: false,
-            Keys.microphoneUID: "",
-            Keys.fallbackLanguage: SpeechLanguage.english.rawValue
+            Keys.microphoneUID: ""
         ])
     }
 
@@ -80,13 +78,6 @@ enum OfflineDictationSettings {
     static var microphoneUID: String {
         get { microphoneUID(defaults: .standard) }
         set { setMicrophoneUID(newValue, defaults: .standard) }
-    }
-
-    static var fallbackLanguage: SpeechLanguage {
-        get {
-            fallbackLanguage(defaults: .standard)
-        }
-        set { setFallbackLanguage(newValue, defaults: .standard) }
     }
 
     static func isEnabled(defaults: UserDefaults) -> Bool {
@@ -105,16 +96,6 @@ enum OfflineDictationSettings {
 
     static func setMicrophoneUID(_ uid: String, defaults: UserDefaults) {
         set(uid, forKey: Keys.microphoneUID, defaults: defaults)
-    }
-
-    static func fallbackLanguage(defaults: UserDefaults) -> SpeechLanguage {
-        registerDefaults(defaults)
-        let raw = defaults.string(forKey: Keys.fallbackLanguage) ?? SpeechLanguage.english.rawValue
-        return SpeechLanguage(rawValue: raw) ?? .english
-    }
-
-    static func setFallbackLanguage(_ language: SpeechLanguage, defaults: UserDefaults) {
-        set(language.rawValue, forKey: Keys.fallbackLanguage, defaults: defaults)
     }
 
     static var capsuleOrigin: CGPoint? {

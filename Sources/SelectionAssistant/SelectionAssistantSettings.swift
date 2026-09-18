@@ -77,6 +77,13 @@ enum SelectionAssistantSettings {
     }
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
+        // Retire the legacy mode before earlier migrations inspect it.
+        if defaults.bool(forKey: Keys.floatingIconEnabled) {
+            defaults.set(false, forKey: Keys.floatingIconEnabled)
+            if !defaults.bool(forKey: Keys.hotKeysModeEnabled) {
+                defaults.set(true, forKey: Keys.toolboxEnabled)
+            }
+        }
         let existingHotKeysMode = defaults.bool(forKey: Keys.hotKeysModeEnabled)
         let legacyActivationMode = defaults.string(forKey: Keys.activationMode)
         defaults.register(defaults: [
@@ -168,7 +175,6 @@ enum SelectionAssistantSettings {
 
     static func setSelectedOperation(_ operation: RewriteOperation, defaults: UserDefaults = .standard) {
         defaults.set(operation.rawValue, forKey: Keys.operation)
-        NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
     }
 
     static func translationLanguage(defaults: UserDefaults = .standard) -> TranslationLanguage {
@@ -180,7 +186,6 @@ enum SelectionAssistantSettings {
     static func setTranslationLanguage(_ language: TranslationLanguage, defaults: UserDefaults = .standard) {
         defaults.set(language.rawValue, forKey: Keys.translationLanguage)
         defaults.set(language.displayName, forKey: "inlineTranslate.lastTargetLanguage")
-        NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
     }
 
     static func setEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
@@ -190,12 +195,6 @@ enum SelectionAssistantSettings {
 
     static func setToolboxEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
         defaults.set(enabled, forKey: Keys.toolboxEnabled)
-        defaults.set(true, forKey: Keys.enabled)
-        NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
-    }
-
-    static func setFloatingIconEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
-        defaults.set(enabled, forKey: Keys.floatingIconEnabled)
         defaults.set(true, forKey: Keys.enabled)
         NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
     }
@@ -213,14 +212,11 @@ enum SelectionAssistantSettings {
 
     static func setInterfaceModes(
         toolbox: Bool,
-        floatingIcon: Bool,
         hotKeys: Bool,
         defaults: UserDefaults = .standard
     ) {
         if toolbox {
             persistInterfaceModes(toolbox: true, floatingIcon: false, hotKeys: false, defaults: defaults)
-        } else if floatingIcon {
-            persistInterfaceModes(toolbox: false, floatingIcon: true, hotKeys: false, defaults: defaults)
         } else if hotKeys {
             persistInterfaceModes(toolbox: false, floatingIcon: false, hotKeys: true, defaults: defaults)
         } else {

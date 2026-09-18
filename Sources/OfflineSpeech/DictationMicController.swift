@@ -26,22 +26,24 @@ enum DictationMicActivityState: Equatable {
 }
 
 @MainActor
-private final class DictationMicViewModel: ObservableObject {
+final class DictationMicViewModel: ObservableObject {
     @Published var state: DictationMicActivityState = .idle
     @Published var level: Float = 0
     @Published var elapsed: TimeInterval = 0
     @Published var showsDragHandle = false
+    @Published var isTranslationSettingsPresented = false
+    @Published var microphoneTip: MicrophoneTip?
+    @Published var showsTranslationControls = false
 }
 
 @MainActor
 final class DictationMicController {
     enum InterfaceMode {
         case toolbox
-        case floatingIcon
     }
 
     private var collapsedSize: CGSize {
-        CGSize(width: mode == .toolbox ? 84 : 52, height: 52)
+        CGSize(width: 84, height: 52)
     }
 
     private var expandedSize: CGSize {
@@ -50,10 +52,11 @@ final class DictationMicController {
     private let textAccess: TextAccessService
     private let onStart: () -> Void
     private let onStop: () -> Void
-    private let floatingCompanionFrame: () -> CGRect?
     private let viewModel = DictationMicViewModel()
     private var panel: DraggableFloatingPanel?
     private var timer: Timer?
+    private var refreshInFlight = false
+    private var hideTranslationControlsTask: Task<Void, Never>?
     private var workspaceObserver: NSObjectProtocol?
     private var mode: InterfaceMode = .toolbox
     private var isRunning = false
@@ -71,13 +74,11 @@ final class DictationMicController {
     init(
         textAccess: TextAccessService,
         onStart: @escaping () -> Void,
-        onStop: @escaping () -> Void,
-        floatingCompanionFrame: @escaping () -> CGRect?
+        onStop: @escaping () -> Void
     ) {
         self.textAccess = textAccess
         self.onStart = onStart
         self.onStop = onStop
-        self.floatingCompanionFrame = floatingCompanionFrame
     }
 
     deinit {
@@ -101,10 +102,14 @@ final class DictationMicController {
         panel?.usesNativeWindowDragging = false
         installWorkspaceObserverIfNeeded()
         startTimerIfNeeded()
-        refresh()
+        Task { await refresh() }
     }
 
     func stop() {
+        viewModel.microphoneTip = nil
+        hideTranslationControlsTask?.cancel()
+        viewModel.showsTranslationControls = false
+        viewModel.isTranslationSettingsPresented = false
         isRunning = false
         timer?.invalidate()
         timer = nil
@@ -117,13 +122,23 @@ final class DictationMicController {
         guard isExternallySuppressed != suppressed else { return }
         isExternallySuppressed = suppressed
         if suppressed {
+            viewModel.microphoneTip = nil
+            hideTranslationControlsTask?.cancel()
+            viewModel.showsTranslationControls = false
+            viewModel.isTranslationSettingsPresented = false
             panel?.orderOut(nil)
         } else {
-            refresh()
+            Task { await refresh() }
         }
     }
 
     func setActivityState(_ state: DictationMicActivityState) {
+        if state.isExpanded || state == .hidden {
+            viewModel.microphoneTip = nil
+            hideTranslationControlsTask?.cancel()
+            viewModel.showsTranslationControls = false
+        }
+        if state.isExpanded || state == .hidden { viewModel.isTranslationSettingsPresented = false }
         viewModel.state = state
         panel?.allowsDragging = mode == .toolbox
         panel?.usesNativeWindowDragging = false
@@ -137,7 +152,7 @@ final class DictationMicController {
             return
         }
         guard let collapsedFrame = lastCollapsedFrame else {
-            refresh()
+            Task { await refresh() }
             return
         }
         applyFrame(frame(for: state, collapsedFrame: collapsedFrame), animated: panel.isVisible)
@@ -176,11 +191,14 @@ final class DictationMicController {
             guard let self, self.mode == .toolbox else { return false }
             // The idle microphone itself is a drag target too. The panel's distance
             // threshold distinguishes a click to record from a drag to reposition.
-            if !self.viewModel.state.isExpanded { return true }
+            if !self.viewModel.state.isExpanded {
+                return point.x >= bounds.maxX - self.collapsedSize.width
+            }
             let handleHitWidth: CGFloat = self.viewModel.state.isExpanded ? 43 : 32
             return point.x >= bounds.maxX - handleHitWidth
         }
-        let hostingView = NSHostingView(rootView: DictationMicView(model: viewModel))
+        let hostingView = NSHostingView(rootView: DictationMicView(model: viewModel,
+            onHoverChanged: { [weak self] inside in self?.translationHoverChanged(inside) }))
         // The controller owns the window size; SwiftUI's ideal size must not resize
         // the panel independently when the mode or activity state changes.
         hostingView.sizingOptions = []
@@ -214,7 +232,7 @@ final class DictationMicController {
         panel.onDragEnded = { [weak self] frame in
             guard let self, self.mode == .toolbox else { return }
             let collapsedFrame: CGRect
-            if self.viewModel.state.isExpanded {
+            if self.viewModel.state.isExpanded || self.viewModel.showsTranslationControls {
                 let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(frame) }) ?? NSScreen.main
                 guard let visibleFrame = screen?.visibleFrame else { return }
                 collapsedFrame = DictationMicLayout.collapsedFrame(
@@ -262,11 +280,21 @@ final class DictationMicController {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // The popover may activate Textora while the source editor loses
+                // AX focus. This is interaction with our UI, not a new target app.
+                if (self.viewModel.isTranslationSettingsPresented || self.viewModel.microphoneTip != nil),
+                   NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+                    return
+                }
+                self.viewModel.isTranslationSettingsPresented = false
+                self.viewModel.microphoneTip = nil
+                self.hideTranslationControlsTask?.cancel()
+                self.viewModel.showsTranslationControls = false
                 if self.viewModel.state.isExpanded {
                     self.onStop()
                 }
                 self.panel?.orderOut(nil)
-                self.refresh()
+                Task { await self.refresh() }
             }
         }
     }
@@ -274,13 +302,16 @@ final class DictationMicController {
     private func startTimerIfNeeded() {
         guard timer == nil else { return }
         let timer = Timer(timeInterval: 0.16, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in await self?.refresh() }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
 
-    private func refresh() {
+    private func refresh() async {
+        guard !refreshInFlight else { return }
+        refreshInFlight = true
+        defer { refreshInFlight = false }
         // Check before permission/focus calls: even these can block the drag's main run loop.
         guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
         guard isRunning,
@@ -292,7 +323,7 @@ final class DictationMicController {
             panel?.orderOut(nil)
             return
         }
-        if panel.isPointerTrackingInPanel { return }
+        if panel.isPointerTrackingInPanel || viewModel.isTranslationSettingsPresented || viewModel.showsTranslationControls { return }
 
         // AX geometry calls can block while Electron/browser hosts are busy. Once recording
         // starts, keep the captured position instead of polling AX on the animation thread.
@@ -301,11 +332,16 @@ final class DictationMicController {
             if frameAnimationUntil == nil, panel.frame != desiredFrame {
                 applyFrame(desiredFrame, animated: false)
             }
-            panel.orderFrontRegardless()
+            if !panel.isVisible { panel.orderFrontRegardless() }
             return
         }
 
-        guard let placement = textAccess.dictationMicPlacement() else {
+        let placement = await SelectionTextWorker.shared.microphonePlacement()
+        guard isRunning, !isExternallySuppressed, !viewModel.state.isExpanded,
+              !viewModel.isTranslationSettingsPresented,
+              !viewModel.showsTranslationControls,
+              !panel.isPointerTrackingInPanel else { return }
+        guard let placement else {
             if Date().timeIntervalSince(lastValidPlacementAt) > 0.55 {
                 resetPlacementStability()
                 panel.orderOut(nil)
@@ -325,7 +361,7 @@ final class DictationMicController {
             if panel.frame != desiredFrame {
                 applyFrame(desiredFrame, animated: false)
             }
-            panel.orderFrontRegardless()
+            if !panel.isVisible { panel.orderFrontRegardless() }
             return
         }
         guard let collapsedFrame = stabilizedFrame(candidateFrame, appPID: placement.appPID) else {
@@ -335,14 +371,14 @@ final class DictationMicController {
         lastCollapsedFrame = collapsedFrame
         let desiredFrame = frame(for: viewModel.state, collapsedFrame: collapsedFrame)
         if let frameAnimationUntil, frameAnimationUntil > Date() {
-            panel.orderFrontRegardless()
+            if !panel.isVisible { panel.orderFrontRegardless() }
             return
         }
         frameAnimationUntil = nil
         if panel.frame != desiredFrame {
             applyFrame(desiredFrame, animated: false)
         }
-        panel.orderFrontRegardless()
+        if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
     private func stabilizedFrame(_ candidate: CGRect, appPID: pid_t) -> CGRect? {
@@ -401,17 +437,6 @@ final class DictationMicController {
                 width: collapsedSize.width,
                 height: collapsedSize.height
             ).integral
-        case .floatingIcon:
-            guard let companion = floatingCompanionFrame(), !companion.isEmpty else {
-                return lastCollapsedFrame ?? .zero
-            }
-            return DictationMicLayout.frame(
-                anchor: companion,
-                fieldFrame: placement.fieldFrame,
-                companionFrame: companion,
-                visibleFrame: visible,
-                side: collapsedSize.width
-            )
         }
     }
 
@@ -425,8 +450,8 @@ final class DictationMicController {
     }
 
     private func frame(for state: DictationMicActivityState, collapsedFrame: CGRect) -> CGRect {
-        guard state.isExpanded else { return collapsedFrame }
-        let size = expandedSize
+        guard state.isExpanded || viewModel.showsTranslationControls else { return collapsedFrame }
+        let size = state.isExpanded ? expandedSize : CGSize(width: 250, height: 52)
         let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(collapsedFrame) }) ?? NSScreen.main
         guard let visible = screen?.visibleFrame else {
             return CGRect(x: collapsedFrame.maxX - size.width, y: collapsedFrame.midY - size.height / 2, width: size.width, height: size.height)
@@ -455,6 +480,31 @@ final class DictationMicController {
             context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func translationHoverChanged(_ inside: Bool) {
+        hideTranslationControlsTask?.cancel()
+        guard isRunning, !viewModel.state.isExpanded else { return }
+        if inside {
+            setTranslationControlsVisible(true)
+        } else {
+            hideTranslationControlsTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self, !self.viewModel.isTranslationSettingsPresented,
+                      self.viewModel.microphoneTip == nil,
+                      self.panel?.isPointerTrackingInPanel != true,
+                      self.panel?.frame.contains(NSEvent.mouseLocation) != true else { return }
+                self.setTranslationControlsVisible(false)
+            }
+        }
+    }
+
+    private func setTranslationControlsVisible(_ visible: Bool) {
+        guard viewModel.showsTranslationControls != visible else { return }
+        viewModel.showsTranslationControls = visible
+        if let collapsedFrame = lastCollapsedFrame {
+            applyFrame(frame(for: viewModel.state, collapsedFrame: collapsedFrame), animated: true)
         }
     }
 }
@@ -526,9 +576,12 @@ enum DictationMicLayout {
     }
 }
 
-private struct DictationMicView: View {
+struct DictationMicView: View {
     @ObservedObject var model: DictationMicViewModel
+    let onHoverChanged: (Bool) -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("microphone.introduction.v3.completed") private var introductionCompleted = false
+    @State private var introductionStarted = false
 
     var body: some View {
         Group {
@@ -554,10 +607,30 @@ private struct DictationMicView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .animation(.easeInOut(duration: 0.18), value: model.state)
+        .onHover(perform: onHoverChanged)
+        .onChange(of: model.isTranslationSettingsPresented) { _, presented in
+            onHoverChanged(presented)
+        }
+        .onChange(of: model.microphoneTip) { _, tip in
+            onHoverChanged(tip != nil)
+        }
+        .onChange(of: model.showsTranslationControls) { _, visible in
+            if visible, !introductionCompleted, !introductionStarted {
+                introductionStarted = true
+                model.microphoneTip = .microphone
+            }
+        }
     }
 
     private var microphoneButton: some View {
         HStack(spacing: 0) {
+            if model.showsTranslationControls {
+                DictationTranslationControl(tip: $model.microphoneTip, isPresented: $model.isTranslationSettingsPresented)
+                    .padding(.horizontal, 12)
+                    .frame(width: 166, height: 44)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
             ZStack {
                 Circle()
                     .fill(surfaceColor)
@@ -571,13 +644,16 @@ private struct DictationMicView: View {
             .contentShape(Circle())
             .help("Start Offline Dictation")
             .accessibilityLabel("Start Offline Dictation")
+            .modifier(MicrophoneTipAnchor(target: .microphone, active: $model.microphoneTip))
 
             if model.showsDragHandle {
                 dragHandle
                     .padding(.trailing, 4)
+                    .modifier(MicrophoneTipAnchor(target: .drag, active: $model.microphoneTip))
             }
         }
         .frame(width: collapsedWidth, height: 52, alignment: .trailing)
+        .animation(.easeInOut(duration: 0.22), value: model.showsTranslationControls)
     }
 
     private func recordingView(language: SpeechLanguage) -> some View {
@@ -596,8 +672,6 @@ private struct DictationMicView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 2)
-            Text(language.flag)
-                .font(.system(size: 15))
             stopButton
             if model.showsDragHandle {
                 dragHandle
@@ -692,7 +766,7 @@ private struct DictationMicView: View {
         return String(format: "%02d:%02d", value / 60, value % 60)
     }
 
-    private var collapsedWidth: CGFloat { model.showsDragHandle ? 84 : 52 }
+    private var collapsedWidth: CGFloat { model.showsTranslationControls ? 250 : 84 }
     private var expandedWidth: CGFloat { model.showsDragHandle ? 332 : 300 }
     private var expandedInnerWidth: CGFloat { expandedWidth - 8 }
 }

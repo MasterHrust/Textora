@@ -72,11 +72,9 @@ final class OfflineSpeechTests: XCTestCase {
 
         OfflineDictationSettings.setEnabled(true, defaults: defaults)
         OfflineDictationSettings.setMicrophoneUID("test-microphone", defaults: defaults)
-        OfflineDictationSettings.setFallbackLanguage(.ukrainian, defaults: defaults)
 
         XCTAssertTrue(OfflineDictationSettings.isEnabled(defaults: defaults))
         XCTAssertEqual(OfflineDictationSettings.microphoneUID(defaults: defaults), "test-microphone")
-        XCTAssertEqual(OfflineDictationSettings.fallbackLanguage(defaults: defaults), .ukrainian)
     }
 
     @MainActor

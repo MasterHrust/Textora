@@ -22,10 +22,13 @@ enum SpeechAudioRecorderError: LocalizedError {
     }
 }
 
-final class SpeechAudioRecorder {
+// Engine state is confined to controlQueue, samples to lock; callbacks are set
+// before recording starts and delivered only on the main queue.
+final class SpeechAudioRecorder: @unchecked Sendable {
     static let maximumDuration: TimeInterval = 10 * 60
 
     private let engine = AVAudioEngine()
+    private let controlQueue = DispatchQueue(label: "com.textora.audio-control", qos: .userInitiated)
     private let lock = NSLock()
     private var samples: [Float] = []
     private var converter: AVAudioConverter?
@@ -54,7 +57,18 @@ final class SpeechAudioRecorder {
         return discovery.devices.map { SpeechMicrophone(id: $0.uniqueID, name: $0.localizedName) }
     }
 
-    func start(microphoneUID: String) throws {
+    func start(microphoneUID: String) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            controlQueue.async {
+                do { try self.startSynchronously(microphoneUID: microphoneUID); continuation.resume() }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
+    private func startSynchronously(microphoneUID: String) throws {
+        let start = ProcessInfo.processInfo.systemUptime
+        defer { InteractionTiming.record("audio-start", since: start) }
         guard !isRecording else { return }
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
         lastLevelDeliveryNanoseconds = 0
@@ -86,7 +100,15 @@ final class SpeechAudioRecorder {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.maximumDuration, execute: timer)
     }
 
-    func stop() -> [Float] {
+    func stop() async -> [Float] {
+        await withCheckedContinuation { continuation in
+            controlQueue.async { continuation.resume(returning: self.stopSynchronously()) }
+        }
+    }
+
+    private func stopSynchronously() -> [Float] {
+        let start = ProcessInfo.processInfo.systemUptime
+        defer { InteractionTiming.record("audio-stop", since: start) }
         maximumTimer?.cancel()
         maximumTimer = nil
         guard isRecording else { return [] }
@@ -101,7 +123,7 @@ final class SpeechAudioRecorder {
     }
 
     func cancel() {
-        _ = stop()
+        controlQueue.async { _ = self.stopSynchronously() }
     }
 
     private func consume(_ input: AVAudioPCMBuffer, converter: AVAudioConverter, outputFormat: AVAudioFormat) {

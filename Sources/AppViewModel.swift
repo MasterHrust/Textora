@@ -7,7 +7,6 @@ import Foundation
 final class AppViewModel: ObservableObject {
     enum OnboardingInterfaceMode {
         case toolbox
-        case floatingIcon
         case hotKeys
     }
 
@@ -16,7 +15,6 @@ final class AppViewModel: ObservableObject {
         static let smartAIEnabled = "overlay.smartAI.enabled"
         static let selectionAssistantBetaEnabled = SelectionAssistantSettings.Keys.enabled
         static let toolboxEnabled = SelectionAssistantSettings.Keys.toolboxEnabled
-        static let floatingIconEnabled = SelectionAssistantSettings.Keys.floatingIconEnabled
         static let hotKeysModeEnabled = SelectionAssistantSettings.Keys.hotKeysModeEnabled
     }
 
@@ -89,13 +87,6 @@ final class AppViewModel: ObservableObject {
             SelectionAssistantSettings.setToolboxEnabled(toolboxEnabled)
         }
     }
-    @Published var floatingIconEnabled: Bool = false {
-        didSet {
-            guard !isReloadingFromDefaults else { return }
-            guard oldValue != floatingIconEnabled else { return }
-            SelectionAssistantSettings.setFloatingIconEnabled(floatingIconEnabled)
-        }
-    }
     @Published var hotKeysModeEnabled: Bool = false {
         didSet {
             guard !isReloadingFromDefaults, oldValue != hotKeysModeEnabled else { return }
@@ -124,12 +115,6 @@ final class AppViewModel: ObservableObject {
         didSet {
             guard !isReloadingFromDefaults, oldValue != dictationHotKey else { return }
             SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
-        }
-    }
-    @Published var dictationFallbackLanguage: SpeechLanguage = .english {
-        didSet {
-            guard !isReloadingFromDefaults, oldValue != dictationFallbackLanguage else { return }
-            OfflineDictationSettings.fallbackLanguage = dictationFallbackLanguage
         }
     }
     @Published var selectedMicrophoneUID = "" {
@@ -197,7 +182,6 @@ final class AppViewModel: ObservableObject {
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
         selectionAssistantBetaEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.selectionAssistantBetaEnabled)
         toolboxEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.toolboxEnabled)
-        floatingIconEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.floatingIconEnabled)
         hotKeysModeEnabled = SelectionAssistantSettings.hotKeysModeEnabled()
         operation = SelectionAssistantSettings.selectedOperation()
         translationLanguage = SelectionAssistantSettings.translationLanguage()
@@ -206,7 +190,6 @@ final class AppViewModel: ObservableObject {
         OfflineDictationSettings.registerDefaults()
         offlineDictationEnabled = OfflineDictationSettings.isEnabled
         dictationHotKey = SelectionAssistantSettings.hotKey(for: .dictate)
-        dictationFallbackLanguage = OfflineDictationSettings.fallbackLanguage
         selectedMicrophoneUID = OfflineDictationSettings.microphoneUID
         speechModelState = SpeechModelManager.shared.state
         microphones = SpeechAudioRecorder.microphones()
@@ -363,16 +346,14 @@ final class AppViewModel: ObservableObject {
         )
         SelectionAssistantSettings.setEnabled(true)
         UserDefaults.standard.set(toolboxEnabled, forKey: SettingsKeys.toolboxEnabled)
-        UserDefaults.standard.set(floatingIconEnabled, forKey: SettingsKeys.floatingIconEnabled)
         UserDefaults.standard.set(hotKeysModeEnabled, forKey: SettingsKeys.hotKeysModeEnabled)
         SelectionAssistantSettings.setActivationMode(
-            hotKeysModeEnabled && !toolboxEnabled && !floatingIconEnabled ? .hotkeyOnly : .automatic
+            hotKeysModeEnabled && !toolboxEnabled ? .hotkeyOnly : .automatic
         )
         SelectionAssistantSettings.setSelectedOperation(operation)
         SelectionAssistantSettings.setTranslationLanguage(translationLanguage)
         OfflineDictationSettings.isEnabled = offlineDictationEnabled
         OfflineDictationSettings.microphoneUID = selectedMicrophoneUID
-        OfflineDictationSettings.fallbackLanguage = dictationFallbackLanguage
         SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
         NotificationCenter.default.post(name: SelectionAssistantSettings.settingsDidChangeNotification, object: nil)
         let keyResult: Result<Void, KeychainHelper.KeychainError>
@@ -408,7 +389,6 @@ final class AppViewModel: ObservableObject {
             customToken,
             customOpenAIBaseURL,
             String(toolboxEnabled),
-            String(floatingIconEnabled),
             String(hotKeysModeEnabled),
             operation.rawValue,
             translationLanguage.rawValue,
@@ -416,7 +396,6 @@ final class AppViewModel: ObservableObject {
             String(translateHotKey.keyCode), String(translateHotKey.modifiers), String(translateHotKey.isEnabled),
             String(offlineDictationEnabled),
             String(dictationHotKey.keyCode), String(dictationHotKey.modifiers), String(dictationHotKey.isEnabled),
-            dictationFallbackLanguage.rawValue,
             selectedMicrophoneUID
         ].joined(separator: "\u{1F}")
     }
@@ -436,27 +415,25 @@ final class AppViewModel: ObservableObject {
     }
 
     var onboardingInterfaceMode: OnboardingInterfaceMode {
-        if hotKeysModeEnabled && !toolboxEnabled && !floatingIconEnabled { return .hotKeys }
-        return toolboxEnabled ? .toolbox : .floatingIcon
+        if hotKeysModeEnabled && !toolboxEnabled { return .hotKeys }
+        return .toolbox
     }
 
     var hasValidOnboardingInterfaceSelection: Bool {
         switch onboardingInterfaceMode {
         case .hotKeys:
             return rewriteHotKey.isEnabled || translateHotKey.isEnabled
-        case .toolbox, .floatingIcon:
-            return toolboxEnabled || floatingIconEnabled
+        case .toolbox:
+            return toolboxEnabled
         }
     }
 
     func selectOnboardingInterfaceMode(_ mode: OnboardingInterfaceMode) {
         switch mode {
         case .toolbox:
-            updateInterfaceModes(toolbox: true, floatingIcon: false, hotKeys: false)
-        case .floatingIcon:
-            updateInterfaceModes(toolbox: false, floatingIcon: true, hotKeys: false)
+            updateInterfaceModes(toolbox: true, hotKeys: false)
         case .hotKeys:
-            updateInterfaceModes(toolbox: false, floatingIcon: false, hotKeys: true)
+            updateInterfaceModes(toolbox: false, hotKeys: true)
             rewriteHotKey.isEnabled = true
             translateHotKey.isEnabled = true
         }
@@ -466,11 +443,9 @@ final class AppViewModel: ObservableObject {
         guard enabled else { return }
         switch mode {
         case .toolbox:
-            updateInterfaceModes(toolbox: true, floatingIcon: false, hotKeys: false)
-        case .floatingIcon:
-            updateInterfaceModes(toolbox: false, floatingIcon: true, hotKeys: false)
+            updateInterfaceModes(toolbox: true, hotKeys: false)
         case .hotKeys:
-            updateInterfaceModes(toolbox: false, floatingIcon: false, hotKeys: true)
+            updateInterfaceModes(toolbox: false, hotKeys: true)
             if !rewriteHotKey.isEnabled && !translateHotKey.isEnabled {
                 rewriteHotKey.isEnabled = true
                 translateHotKey.isEnabled = true
@@ -478,15 +453,13 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func updateInterfaceModes(toolbox: Bool, floatingIcon: Bool, hotKeys: Bool) {
+    private func updateInterfaceModes(toolbox: Bool, hotKeys: Bool) {
         isReloadingFromDefaults = true
         toolboxEnabled = toolbox
-        floatingIconEnabled = floatingIcon
         hotKeysModeEnabled = hotKeys
         isReloadingFromDefaults = false
         SelectionAssistantSettings.setInterfaceModes(
             toolbox: toolbox,
-            floatingIcon: floatingIcon,
             hotKeys: hotKeys
         )
     }

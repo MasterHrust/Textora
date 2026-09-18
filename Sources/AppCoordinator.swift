@@ -8,9 +8,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private static let onboardingCompletedKey = "onboarding.byok.completed.v2"
     private static let onboardingSkippedKey = "onboarding.byok.skipped"
 
-    private var floatingHelper: FloatingHelperController?
     private let selectionAssistant = SelectionAssistantController()
-    private let rewritePanel = InlineRewritePanelController()
     private var settingsWindow: NSWindow?
     private var settingsViewModel: AppViewModel?
     private var onboardingWindow: NSWindow?
@@ -22,8 +20,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private lazy var dictationMicController = DictationMicController(
         textAccess: textAccess,
         onStart: { [weak self] in self?.dictationController.startFromUI() },
-        onStop: { [weak self] in self?.dictationController.stopFromUI() },
-        floatingCompanionFrame: { [weak self] in self?.floatingHelper?.visibleFrame }
+        onStop: { [weak self] in self?.dictationController.stopFromUI() }
     )
     private var selectionAssistantSettingsObserver: NSObjectProtocol?
     private var offlineDictationSettingsObserver: NSObjectProtocol?
@@ -32,11 +29,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var primaryInteractionRetryCount = 0
     private var launchWarmupTask: DispatchWorkItem?
     private var launchWarmupCount = 0
-    private var isHelperHovered = false
-    private var isRewritePopupHovered = false
-    private var isConsentPromptHovered = false
-    private var isHidingFloatingPanels = false
-    private var floatingPanelsHideTask: DispatchWorkItem?
     private var pendingDictationConsentBundleID: String?
     private var isDictationInteractionActive = false
     @Published private(set) var helperStatus: String = "Initializing"
@@ -74,16 +66,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         installAccessibilityPermissionObserverIfNeeded()
         installSelectionAssistantSettingsObserverIfNeeded()
         installOfflineDictationSettingsObserverIfNeeded()
-        rewritePanel.onHoverChanged = { [weak self] hovering in
-            self?.handleRewritePopupHoverChanged(hovering)
-        }
-        rewritePanel.onActionInvoked = { [weak self] in
-            self?.floatingHelper?.refreshAfterExternalRewriteApplied()
-            self?.hideFloatingPanelsIfNeeded()
-        }
-        rewritePanel.onSuggestionAvailabilityChanged = { [weak self] hasSuggestion in
-            self?.floatingHelper?.markRewritePopupSuggestionAvailability(hasSuggestion)
-        }
         consentPrompt.onAllow = { [weak self] in
             self?.handleConsentAllow()
         }
@@ -92,9 +74,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         consentPrompt.onLater = { [weak self] in
             self?.handleConsentLater()
-        }
-        consentPrompt.onHoverChanged = { [weak self] hovering in
-            self?.handleConsentPromptHoverChanged(hovering)
         }
         selectionAssistant.onConsentRequired = { [weak self] anchor, bundleID in
             self?.pendingDictationConsentBundleID = nil
@@ -121,43 +100,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.handleGlobalHotKey(event)
         }
         GlobalHotKeyManager.shared.reload()
-        if floatingHelper == nil {
-            floatingHelper = FloatingHelperController(
-                onRewriteTap: { [weak self] frame in
-                    self?.showRewritePopupFromFloatingState(frame: frame)
-                },
-                onFloatingHoverChanged: { [weak self] hovering, frame in
-                    self?.handleFloatingHoverChanged(hovering: hovering, frame: frame)
-                }
-            )
-            floatingHelper?.onStatusChange = { [weak self] status in
-                self?.helperStatus = status
-            }
-            floatingHelper?.onEvaluationCompleted = { [weak self] in
-                guard let self,
-                      self.rewritePanel.isVisible,
-                      let frame = self.floatingHelper?.currentFrame,
-                      !frame.isEmpty else { return }
-                self.showRewritePopupFromFloatingState(frame: frame, requestIfMissing: false)
-            }
-            floatingHelper?.onEvaluationStarted = { [weak self] in
-                guard let self,
-                      self.rewritePanel.isVisible,
-                      let frame = self.floatingHelper?.currentFrame,
-                      !frame.isEmpty,
-                      let context = self.floatingHelper?.currentFocusedContextForPopup() else { return }
-                self.rewritePanel.showProcessing(near: frame, context: context)
-            }
-            floatingHelper?.onFocusedTextContentChanged = { [weak self] context in
-                guard let self,
-                      self.rewritePanel.isVisible,
-                      let frame = self.floatingHelper?.currentFrame,
-                      !frame.isEmpty,
-                      let context else { return }
-                self.rewritePanel.showProcessing(near: frame, context: context)
-            }
-        }
-
         KeychainHelper.migrateIfNeeded()
         KeychainHelper.warmUpCache()
         scheduleLaunchWarmupRetry(reason: "launch")
@@ -229,9 +171,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
         } else {
             selectionAssistant.stop()
-            floatingHelper?.stop()
             dictationMicController.stop()
-            rewritePanel.hide()
             consentPrompt.hide()
             helperStatus = "Accessibility disabled"
             schedulePrimaryInteractionRetry(reason: "accessibilityRevoked")
@@ -252,11 +192,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.toolboxEnabled)
     }
 
-    private var isFloatingIconEnabled: Bool {
-        SelectionAssistantSettings.registerDefaults()
-        return UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.floatingIconEnabled)
-    }
-
     private var isHotKeysEnabled: Bool {
         SelectionAssistantSettings.hotKeysModeEnabled()
     }
@@ -265,32 +200,23 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         if !OfflineDictationSettings.isEnabled {
             dictationController.disableAndUnload()
         }
-        cancelScheduledFloatingPanelsHide()
-        isHelperHovered = false
-        isRewritePopupHovered = false
-        isConsentPromptHovered = false
-        rewritePanel.hide()
         consentPrompt.hide()
-        floatingHelper?.setKeepBelowWindow(nil)
 
         GlobalHotKeyManager.shared.reload()
         configureDictationMic()
         if isDictationInteractionActive {
             selectionAssistant.stop()
-            floatingHelper?.stop()
             helperStatus = "Offline dictation active"
             return
         }
         guard hasAnyConfiguredKey() else {
             helperStatus = OfflineDictationSettings.isEnabled ? "Offline dictation active" : "API key required"
             selectionAssistant.stop()
-            floatingHelper?.stop()
             return
         }
         guard textAccess.hasAccessibilityPermission() else {
             helperStatus = "Waiting for Accessibility permission"
             selectionAssistant.stop()
-            floatingHelper?.stop()
             return
         }
         cancelPrimaryInteractionRetry()
@@ -304,25 +230,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             selectionAssistant.stop()
         }
 
-        if isFloatingIconEnabled {
-            floatingHelper?.start()
-        } else {
-            floatingHelper?.stop()
-        }
-
-        if !isToolboxEnabled, !isFloatingIconEnabled, hasEnabledHotKey {
-            helperStatus = "Hotkeys active"
-            return
-        }
-
-        switch (isToolboxEnabled, isFloatingIconEnabled, hasEnabledHotKey) {
-        case (true, _, true): helperStatus = "Toolbox + hotkeys active"
-        case (true, _, false): helperStatus = "Toolbox active"
-        case (_, true, true): helperStatus = "Floating icon + hotkeys active"
-        case (_, true, false): helperStatus = "Floating icon active"
-        case (false, false, true): helperStatus = "Hotkeys active"
-        case (false, false, false): helperStatus = "No Textora interface enabled"
-        }
+        helperStatus = isToolboxEnabled ? "Toolbox active" : "Hotkeys active"
     }
 
     private func handleDictationActivityChanged(
@@ -334,8 +242,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         isDictationInteractionActive = isActive
         if isActive {
             selectionAssistant.stop()
-            floatingHelper?.stop()
-            rewritePanel.hide()
             helperStatus = "Offline dictation active"
         } else {
             configurePrimaryInteractionMode()
@@ -351,7 +257,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             dictationMicController.stop()
             return
         }
-        let mode: DictationMicController.InterfaceMode = isFloatingIconEnabled ? .floatingIcon : .toolbox
+        let mode: DictationMicController.InterfaceMode = .toolbox
         dictationMicController.start(mode: mode)
         dictationMicController.setExternallySuppressed(false)
     }
@@ -424,7 +330,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var shouldContinueLaunchWarmup: Bool {
         guard hasAnyConfiguredKey() else { return false }
         guard textAccess.hasAccessibilityPermission() else { return true }
-        if isToolboxEnabled || isFloatingIconEnabled || isHotKeysEnabled {
+        if isToolboxEnabled || isHotKeysEnabled {
             return false
         }
         return launchWarmupCount < 3
@@ -531,128 +437,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    func showDebugBubbleAtMouse() {
-        floatingHelper?.showDebugBubbleAtMouse()
-    }
-
-    private func handleFloatingHoverChanged(hovering: Bool, frame: CGRect) {
-        guard isFloatingIconEnabled else {
-            rewritePanel.hide()
-            consentPrompt.hide()
-            floatingHelper?.setKeepBelowWindow(nil)
-            return
-        }
-        isHelperHovered = hovering
-        if hovering {
-            cancelScheduledFloatingPanelsHide()
-            let status = textAccess.currentAppConsentStatus()
-            switch status {
-            case .allowed:
-                isConsentPromptHovered = false
-                consentPrompt.hide()
-                showRewritePopupFromFloatingState(frame: frame)
-                floatingHelper?.setKeepBelowWindow(rewritePanel.window)
-            case .denied:
-                rewritePanel.hide()
-                isConsentPromptHovered = false
-                consentPrompt.hide()
-                floatingHelper?.setKeepBelowWindow(nil)
-            case .unknown:
-                rewritePanel.hide()
-                floatingHelper?.setKeepBelowWindow(nil)
-                if let app = textAccess.frontmostAppInfo() {
-                    pendingDictationConsentBundleID = nil
-                    consentPrompt.show(near: frame, appName: app.displayName, targetBundleID: app.bundleID)
-                }
-            }
-            return
-        }
-        scheduleHideFloatingPanelsIfNeeded()
-    }
-
-    private func showRewritePopupFromFloatingState(frame: CGRect, requestIfMissing: Bool = true) {
-        guard let floatingHelper else {
-            rewritePanel.show(near: frame, triggerRewrite: false)
-            return
-        }
-        if let result = floatingHelper.cachedPopupResultForCurrentFocus() {
-            rewritePanel.showWithSuggestion(
-                near: frame,
-                context: result.context,
-                suggestion: result.suggestion,
-                operation: result.operation,
-                suggestionOptions: result.suggestionOptions,
-                isNoIssues: result.isNoIssues
-            )
-            return
-        }
-        if let context = floatingHelper.currentFocusedContextForPopup(), floatingHelper.isCurrentlyEvaluating || requestIfMissing {
-            rewritePanel.showProcessing(near: frame, context: context)
-        } else {
-            rewritePanel.show(near: frame, triggerRewrite: false)
-        }
-        if requestIfMissing {
-            floatingHelper.requestEvaluationForCurrentFocusIfNeeded()
-        }
-    }
-
-    private func handleRewritePopupHoverChanged(_ hovering: Bool) {
-        isRewritePopupHovered = hovering
-        if hovering {
-            cancelScheduledFloatingPanelsHide()
-        } else {
-            scheduleHideFloatingPanelsIfNeeded()
-        }
-    }
-
-    private func handleConsentPromptHoverChanged(_ hovering: Bool) {
-        isConsentPromptHovered = hovering
-        if hovering {
-            cancelScheduledFloatingPanelsHide()
-        } else {
-            scheduleHideFloatingPanelsIfNeeded()
-        }
-    }
-
-    private func scheduleHideFloatingPanelsIfNeeded() {
-        cancelScheduledFloatingPanelsHide()
-        let task = DispatchWorkItem { [weak self] in
-            self?.hideFloatingPanelsIfNeeded()
-        }
-        floatingPanelsHideTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: task)
-    }
-
-    private func cancelScheduledFloatingPanelsHide() {
-        floatingPanelsHideTask?.cancel()
-        floatingPanelsHideTask = nil
-    }
-
-    private func hideFloatingPanelsIfNeeded() {
-        guard !isHelperHovered && !isRewritePopupHovered && !isConsentPromptHovered else { return }
-        guard !isHidingFloatingPanels else { return }
-        // If user manually dragged the rewrite pop-up, keep it open until explicitly closed.
-        guard !rewritePanel.isPinnedOpen else { return }
-        // Keep popup open when interacting with native dropdowns (they open in a separate window
-        // and can temporarily end SwiftUI onHover). Use a small “tolerance” area around the popup.
-        if rewritePanel.isVisible, let frame = rewritePanel.currentFrame {
-            let mouse = NSEvent.mouseLocation
-            let safe = frame.insetBy(dx: -90, dy: -90)
-            if safe.contains(mouse) {
-                return
-            }
-        }
-        isHidingFloatingPanels = true
-        cancelScheduledFloatingPanelsHide()
-        rewritePanel.hide()
-        floatingHelper?.setKeepBelowWindow(nil)
-        consentPrompt.hide()
-        isConsentPromptHovered = false
-        isHidingFloatingPanels = false
-    }
-
     private func handleConsentAllow() {
-        isConsentPromptHovered = false
         guard let bundleID = consentPrompt.capturedConsentBundleID, !bundleID.isEmpty else {
             consentPrompt.hide()
             return
@@ -666,13 +451,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             dictationMicController.setExternallySuppressed(false)
             return
         }
-        if isFloatingIconEnabled, let frame = floatingHelper?.currentFrame, !frame.isEmpty {
-            showRewritePopupFromFloatingState(frame: frame)
-        }
     }
 
     private func handleConsentDeny() {
-        isConsentPromptHovered = false
         guard let bundleID = consentPrompt.capturedConsentBundleID, !bundleID.isEmpty else {
             consentPrompt.hide()
             return
@@ -681,13 +462,11 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             pendingDictationConsentBundleID = nil
         }
         textAccess.setAppConsentStatus(.denied, for: bundleID)
-        rewritePanel.hide()
         consentPrompt.hide()
         selectionAssistant.resolvePendingHotKeyConsent(for: bundleID, allowed: false)
     }
 
     private func handleConsentLater() {
-        isConsentPromptHovered = false
         if let bundleID = consentPrompt.capturedConsentBundleID {
             if pendingDictationConsentBundleID == bundleID {
                 pendingDictationConsentBundleID = nil
@@ -702,9 +481,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private func handleSelectionAssistantConsentRequired(anchor: CGRect, bundleID: String) {
         guard isToolboxEnabled || isHotKeysEnabled || OfflineDictationSettings.isEnabled else { return }
-        cancelScheduledFloatingPanelsHide()
-        rewritePanel.hide()
-        floatingHelper?.setKeepBelowWindow(nil)
 
         let frontmost = textAccess.frontmostAppInfo()
         let appName = frontmost?.bundleID == bundleID ? frontmost?.displayName ?? bundleID : bundleID

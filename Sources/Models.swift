@@ -68,11 +68,18 @@ enum RewriteOperation: String, CaseIterable, Identifiable {
     }
 }
 
+struct MeaningQuestion: Codable, Equatable {
+    let question: String
+    let options: [String]
+}
+
 struct OverlaySuggestion: Identifiable, Equatable {
     let operation: RewriteOperation
     let text: String
     var isRecommended: Bool = false
     var isOptional: Bool = false
+    var validationError: String? = nil
+    var meaningQuestions: [MeaningQuestion] = []
 
     var id: String { operation.rawValue }
     var title: String {

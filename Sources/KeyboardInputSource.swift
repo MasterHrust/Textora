@@ -30,10 +30,6 @@ enum KeyboardInputSource {
         return nil
     }
 
-    static func currentSpeechLanguage(fallback: SpeechLanguage) -> SpeechLanguage {
-        SpeechLanguage.matching(languageIdentifier: currentLanguageIdentifier()) ?? fallback
-    }
-
     static func currentLayout() -> TextInputKeyboardLayout {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return .other }
         return keyboardLayout(of: source)

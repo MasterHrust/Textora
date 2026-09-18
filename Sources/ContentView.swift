@@ -3,6 +3,8 @@ import Carbon
 import SwiftUI
 
 struct ContentView: View {
+    @State private var showsFeatureGuide = false
+    @AppStorage("overlay.smartAI.enabled") private var smartAIEnabled = true
     @ObservedObject var viewModel: AppViewModel
     @ObservedObject private var updates = AppUpdateManager.shared
 
@@ -15,6 +17,12 @@ struct ContentView: View {
             settingsContent
         }
         .frame(width: 520, height: 520)
+        .sheet(isPresented: $showsFeatureGuide) {
+            TextoraFeatureGuide {
+                UserDefaults.standard.set(true, forKey: "features.introduction.v1.completed")
+                showsFeatureGuide = false
+            }.padding(20).frame(width: 360)
+        }
         .onAppear {
             viewModel.refreshAccessibilityPermissionStatus()
             viewModel.refreshAppConsents()
@@ -31,6 +39,7 @@ struct ContentView: View {
             providerSection
             Divider().padding(.vertical, 4)
             interfaceSection
+            Button("Show feature guide") { showsFeatureGuide = true }
             Divider().padding(.vertical, 4)
             offlineDictationSection
             Divider().padding(.vertical, 4)
@@ -125,16 +134,13 @@ struct ContentView: View {
             }
 
             if viewModel.offlineDictationEnabled {
-                Picker("Microphone", selection: $viewModel.selectedMicrophoneUID) {
-                    Text("System Default").tag("")
-                    ForEach(viewModel.microphones) { microphone in
-                        Text(microphone.name).tag(microphone.id)
-                    }
-                }
-                HStack {
-                    Picker("Fallback language", selection: $viewModel.dictationFallbackLanguage) {
-                        ForEach(SpeechLanguage.allCases) { language in
-                            Text("\(language.flag) \(language.displayName)").tag(language)
+                Divider().padding(.vertical, 4)
+                Text("Recording").font(.subheadline.weight(.semibold))
+                HStack(alignment: .center, spacing: 10) {
+                    Picker("Microphone", selection: $viewModel.selectedMicrophoneUID) {
+                        Text("System Default").tag("")
+                        ForEach(viewModel.microphones) { microphone in
+                            Text(microphone.name).tag(microphone.id)
                         }
                     }
                     Button { viewModel.refreshMicrophones() } label: {
@@ -142,13 +148,14 @@ struct ContentView: View {
                     }
                     .help("Refresh microphones")
                 }
-                Text("The current keyboard layout chooses the language. Fallback is used for unknown layouts.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
                 HotKeySettingRow(title: "Hold to dictate", hotKey: $viewModel.dictationHotKey)
                 if let error = GlobalHotKeyManager.shared.registrationError(for: .dictate) {
                     Text(error).font(.caption2).foregroundStyle(.red)
                 }
+                Divider().padding(.vertical, 4)
+                Text("After recording").font(.subheadline.weight(.semibold))
+                DictationTranslationSettingsView()
+                Divider().padding(.vertical, 4)
                 HStack(spacing: 12) {
                     Link("Engine license (MIT)", destination: URL(string: "https://github.com/handy-computer/transcribe.cpp/blob/main/LICENSE")!)
                     Link("Model attribution (CC BY 4.0)", destination: URL(string: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3")!)
@@ -255,12 +262,12 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Interface")
                 .font(.headline)
-            Text("Choose one way to use Textora. Toolbox, Floating icon, and Hotkeys cannot run together.")
+            Text("Choose Toolbox or Hotkeys.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("SmartAI — recommend a rewrite mode", isOn: $smartAIEnabled)
             InterfaceModeCards(
                 toolboxEnabled: settingsModeBinding(.toolbox),
-                floatingIconEnabled: settingsModeBinding(.floatingIcon),
                 hotKeysEnabled: settingsModeBinding(.hotKeys),
                 showsDictation: viewModel.offlineDictationEnabled,
                 compact: true
@@ -298,7 +305,6 @@ struct ContentView: View {
             get: {
                 switch mode {
                 case .toolbox: return viewModel.toolboxEnabled
-                case .floatingIcon: return viewModel.floatingIconEnabled
                 case .hotKeys: return viewModel.hotKeysModeEnabled
                 }
             },
@@ -492,7 +498,6 @@ private struct HotKeySettingRow: View {
 
 private struct InterfaceModeCards: View {
     @Binding var toolboxEnabled: Bool
-    @Binding var floatingIconEnabled: Bool
     var hotKeysEnabled: Binding<Bool>? = nil
     var showsDictation = false
     var compact = false
@@ -507,17 +512,6 @@ private struct InterfaceModeCards: View {
                 isOn: $toolboxEnabled,
                 accent: Color(red: 0.27, green: 0.73, blue: 1.0),
                 preview: .toolbox,
-                showsDictation: showsDictation,
-                compact: compact
-            )
-            InterfaceModeCard(
-                title: "Floating icon",
-                subtitle: showsDictation
-                    ? (compact ? "Marker + dictation mic" : "The Textora correction marker and a separate dictation microphone near editable fields.")
-                    : (compact ? "Classic marker" : "The classic Textora marker near editable fields, with a pop-up for quick corrections."),
-                isOn: $floatingIconEnabled,
-                accent: Color(red: 0.89, green: 0.24, blue: 0.93),
-                preview: .floating,
                 showsDictation: showsDictation,
                 compact: compact
             )
@@ -539,7 +533,6 @@ private struct InterfaceModeCards: View {
 private struct InterfaceModeCard: View {
     enum PreviewKind {
         case toolbox
-        case floating
         case hotkeys
     }
 
@@ -589,8 +582,6 @@ private struct InterfaceModeCard: View {
         switch preview {
         case .toolbox:
             toolboxPreview
-        case .floating:
-            floatingPreview
         case .hotkeys:
             hotKeysPreview
         }
@@ -659,70 +650,12 @@ private struct InterfaceModeCard: View {
         )
     }
 
-    private var floatingPreview: some View {
-        ZStack(alignment: .bottomTrailing) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.16))
-                        .frame(width: 30, height: 24)
-                    VStack(alignment: .leading, spacing: 4) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.white.opacity(0.58))
-                            .frame(width: 66, height: 5)
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.white.opacity(0.34))
-                            .frame(width: 42, height: 5)
-                    }
-                    Spacer(minLength: 0)
-                }
-                HStack(spacing: 5) {
-                    previewPill("SmartAI", color: Color(red: 0.67, green: 0.32, blue: 1.0))
-                    previewPill("Fix", color: Color(red: 0.25, green: 0.84, blue: 0.34))
-                    Spacer(minLength: 0)
-                }
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(Color.black.opacity(0.26))
-            )
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: compact ? 20 : 24, height: compact ? 20 : 24)
-                .overlay(Image(systemName: "wand.and.stars").font(.system(size: compact ? 9 : 10, weight: .bold)).foregroundStyle(.white))
-                .shadow(color: accent.opacity(0.45), radius: 9, x: 0, y: 0)
-                .offset(x: 5, y: 5)
-            if showsDictation {
-                previewMic
-                    .offset(x: compact ? -19 : -23, y: 5)
-            }
-        }
-    }
-
     private var previewMic: some View {
-        Circle()
-            .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+        Image(systemName: "mic.fill")
+            .font(.system(size: compact ? 9 : 10, weight: .bold))
+            .foregroundStyle(.purple)
             .frame(width: compact ? 20 : 24, height: compact ? 20 : 24)
-            .overlay(
-                Image(systemName: "mic.fill")
-                    .font(.system(size: compact ? 9 : 10, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color(red: 0.25, green: 0.72, blue: 1.0), Color(red: 0.90, green: 0.20, blue: 0.92)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            )
-            .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 1))
-            .shadow(color: Color.black.opacity(0.24), radius: 4, y: 2)
+            .background(Color(nsColor: .windowBackgroundColor), in: Circle())
     }
 
     private var hotKeysPreview: some View {
@@ -828,6 +761,8 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
+            ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
             switch viewModel.onboardingStep {
             case 1:
                 Text("Textora helps you fix and improve text in any app, including email, chats, documents, and browsers.")
@@ -860,12 +795,12 @@ struct OnboardingView: View {
                 Text("Choose how Textora should appear when you write.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                Text("Choose Toolbox, the classic Floating icon, or run Textora only with keyboard shortcuts.")
+                Text("Choose Toolbox or run Textora only with keyboard shortcuts.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
+                ToolPanelSelectionDemo()
                 InterfaceModeCards(
                     toolboxEnabled: onboardingModeBinding(.toolbox),
-                    floatingIconEnabled: onboardingModeBinding(.floatingIcon),
                     hotKeysEnabled: onboardingModeBinding(.hotKeys),
                     showsDictation: true,
                     compact: false
@@ -891,7 +826,7 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Label("Offline Dictation", systemImage: "waveform")
                         .font(.system(size: 20, weight: .bold))
-                    Text("In Toolbox or Floating icon mode, use the microphone near an active field. In Hotkeys mode, hold ⌥⌘S and release to insert the transcription.")
+                    Text("In Toolbox mode, use the microphone near an active field. In Hotkeys mode, hold ⌥⌘S and release to insert the transcription.")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                     HStack {
@@ -914,6 +849,8 @@ struct OnboardingView: View {
                 Text("Done. Textora will request only the permissions needed for the features you enabled.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
+            }
+            }.frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Spacer(minLength: 0)
