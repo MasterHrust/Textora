@@ -53,7 +53,7 @@ actor RewriteReviewService {
                 if cache.count >= 12, let oldest = cache.min(by: { $0.value.0 < $1.value.0 })?.key {
                     cache.removeValue(forKey: oldest)
                 }
-                // Retry must ask the provider again for rejected variants.
+                // Retry must ask the provider again for flagged variants.
                 if result.allSatisfy({ $0.validationError == nil }) {
                     cache[request.key] = (Date(), result)
                 }

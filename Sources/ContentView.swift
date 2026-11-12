@@ -2,21 +2,111 @@ import AppKit
 import Carbon
 import SwiftUI
 
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case general, writing, dictation, shortcuts, history, about
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .writing: return "Writing"
+        case .dictation: return "Dictation"
+        case .shortcuts: return "Shortcuts"
+        case .history: return "Recent Results"
+        case .about: return "About & Updates"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .writing: return "textformat"
+        case .dictation: return "mic"
+        case .shortcuts: return "keyboard"
+        case .history: return "clock.arrow.circlepath"
+        case .about: return "info.circle"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .general: return "Choose how Textora appears and which apps it can work with."
+        case .writing: return "Choose what to change, then make the result sound like you."
+        case .dictation: return "Recognize speech on this Mac and choose what happens next."
+        case .shortcuts: return "Use Textora from the keyboard, wherever you write."
+        case .history: return "Keep a private, optional record of text you have processed."
+        case .about: return "Version, updates and help with Textora."
+        }
+    }
+}
+
+enum WritingSettingsTab: String, CaseIterable { case style = "My Style", provider = "AI Provider", operations = "Rewrite & Translate" }
+enum DictationSettingsTab: String, CaseIterable { case recording = "Recording", output = "Output & Translation" }
+enum GeneralSettingsTab: String, CaseIterable { case interface = "Interface", permissions = "Permissions" }
+
+/// One navigation state is shared by Settings and entry points in result panels.
+/// UI navigation never changes the enabled writing or dictation modes.
+@MainActor
+final class SettingsNavigation: ObservableObject {
+    static let shared = SettingsNavigation()
+    private let defaults: UserDefaults
+    @Published var section: SettingsSection { didSet { defaults.set(section.rawValue, forKey: "settings.navigation.section") } }
+    @Published var writingTab: WritingSettingsTab { didSet { defaults.set(writingTab.rawValue, forKey: "settings.navigation.writing") } }
+    @Published var dictationTab: DictationSettingsTab { didSet { defaults.set(dictationTab.rawValue, forKey: "settings.navigation.dictation") } }
+    @Published var generalTab: GeneralSettingsTab { didSet { defaults.set(generalTab.rawValue, forKey: "settings.navigation.general") } }
+    @Published var styleSourceBundleID: String?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        section = SettingsSection(rawValue: defaults.string(forKey: "settings.navigation.section") ?? "") ?? .general
+        writingTab = WritingSettingsTab(rawValue: defaults.string(forKey: "settings.navigation.writing") ?? "") ?? .style
+        dictationTab = DictationSettingsTab(rawValue: defaults.string(forKey: "settings.navigation.dictation") ?? "") ?? .recording
+        generalTab = GeneralSettingsTab(rawValue: defaults.string(forKey: "settings.navigation.general") ?? "") ?? .interface
+    }
+
+    func open(_ section: SettingsSection, sourceBundleID: String? = nil) {
+        self.section = section
+        if let sourceBundleID { styleSourceBundleID = sourceBundleID }
+    }
+    func openMyStyle(bundleID: String? = nil) {
+        writingTab = .style
+        open(.writing, sourceBundleID: bundleID)
+    }
+}
+
 struct ContentView: View {
     @State private var showsFeatureGuide = false
     @AppStorage("overlay.smartAI.enabled") private var smartAIEnabled = true
+    @AppStorage("offlineDictation.shortcutMode") private var dictationShortcutMode = "toggle"
     @ObservedObject var viewModel: AppViewModel
     @ObservedObject private var updates = AppUpdateManager.shared
+    @ObservedObject var navigation: SettingsNavigation
+    @ObservedObject private var styleStore: PersonalStyleStore
+
+    init(viewModel: AppViewModel, navigation: SettingsNavigation? = nil, styleStore: PersonalStyleStore? = nil) {
+        self.viewModel = viewModel
+        self.navigation = navigation ?? .shared
+        self.styleStore = styleStore ?? .shared
+    }
 
     private let bundleIDTextWidth: CGFloat = 210
     private let actionPickerWidth: CGFloat = 140
     private let donateURL = "https://paypal.me/RShytskou"
 
     var body: some View {
-        ScrollView {
-            settingsContent
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(navigation.section.title).font(.system(size: 23, weight: .bold))
+                    Text(navigation.section.summary).font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.padding(24)
+                Divider()
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .frame(width: 520, height: 520)
+        .frame(minWidth: 820, minHeight: 560)
         .sheet(isPresented: $showsFeatureGuide) {
             TextoraFeatureGuide {
                 UserDefaults.standard.set(true, forKey: "features.introduction.v1.completed")
@@ -24,6 +114,7 @@ struct ContentView: View {
             }.padding(20).frame(width: 360)
         }
         .onAppear {
+            guard !viewModel.isPreview else { return }
             viewModel.refreshAccessibilityPermissionStatus()
             viewModel.refreshAppConsents()
             viewModel.refreshLaunchAtLoginStatus()
@@ -32,33 +123,219 @@ struct ContentView: View {
         .onChange(of: viewModel.settingsAutosaveToken) { _, _ in
             viewModel.debouncedSave()
         }
+        .onChange(of: navigation.section) { _, _ in settingsNavigationChanged() }
+        .onChange(of: navigation.writingTab) { _, _ in settingsNavigationChanged() }
     }
 
-    private var settingsContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            providerSection
-            Divider().padding(.vertical, 4)
-            interfaceSection
-            Button("Show feature guide") { showsFeatureGuide = true }
-            Divider().padding(.vertical, 4)
-            offlineDictationSection
-            Divider().padding(.vertical, 4)
-            systemSection
-            Button("Save settings") {
-                viewModel.saveSettings()
+    private func settingsNavigationChanged() {
+        guard !viewModel.isPreview else { return }
+        viewModel.flushPendingSave()
+        AppCoordinator.shared.settingsNavigationDidChange()
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Image(nsImage: NSImage(named: "helper-icon") ?? NSImage())
+                    .resizable().scaledToFit().frame(width: 30, height: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Textora").font(.headline)
+                    Text("Settings").font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 10)
+            List(selection: Binding<SettingsSection?>(get: { navigation.section }, set: { if let section = $0 { navigation.section = section } })) {
+                ForEach(SettingsSection.allCases) { section in
+                    HStack(spacing: 10) {
+                        Image(systemName: section.symbol)
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(navigation.section == section ? Color.white : Color.secondary)
+                            .frame(width: 18)
+                        Text(section.title)
+                            .foregroundStyle(navigation.section == section ? Color.white : Color.primary)
+                    }
+                        .tag(section)
+                        .padding(.vertical, 4)
+                        .listRowBackground(RoundedRectangle(cornerRadius: 8)
+                            .fill(navigation.section == section ? Color.blue : Color.clear))
+                }
+            }.listStyle(.sidebar).tint(.blue)
+            Text("Changes save automatically")
+                .font(.caption2).foregroundStyle(.secondary)
+                .padding(.horizontal, 18).padding(.bottom, 16)
+        }.frame(width: 190)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch navigation.section {
+        case .general:
+            VStack(spacing: 0) {
+                tabs("General", selection: $navigation.generalTab, values: GeneralSettingsTab.allCases)
+                page {
+                    if navigation.generalTab == .interface {
+                        settingsGroup("Interface") { interfaceSection }
+                        settingsGroup("Startup") { launchAtLoginSection }
+                    } else {
+                        settingsGroup("Privacy & access") { appPermissionsSection }
+                    }
+                }
             }
-            Divider().padding(.vertical, 4)
-            donateSection
-            Divider().padding(.vertical, 4)
-            appPermissionsSection
+        case .writing:
+            VStack(spacing: 0) {
+                tabs("Writing", selection: $navigation.writingTab, values: WritingSettingsTab.allCases)
+                if navigation.writingTab == .style {
+                    StyleManagerView(store: styleStore, sourceBundleID: navigation.styleSourceBundleID)
+                } else {
+                    page {
+                        if navigation.writingTab == .provider { settingsGroup("AI connection") { providerSection } }
+                        else { settingsGroup("Writing tools") { writingOperationsSection } }
+                    }
+                }
+            }
+        case .dictation:
+            VStack(spacing: 0) {
+                tabs("Dictation", selection: $navigation.dictationTab, values: DictationSettingsTab.allCases)
+                page {
+                    if navigation.dictationTab == .recording { settingsGroup("Speech recognition") { offlineDictationSection } }
+                    else {
+                        settingsGroup("After recording") { DictationTranslationSettingsView(styleStore: styleStore) }
+                        Text("These preferences are shared by Toolbox and Hotkeys. You can also change Text or Message while recording.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        case .shortcuts:
+            page { shortcutSettings }
+        case .history:
+            page {
+                settingsGroup("Local history") { HistorySettingsView() }
+                HStack {
+                    Text("Browse, search and copy your saved text.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open Recent Results…") { FeatureWindows.shared.showHistory() }
+                }
+            }
+        case .about:
+            page {
+                settingsGroup("Textora") { systemSection }
+                settingsGroup("Help") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Getting started")
+                            Text("A short introduction to the writing tools and microphone.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Show guide…") { showsFeatureGuide = true }
+                    }
+                    Divider().padding(.vertical, 4)
+                    HStack {
+                        Text("See what changed in this version.")
+                        Spacer()
+                        Button("What’s New…") { FeatureWindows.shared.showOverview() }
+                    }
+                }
+                settingsGroup("Support") { donateSection }
+            }
         }
-        .padding(12)
+    }
+
+    private func tabs<T: RawRepresentable & Hashable>(_ label: String, selection: Binding<T>, values: [T]) -> some View where T.RawValue == String {
+        Picker(label, selection: selection) {
+            ForEach(values, id: \.self) { Text($0.rawValue).tag($0) }
+        }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 24).padding(.vertical, 16)
+    }
+
+    private func page<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18, content: content)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
+        }
+    }
+
+    private func settingsGroup<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12, content: content)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+        } label: { Text(title).font(.headline) }
+    }
+
+    private var writingOperationsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("Default rewrite action", selection: $viewModel.operation) {
+                ForEach(RewriteOperation.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Text("Fix corrects mistakes. Shorten reduces length. Formal makes the tone professional. Humanize makes wording more natural.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Picker("Translation language", selection: $viewModel.translationLanguage) {
+                ForEach(TranslationLanguage.allCases) { Text("\($0.flag) \($0.displayName)").tag($0) }
+            }
+            Divider()
+            Label("My Style works with every action", systemImage: "slider.horizontal.3").font(.subheadline.weight(.semibold))
+            Text("The action decides what changes. Your style supplies writing preferences. Fix still keeps edits minimal, Formal stays professional, and translation keeps the selected target language.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button("Configure My Style…") { navigation.openMyStyle() }
+        }
+    }
+
+    private var shortcutSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            settingsGroup("Selected text") {
+                if !viewModel.hotKeysModeEnabled {
+                    Text("Turn on Hotkeys in General → Interface to use these shortcuts.").font(.caption).foregroundStyle(.secondary)
+                    Button("Open interface settings") { navigation.generalTab = .interface; navigation.open(.general) }
+                }
+                HotKeySettingRow(title: "Rewrite selected text", hotKey: $viewModel.rewriteHotKey)
+                    .disabled(!viewModel.hotKeysModeEnabled)
+                HotKeySettingRow(title: "Translate selected text", hotKey: $viewModel.translateHotKey)
+                    .disabled(!viewModel.hotKeysModeEnabled)
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .rewrite) { Text(error).font(.caption).foregroundStyle(.red) }
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .translate) { Text(error).font(.caption).foregroundStyle(.red) }
+            }
+            settingsGroup("Dictation") {
+                HotKeySettingRow(title: "Dictate", hotKey: $viewModel.dictationHotKey)
+                    .disabled(!viewModel.offlineDictationEnabled)
+                Picker("Recording shortcut", selection: $dictationShortcutMode) {
+                    Text("Press to start and stop").tag("toggle")
+                    Text("Hold to record").tag("hold")
+                }
+                Text(dictationShortcutMode == "hold"
+                     ? "Hold the shortcut to record, then release to finish. Stop also finishes the recording."
+                     : "Press the shortcut once to start. Speak without holding any keys, then click Stop or press the shortcut again.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Enable Offline Dictation in Dictation → Recording first. Changes to shortcut behaviour apply to the next recording.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .dictate) { Text(error).font(.caption).foregroundStyle(.red) }
+            }
+            settingsGroup("History") {
+                HotKeySettingRow(title: "Recent Results", hotKey: $viewModel.historyHotKey)
+                Text("Available in both interfaces, even without an AI key. Saving history is optional.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .history) { Text(error).font(.caption).foregroundStyle(.red) }
+            }
+        }
+    }
+
+    private var launchAtLoginSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Launch Textora at login", isOn: Binding(
+                get: { viewModel.launchAtLoginEnabled },
+                set: { viewModel.setLaunchAtLoginEnabled($0) }
+            )).toggleStyle(.checkbox)
+            if viewModel.launchAtLoginRequiresApproval {
+                Text("Allow Textora in System Settings → General → Login Items to finish enabling automatic launch.")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("Open Login Items") { viewModel.openLoginItemsSettings() }
+            }
+            if !viewModel.launchAtLoginErrorText.isEmpty {
+                Text(viewModel.launchAtLoginErrorText).font(.caption).foregroundStyle(.red)
+            }
+        }
     }
 
     private var systemSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("System")
-                .font(.headline)
             HStack {
                 Text("Textora \(updates.versionDescription)")
                     .foregroundStyle(.secondary)
@@ -77,29 +354,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Toggle("Launch Textora at login", isOn: Binding(
-                get: { viewModel.launchAtLoginEnabled },
-                set: { viewModel.setLaunchAtLoginEnabled($0) }
-            ))
-            .toggleStyle(.checkbox)
 
-            if viewModel.launchAtLoginRequiresApproval {
-                HStack {
-                    Text("Allow Textora in System Settings > General > Login Items to finish enabling automatic launch.")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Spacer()
-                    Button("Open Login Items") {
-                        viewModel.openLoginItemsSettings()
-                    }
-                }
-            }
-
-            if !viewModel.launchAtLoginErrorText.isEmpty {
-                Text(viewModel.launchAtLoginErrorText)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
         }
     }
 
@@ -107,7 +362,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("Offline Dictation")
                 .font(.headline)
-            Text("Use the microphone near an active text field, or hold the shortcut. Audio is processed locally and is never saved or uploaded.")
+            Text("Click the microphone or press the dictation shortcut, then speak until Stop. You can choose hold-to-record in Shortcuts. Audio is processed locally and is never saved or uploaded.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Enable Offline Dictation", isOn: Binding(
@@ -148,14 +403,6 @@ struct ContentView: View {
                     }
                     .help("Refresh microphones")
                 }
-                HotKeySettingRow(title: "Hold to dictate", hotKey: $viewModel.dictationHotKey)
-                if let error = GlobalHotKeyManager.shared.registrationError(for: .dictate) {
-                    Text(error).font(.caption2).foregroundStyle(.red)
-                }
-                Divider().padding(.vertical, 4)
-                Text("After recording").font(.subheadline.weight(.semibold))
-                DictationTranslationSettingsView()
-                Divider().padding(.vertical, 4)
                 HStack(spacing: 12) {
                     Link("Engine license (MIT)", destination: URL(string: "https://github.com/handy-computer/transcribe.cpp/blob/main/LICENSE")!)
                     Link("Model attribution (CC BY 4.0)", destination: URL(string: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3")!)
@@ -197,12 +444,7 @@ struct ContentView: View {
 
     private var providerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Settings")
-                .font(.headline)
             Text("Textora is free and works with your own AI key")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("Select text to open the Textora toolbar with Fix, Shorten, Formal, Humanize, and Translate.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Provider", selection: $viewModel.provider) {
@@ -217,6 +459,12 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             credentialFields
             providerSetupHelp
+            if !viewModel.errorText.isEmpty {
+                Text(viewModel.errorText).font(.caption).foregroundStyle(.red)
+                Button("Retry saving") {
+                    if viewModel.saveSettings() { viewModel.errorText = "" }
+                }
+            }
         }
     }
 
@@ -260,12 +508,10 @@ struct ContentView: View {
 
     private var interfaceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Interface")
-                .font(.headline)
             Text("Choose Toolbox or Hotkeys.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Toggle("SmartAI — recommend a rewrite mode", isOn: $smartAIEnabled)
+            Toggle("SmartAI - recommend a rewrite mode", isOn: $smartAIEnabled)
             InterfaceModeCards(
                 toolboxEnabled: settingsModeBinding(.toolbox),
                 hotKeysEnabled: settingsModeBinding(.hotKeys),
@@ -273,30 +519,7 @@ struct ContentView: View {
                 compact: true
             )
 
-            HStack(spacing: 12) {
-                Picker("Rewrite profile", selection: $viewModel.operation) {
-                    ForEach(RewriteOperation.allCases) { operation in
-                        Text(operation.rawValue).tag(operation)
-                    }
-                }
-                Picker("Translation language", selection: $viewModel.translationLanguage) {
-                    ForEach(TranslationLanguage.allCases) { language in
-                        Text("\(language.flag) \(language.displayName)").tag(language)
-                    }
-                }
-            }
 
-            if viewModel.hotKeysModeEnabled {
-                VStack(alignment: .leading, spacing: 7) {
-                    HotKeySettingRow(title: "Rewrite selected text", hotKey: $viewModel.rewriteHotKey)
-                    HotKeySettingRow(title: "Translate selected text", hotKey: $viewModel.translateHotKey)
-                }
-                if let error = GlobalHotKeyManager.shared.registrationError {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
-            }
         }
     }
 
@@ -411,8 +634,6 @@ struct ContentView: View {
 
     private var donateSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Support project")
-                .font(.headline)
             Text("Textora is free and open-source. If it helps you, you can support development with a donation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -646,7 +867,7 @@ private struct InterfaceModeCard: View {
         .padding(7)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.black.opacity(0.24))
+                .fill(Color(red: 0.10, green: 0.11, blue: 0.13))
         )
     }
 
@@ -678,7 +899,7 @@ private struct InterfaceModeCard: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.black.opacity(0.24))
+                .fill(Color(red: 0.10, green: 0.11, blue: 0.13))
         )
     }
 
@@ -824,9 +1045,10 @@ struct OnboardingView: View {
                 }
             case 5:
                 VStack(alignment: .leading, spacing: 14) {
+                    DictationOutputSettingsView()
                     Label("Offline Dictation", systemImage: "waveform")
                         .font(.system(size: 20, weight: .bold))
-                    Text("In Toolbox mode, use the microphone near an active field. In Hotkeys mode, hold ⌥⌘S and release to insert the transcription.")
+                    Text("Click the microphone near a field or press ⌥⌘S to start. Speak without holding a key, then click Stop or press the shortcut again. Hold-to-record is available in Settings → Shortcuts.")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                     HStack {
@@ -845,6 +1067,17 @@ struct OnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            case 6:
+                Text("My Style").font(.title2.bold())
+                Text("Create profiles such as Work and Personal. Apply one everywhere or assign different profiles to your applications.")
+                Text(StyleProfile.everyday.description).font(.callout).foregroundStyle(.secondary)
+                Text("Example: Hi Rob, I’m running a little late. I’ll finish the task tomorrow morning.")
+                Button("Edit the example profile") { FeatureWindows.shared.showStyle() }
+                StyleQuickControls(bundleID: nil)
+            case 7:
+                Text("Recent Results").font(.title2.bold())
+                Text("Recover original and final text, including dictation. Saving is optional and audio is never saved.")
+                HistorySettingsView()
             default:
                 Text("Done. Textora will request only the permissions needed for the features you enabled.")
                     .font(.system(size: 14))
@@ -857,7 +1090,7 @@ struct OnboardingView: View {
             Divider()
 
             HStack(spacing: 8) {
-                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 6 {
+                if viewModel.onboardingStep > 1 && viewModel.onboardingStep < 8 {
                     Button("Back") {
                         viewModel.moveOnboardingBack()
                     }
@@ -903,6 +1136,8 @@ struct OnboardingView: View {
                         viewModel.moveOnboardingNext()
                     }
                     .buttonStyle(SecondaryButtonStyle())
+                } else if viewModel.onboardingStep == 6 || viewModel.onboardingStep == 7 {
+                    Button("Continue") { viewModel.moveOnboardingNext() }.buttonStyle(PrimaryButtonStyle())
                 } else {
                     Button("Finish") {
                         onFinish()
@@ -916,7 +1151,7 @@ struct OnboardingView: View {
                     .focusEffectDisabled()
                 }
                 Spacer()
-                if viewModel.onboardingStep < 6 {
+                if viewModel.onboardingStep < 8 {
                     Button("Skip for now") {
                         viewModel.skipOnboardingForNow()
                         onClose()
@@ -950,7 +1185,7 @@ struct OnboardingView: View {
                 Text("Textora Quick setup")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.primary)
-                Text("Step \(viewModel.onboardingStep) of 6")
+                Text("Step \(viewModel.onboardingStep) of 8")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -969,7 +1204,7 @@ struct OnboardingView: View {
     }
     
     private var stepBadge: some View {
-        Text("\(viewModel.onboardingStep)/6")
+        Text("\(viewModel.onboardingStep)/8")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 8)
@@ -1104,7 +1339,7 @@ private struct PrimaryButtonStyle: ButtonStyle {
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(
+            .background {
                 LinearGradient(
                     colors: [
                         Color(red: 62 / 255, green: 123 / 255, blue: 1),
@@ -1114,7 +1349,7 @@ private struct PrimaryButtonStyle: ButtonStyle {
                     endPoint: .trailing
                 )
                 .opacity(configuration.isPressed ? 0.88 : 1)
-            )
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .focusEffectDisabled()
     }

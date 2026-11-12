@@ -22,3 +22,10 @@ tokens.json
 secrets.json
 Secrets.xcconfig
 *.private.xcconfig
+
+# Version the public release tooling; other local scripts remain ignored.
+!/Scripts/
+/Scripts/*
+!/Scripts/prepare-update.sh
+!/Scripts/release-notes.py
+!/Scripts/test_release_notes.py

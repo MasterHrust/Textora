@@ -23,13 +23,19 @@ enum DictationMicActivityState: Equatable {
         default: return true
         }
     }
+    var hasRecordingControls: Bool {
+        switch self { case .preparing, .recording: return true; default: return false }
+    }
 }
 
 @MainActor
 final class DictationMicViewModel: ObservableObject {
     @Published var state: DictationMicActivityState = .idle
-    @Published var level: Float = 0
-    @Published var elapsed: TimeInterval = 0
+    let meter = RecordingMeterModel()
+    let recordingControls = RecordingControlsModel()
+    var level: Float { get { meter.level } set { meter.level = newValue } }
+    var elapsed: TimeInterval { get { meter.elapsed } set { meter.elapsed = newValue } }
+    @Published var isCopyOnly = false
     @Published var showsDragHandle = false
     @Published var isTranslationSettingsPresented = false
     @Published var microphoneTip: MicrophoneTip?
@@ -47,7 +53,8 @@ final class DictationMicController {
     }
 
     private var expandedSize: CGSize {
-        CGSize(width: mode == .toolbox ? 332 : 300, height: 66)
+        if viewModel.state.hasRecordingControls { return RecordingCapsuleLayout.size(expanded: viewModel.recordingControls.isExpanded) }
+        return CGSize(width: mode == .toolbox ? 332 : 300, height: 66)
     }
     private let textAccess: TextAccessService
     private let onStart: () -> Void
@@ -79,6 +86,12 @@ final class DictationMicController {
         self.textAccess = textAccess
         self.onStart = onStart
         self.onStop = onStop
+        viewModel.recordingControls.onExpandedChanged = { [weak self] _ in
+            guard let self, self.isRunning,
+                  self.viewModel.state.hasRecordingControls,
+                  let collapsed = self.lastCollapsedFrame else { return }
+            self.applyFrame(self.frame(for: self.viewModel.state, collapsedFrame: collapsed), animated: false)
+        }
     }
 
     deinit {
@@ -114,7 +127,11 @@ final class DictationMicController {
         timer?.invalidate()
         timer = nil
         viewModel.state = .idle
+        viewModel.recordingControls.isExpanded = false
+        viewModel.isCopyOnly = false
         resetPlacementStability()
+        panel?.makeFirstResponder(nil)
+        if panel?.isKeyWindow == true { panel?.resignKey() }
         panel?.orderOut(nil)
     }
 
@@ -133,18 +150,27 @@ final class DictationMicController {
     }
 
     func setActivityState(_ state: DictationMicActivityState) {
+        let previousState = viewModel.state
+        if previousState.hasRecordingControls && !state.hasRecordingControls {
+            panel?.makeFirstResponder(nil)
+            if panel?.isKeyWindow == true { panel?.resignKey() }
+        }
         if state.isExpanded || state == .hidden {
             viewModel.microphoneTip = nil
             hideTranslationControlsTask?.cancel()
             viewModel.showsTranslationControls = false
         }
         if state.isExpanded || state == .hidden { viewModel.isTranslationSettingsPresented = false }
-        viewModel.state = state
+        if viewModel.state != state { viewModel.state = state }
         panel?.allowsDragging = mode == .toolbox
         panel?.usesNativeWindowDragging = false
+        if state.hasRecordingControls { panel?.allowsKeyboardInteraction = true }
+        else {
+            panel?.allowsKeyboardInteraction = false
+            viewModel.recordingControls.isExpanded = false
+        }
         if case .recording = state {
-            viewModel.elapsed = 0
-            viewModel.level = 0
+            if previousState != state { viewModel.elapsed = 0; viewModel.level = 0 }
         }
         guard isRunning, let panel else { return }
         if state == .hidden {
@@ -165,6 +191,10 @@ final class DictationMicController {
 
     func updateElapsed(_ elapsed: TimeInterval) {
         viewModel.elapsed = max(0, elapsed)
+    }
+
+    func setCopyOnly(_ value: Bool) {
+        if viewModel.isCopyOnly != value { viewModel.isCopyOnly = value }
     }
 
     private func createPanel() {
@@ -198,7 +228,8 @@ final class DictationMicController {
             return point.x >= bounds.maxX - handleHitWidth
         }
         let hostingView = NSHostingView(rootView: DictationMicView(model: viewModel,
-            onHoverChanged: { [weak self] inside in self?.translationHoverChanged(inside) }))
+            onHoverChanged: { [weak self] inside in self?.translationHoverChanged(inside) },
+            onStop: { [weak self] in self?.onStop() }))
         // The controller owns the window size; SwiftUI's ideal size must not resize
         // the panel independently when the mode or activity state changes.
         hostingView.sizingOptions = []
@@ -211,11 +242,9 @@ final class DictationMicController {
         panel.onClicked = { [weak self] in
             guard let self, self.isRunning, !self.isExternallySuppressed else { return }
             switch self.viewModel.state {
-            case .preparing, .recording:
-                self.onStop()
             case .idle, .success, .message:
                 self.onStart()
-            case .transcribing, .hidden:
+            case .preparing, .recording, .transcribing, .hidden:
                 break
             }
         }
@@ -280,6 +309,12 @@ final class DictationMicController {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // Recording is pinned to its captured target. Choosing our controls
+                // or switching apps must not finish the session or hide the controls.
+                switch self.viewModel.state {
+                case .recording, .preparing: return
+                default: break
+                }
                 // The popover may activate Textora while the source editor loses
                 // AX focus. This is interaction with our UI, not a new target app.
                 if (self.viewModel.isTranslationSettingsPresented || self.viewModel.microphoneTip != nil),
@@ -290,9 +325,6 @@ final class DictationMicController {
                 self.viewModel.microphoneTip = nil
                 self.hideTranslationControlsTask?.cancel()
                 self.viewModel.showsTranslationControls = false
-                if self.viewModel.state.isExpanded {
-                    self.onStop()
-                }
                 self.panel?.orderOut(nil)
                 Task { await self.refresh() }
             }
@@ -301,7 +333,7 @@ final class DictationMicController {
 
     private func startTimerIfNeeded() {
         guard timer == nil else { return }
-        let timer = Timer(timeInterval: 0.16, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -314,6 +346,7 @@ final class DictationMicController {
         defer { refreshInFlight = false }
         // Check before permission/focus calls: even these can block the drag's main run loop.
         guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
+        guard BackgroundTextPollingGate.shared.allowsPolling() else { return }
         guard isRunning,
               !isExternallySuppressed,
               viewModel.state != .hidden,
@@ -337,7 +370,7 @@ final class DictationMicController {
         }
 
         let placement = await SelectionTextWorker.shared.microphonePlacement()
-        guard isRunning, !isExternallySuppressed, !viewModel.state.isExpanded,
+        guard BackgroundTextPollingGate.shared.allowsPolling(), isRunning, !isExternallySuppressed, !viewModel.state.isExpanded,
               !viewModel.isTranslationSettingsPresented,
               !viewModel.showsTranslationControls,
               !panel.isPointerTrackingInPanel else { return }
@@ -579,30 +612,26 @@ enum DictationMicLayout {
 struct DictationMicView: View {
     @ObservedObject var model: DictationMicViewModel
     let onHoverChanged: (Bool) -> Void
+    var onStop: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("microphone.introduction.v3.completed") private var introductionCompleted = false
     @State private var introductionStarted = false
 
     var body: some View {
         Group {
-            switch model.state {
-            case .idle, .hidden:
-                microphoneButton
-            case .preparing:
-                expandedStatus("Preparing", systemImage: "mic.fill", color: .blue, spins: true)
-            case .recording(let language):
-                recordingView(language: language)
-            case .transcribing:
-                expandedStatus("Transcribing", systemImage: "waveform", color: .blue, spins: true)
-            case .success:
-                expandedStatus("Inserted", systemImage: "checkmark.circle.fill", color: .green, spins: false)
-            case .message(let text, let isError):
-                expandedStatus(
-                    text,
-                    systemImage: isError ? "exclamationmark.circle.fill" : "info.circle.fill",
-                    color: isError ? .red : .blue,
-                    spins: false
-                )
+            if model.state.hasRecordingControls { recordingView }
+            else {
+                switch model.state {
+                case .preparing, .recording: EmptyView()
+                case .idle, .hidden: microphoneButton
+                case .transcribing:
+                    expandedStatus("Transcribing", systemImage: "waveform", color: .blue, spins: true)
+                case .success:
+                    expandedStatus("Inserted", systemImage: "checkmark.circle.fill", color: .green, spins: false)
+                case .message(let text, let isError):
+                    expandedStatus(text, systemImage: isError ? "exclamationmark.circle.fill" : "info.circle.fill",
+                                   color: isError ? .red : .blue, spins: false)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -656,45 +685,21 @@ struct DictationMicView: View {
         .animation(.easeInOut(duration: 0.22), value: model.showsTranslationControls)
     }
 
-    private func recordingView(language: SpeechLanguage) -> some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(.red)
-                .frame(width: 9, height: 9)
-                .shadow(color: .red.opacity(0.58), radius: 5)
-            SmoothMicWaveform(level: model.level)
-                .frame(width: 82, height: 30)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Listening")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(durationText)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 2)
-            stopButton
-            if model.showsDragHandle {
-                dragHandle
-            }
-        }
-        .padding(.leading, 15)
-        .padding(.trailing, 7)
-        .frame(width: expandedInnerWidth, height: 58)
-        .background(expandedBackground)
-        .padding(4)
-        .frame(width: expandedWidth, height: 66)
-        .contentShape(Capsule())
-        .help("Click again to stop recording")
+    private var recordingView: some View {
+        RecordingCapsuleView(meter: model.meter, options: model.recordingControls,
+                             onStop: onStop, showsDragHandle: model.showsDragHandle,
+                             isCopyOnly: model.isCopyOnly, isPreparing: model.state == .preparing)
     }
 
     private var stopButton: some View {
-        ZStack {
+        Button(action: onStop) { ZStack {
             Circle().fill(Color.red.opacity(0.16))
             Image(systemName: "stop.fill")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.red)
         }
         .frame(width: 38, height: 38)
+        }.buttonStyle(.plain).help("Stop recording").accessibilityLabel("Stop recording")
     }
 
     private func expandedStatus(_ title: String, systemImage: String, color: Color, spins: Bool) -> some View {
@@ -767,7 +772,10 @@ struct DictationMicView: View {
     }
 
     private var collapsedWidth: CGFloat { model.showsTranslationControls ? 250 : 84 }
-    private var expandedWidth: CGFloat { model.showsDragHandle ? 332 : 300 }
+    private var expandedWidth: CGFloat {
+        if case .recording = model.state { return RecordingCapsuleLayout.width }
+        return model.showsDragHandle ? 332 : 300
+    }
     private var expandedInnerWidth: CGFloat { expandedWidth - 8 }
 }
 

@@ -13,6 +13,7 @@ enum TextoraHotKeyAction: UInt32 {
     case rewrite = 1
     case translate = 2
     case dictate = 3
+    case history = 4
 }
 
 enum TextoraHotKeyPhase {
@@ -50,6 +51,7 @@ struct TextoraHotKey: Equatable {
 }
 
 enum SelectionAssistantSettings {
+    static let historyShortcutChanged = Notification.Name("Textora.historyShortcutChanged")
     static let settingsDidChangeNotification = Notification.Name("SelectionAssistant.settingsDidChange")
 
     enum Keys {
@@ -71,29 +73,36 @@ enum SelectionAssistantSettings {
         static let translateHotKeyCode = "hotkey.translate.keyCode"
         static let translateHotKeyModifiers = "hotkey.translate.modifiers"
         static let translateHotKeyEnabled = "hotkey.translate.enabled"
+        static let historyHotKeyCode = "hotkey.history.keyCode"
+        static let historyHotKeyModifiers = "hotkey.history.modifiers"
+        static let historyHotKeyEnabled = "hotkey.history.enabled"
         static let dictateHotKeyCode = "hotkey.dictate.keyCode"
         static let dictateHotKeyModifiers = "hotkey.dictate.modifiers"
         static let dictateHotKeyEnabled = "hotkey.dictate.enabled"
     }
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
-        // Retire the legacy mode before earlier migrations inspect it.
-        if defaults.bool(forKey: Keys.floatingIconEnabled) {
-            defaults.set(false, forKey: Keys.floatingIconEnabled)
-            if !defaults.bool(forKey: Keys.hotKeysModeEnabled) {
-                defaults.set(true, forKey: Keys.toolboxEnabled)
-            }
-        }
-        let existingHotKeysMode = defaults.bool(forKey: Keys.hotKeysModeEnabled)
+        // Read saved choices before registering fallback values. New defaults
+        // must not win over an explicit choice from an earlier release.
+        let savedToolbox = defaults.object(forKey: Keys.toolboxEnabled) as? Bool
+        let savedHotKeys = defaults.object(forKey: Keys.hotKeysModeEnabled) as? Bool
+        let legacyFloating = defaults.bool(forKey: Keys.floatingIconEnabled)
         let legacyActivationMode = defaults.string(forKey: Keys.activationMode)
+        if defaults.object(forKey: Keys.translationLanguage) == nil,
+           let legacy = defaults.string(forKey: "inlineTranslate.lastTargetLanguage"),
+           let language = TranslationLanguage.allCases.first(where: {
+               $0.displayName.caseInsensitiveCompare(legacy) == .orderedSame
+           }) {
+            defaults.set(language.rawValue, forKey: Keys.translationLanguage)
+        }
+        // These migrated keys must stay out of NSRegistrationDomain: its
+        // process-wide fallbacks mask whether an older installation saved them.
+        if defaults.object(forKey: Keys.translationLanguage) == nil {
+            defaults.set(TranslationLanguage.english.rawValue, forKey: Keys.translationLanguage)
+        }
         defaults.register(defaults: [
             Keys.enabled: true,
-            Keys.toolboxEnabled: true,
-            Keys.floatingIconEnabled: false,
-            Keys.hotKeysModeEnabled: false,
             Keys.operation: RewriteOperation.fixGrammar.rawValue,
-            Keys.activationMode: SelectionActivationMode.automatic.rawValue,
-            Keys.translationLanguage: "english",
             Keys.rewriteHotKeyCode: 15,
             Keys.rewriteHotKeyModifiers: UInt32(cmdKey | optionKey),
             Keys.rewriteHotKeyEnabled: true,
@@ -102,68 +111,28 @@ enum SelectionAssistantSettings {
             Keys.translateHotKeyEnabled: true,
             Keys.dictateHotKeyCode: 1,
             Keys.dictateHotKeyModifiers: UInt32(cmdKey | optionKey),
-            Keys.dictateHotKeyEnabled: true
+            Keys.dictateHotKeyEnabled: true,
+            Keys.historyHotKeyCode: 4,
+            Keys.historyHotKeyModifiers: UInt32(controlKey | optionKey | cmdKey),
+            Keys.historyHotKeyEnabled: true
         ])
-        if !defaults.bool(forKey: Keys.hotKeysModeMigration) {
-            let migratedValue = existingHotKeysMode
-                || legacyActivationMode == SelectionActivationMode.hotkeyOnly.rawValue
-            defaults.set(migratedValue, forKey: Keys.hotKeysModeEnabled)
-            defaults.set(true, forKey: Keys.hotKeysModeMigration)
-        }
-        if !defaults.bool(forKey: Keys.interfaceModeMigration) {
-            let toolboxEnabled = defaults.bool(forKey: Keys.toolboxEnabled)
-            let floatingIconEnabled = defaults.bool(forKey: Keys.floatingIconEnabled)
-            let hotKeysEnabled = defaults.bool(forKey: Keys.hotKeysModeEnabled)
-            if toolboxEnabled && floatingIconEnabled {
-                defaults.set(false, forKey: Keys.floatingIconEnabled)
-            } else if !toolboxEnabled && !floatingIconEnabled && !hotKeysEnabled {
-                defaults.set(true, forKey: Keys.toolboxEnabled)
-            }
-            defaults.set(true, forKey: Keys.interfaceModeMigration)
-        }
-        if !defaults.bool(forKey: Keys.exclusiveInterfaceModeMigration) {
-            let toolboxEnabled = defaults.bool(forKey: Keys.toolboxEnabled)
-            let floatingIconEnabled = defaults.bool(forKey: Keys.floatingIconEnabled)
-            let hotKeysEnabled = defaults.bool(forKey: Keys.hotKeysModeEnabled)
-            if legacyActivationMode == SelectionActivationMode.hotkeyOnly.rawValue, hotKeysEnabled {
-                persistInterfaceModes(toolbox: false, floatingIcon: false, hotKeys: true, defaults: defaults)
-            } else if toolboxEnabled {
-                persistInterfaceModes(toolbox: true, floatingIcon: false, hotKeys: false, defaults: defaults)
-            } else if floatingIconEnabled {
-                persistInterfaceModes(toolbox: false, floatingIcon: true, hotKeys: false, defaults: defaults)
-            } else if hotKeysEnabled {
+        if !defaults.bool(forKey: Keys.exclusiveInterfaceModeMigration) || legacyFloating {
+            let hotKeys = savedHotKeys ?? (legacyActivationMode == SelectionActivationMode.hotkeyOnly.rawValue)
+            let toolbox = savedToolbox ?? !hotKeys
+            // Retired Floating Icon maps to Toolbox. Existing valid selections
+            // take precedence over the legacy activation flag.
+            if hotKeys && (!toolbox || legacyActivationMode == SelectionActivationMode.hotkeyOnly.rawValue) {
                 persistInterfaceModes(toolbox: false, floatingIcon: false, hotKeys: true, defaults: defaults)
             } else {
                 persistInterfaceModes(toolbox: true, floatingIcon: false, hotKeys: false, defaults: defaults)
             }
-            defaults.set(true, forKey: Keys.exclusiveInterfaceModeMigration)
         }
-        if !defaults.bool(forKey: Keys.rewriteHotKeyDefaultRMigration) {
-            let isLegacyDefault = defaults.integer(forKey: Keys.rewriteHotKeyCode) == 7
-                && UInt32(defaults.integer(forKey: Keys.rewriteHotKeyModifiers)) == UInt32(cmdKey | optionKey)
-            if isLegacyDefault {
-                defaults.set(15, forKey: Keys.rewriteHotKeyCode)
-            }
-            defaults.set(true, forKey: Keys.rewriteHotKeyDefaultRMigration)
-        }
-        if !defaults.bool(forKey: Keys.rewriteHotKeyDefaultRMigrationV2) {
-            let keyCode = defaults.integer(forKey: Keys.rewriteHotKeyCode)
-            let modifiers = UInt32(defaults.integer(forKey: Keys.rewriteHotKeyModifiers))
-            let legacyModifiers = [UInt32(cmdKey | optionKey), UInt32(cmdKey | controlKey)]
-            if keyCode == 7, legacyModifiers.contains(modifiers) {
-                defaults.set(15, forKey: Keys.rewriteHotKeyCode)
-                defaults.set(UInt32(cmdKey | optionKey), forKey: Keys.rewriteHotKeyModifiers)
-            }
-            defaults.set(true, forKey: Keys.rewriteHotKeyDefaultRMigrationV2)
-        }
-        if defaults.object(forKey: Keys.enabled) as? Bool != true {
-            defaults.set(true, forKey: Keys.enabled)
-        }
-        if defaults.object(forKey: Keys.toolboxEnabled) == nil {
-            defaults.set(true, forKey: Keys.toolboxEnabled)
-        }
-        if defaults.object(forKey: Keys.floatingIconEnabled) == nil {
-            defaults.set(false, forKey: Keys.floatingIconEnabled)
+        // Keep the historical markers for compatibility, but never reinterpret
+        // a saved shortcut as a default: it may be the user's deliberate choice.
+        for key in [Keys.hotKeysModeMigration, Keys.interfaceModeMigration,
+                    Keys.exclusiveInterfaceModeMigration, Keys.rewriteHotKeyDefaultRMigration,
+                    Keys.rewriteHotKeyDefaultRMigrationV2] {
+            defaults.set(true, forKey: key)
         }
     }
 
@@ -235,6 +204,8 @@ enum SelectionAssistantSettings {
         defaults.set(toolbox, forKey: Keys.toolboxEnabled)
         defaults.set(floatingIcon, forKey: Keys.floatingIconEnabled)
         defaults.set(hotKeys, forKey: Keys.hotKeysModeEnabled)
+        defaults.set(hotKeys && !toolbox ? SelectionActivationMode.hotkeyOnly.rawValue
+                     : SelectionActivationMode.automatic.rawValue, forKey: Keys.activationMode)
     }
 
     static func activationMode(defaults: UserDefaults = .standard) -> SelectionActivationMode {
@@ -262,7 +233,7 @@ enum SelectionAssistantSettings {
         defaults.set(hotKey.keyCode, forKey: prefix.0)
         defaults.set(hotKey.modifiers, forKey: prefix.1)
         defaults.set(hotKey.isEnabled, forKey: prefix.2)
-        NotificationCenter.default.post(name: settingsDidChangeNotification, object: nil)
+        NotificationCenter.default.post(name: action == .history ? historyShortcutChanged : settingsDidChangeNotification, object: nil)
     }
 
     private static func hotKeyKeys(for action: TextoraHotKeyAction) -> (String, String, String) {
@@ -271,6 +242,8 @@ enum SelectionAssistantSettings {
             return (Keys.rewriteHotKeyCode, Keys.rewriteHotKeyModifiers, Keys.rewriteHotKeyEnabled)
         case .translate:
             return (Keys.translateHotKeyCode, Keys.translateHotKeyModifiers, Keys.translateHotKeyEnabled)
+        case .history:
+            return (Keys.historyHotKeyCode, Keys.historyHotKeyModifiers, Keys.historyHotKeyEnabled)
         case .dictate:
             return (Keys.dictateHotKeyCode, Keys.dictateHotKeyModifiers, Keys.dictateHotKeyEnabled)
         }
@@ -292,7 +265,8 @@ final class GlobalHotKeyManager {
         stop()
         let cloudHotKeysEnabled = SelectionAssistantSettings.hotKeysModeEnabled()
         let dictationEnabled = OfflineDictationSettings.isEnabled
-        guard cloudHotKeysEnabled || dictationEnabled else { return }
+        let historyEnabled = SelectionAssistantSettings.hotKey(for: .history).isEnabled
+        guard cloudHotKeysEnabled || dictationEnabled || historyEnabled else { return }
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
@@ -318,6 +292,7 @@ final class GlobalHotKeyManager {
         registrationErrors.removeAll()
         var actions: [TextoraHotKeyAction] = cloudHotKeysEnabled ? [.rewrite, .translate] : []
         if dictationEnabled { actions.append(.dictate) }
+        if historyEnabled { actions.append(.history) }
         for action in actions {
             let shortcut = SelectionAssistantSettings.hotKey(for: action)
             guard shortcut.isEnabled else { continue }

@@ -23,6 +23,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         onStop: { [weak self] in self?.dictationController.stopFromUI() }
     )
     private var selectionAssistantSettingsObserver: NSObjectProtocol?
+    private var historyShortcutObserver: NSObjectProtocol?
     private var offlineDictationSettingsObserver: NSObjectProtocol?
     private var accessibilityPermissionObserver: NSObjectProtocol?
     private var primaryInteractionRetryTask: DispatchWorkItem?
@@ -61,6 +62,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func start() {
+        RecentResults.shared.start()
+        if historyShortcutObserver == nil {
+            historyShortcutObserver = NotificationCenter.default.addObserver(forName: SelectionAssistantSettings.historyShortcutChanged, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard self?.isDictationInteractionActive != true else { return }
+                    GlobalHotKeyManager.shared.reload()
+                }
+            }
+        }
         removeObsoleteTextoraDiagnostics()
         AccessibilityPermissionMonitor.shared.start()
         installAccessibilityPermissionObserverIfNeeded()
@@ -80,7 +90,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.handleSelectionAssistantConsentRequired(anchor: anchor, bundleID: bundleID)
         }
         dictationController.onNeedsAccessibility = { [weak self] in self?.showAccessibilityWizardDeferred() }
-        dictationController.onNeedsModelSettings = { [weak self] in self?.showSettingsWindow() }
+        dictationController.onNeedsModelSettings = { [weak self] in
+            SettingsNavigation.shared.dictationTab = .recording
+            self?.showSettingsWindow(section: .dictation)
+        }
         dictationController.onConsentRequired = { [weak self] anchor, bundleID in
             self?.handleDictationConsentRequired(anchor: anchor, bundleID: bundleID)
         }
@@ -95,6 +108,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         dictationController.onMiniMicrophoneElapsedChanged = { [weak self] elapsed in
             self?.dictationMicController.updateElapsed(elapsed)
+        }
+        dictationController.onDestinationChanged = { [weak self] copyOnly in
+            self?.dictationMicController.setCopyOnly(copyOnly)
         }
         GlobalHotKeyManager.shared.onEvent = { [weak self] event in
             self?.handleGlobalHotKey(event)
@@ -118,6 +134,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         configurePrimaryInteractionMode()
         schedulePrimaryInteractionRetry(reason: "launchWarmup")
         showOnboardingIfNeededOnLaunch()
+        presentReleaseNotesIfNeeded()
+    }
+
+    private func presentReleaseNotesIfNeeded() {
+        guard onboardingWindow?.isVisible != true, accessibilityWizardWindow?.isVisible != true,
+              ReleaseNotesPresentation.shouldPresent(notes: ReleaseNotes.current(),
+                  currentVersion: ReleaseNotes.currentVersion(),
+                  onboardingComplete: UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey)) else { return }
+        DispatchQueue.main.async { FeatureWindows.shared.showOverview() }
     }
 
     private func installOfflineDictationSettingsObserverIfNeeded() {
@@ -169,6 +194,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             configurePrimaryInteractionMode()
             scheduleLaunchWarmupRetry(reason: "accessibilityGranted")
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
+            presentReleaseNotesIfNeeded()
         } else {
             selectionAssistant.stop()
             dictationMicController.stop()
@@ -263,6 +289,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func handleGlobalHotKey(_ event: TextoraHotKeyEvent) {
+        if event.action == .history {
+            if event.phase == .pressed { FeatureWindows.shared.showHistory() }
+            return
+        }
         if event.action == .dictate {
             dictationController.handle(event.phase)
             return
@@ -421,12 +451,26 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSWindow) === settingsWindow {
+            settingsViewModel?.flushPendingSave()
+            FeatureWindows.shared.settingsDidClose()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let returnsToOnboarding = self.onboardingWindow?.isVisible == true
+                self.selectionAssistant.resumeAfterStyleEditing(restorePanel: !returnsToOnboarding)
+                if returnsToOnboarding {
+                    self.onboardingWindow?.level = .floating
+                    self.onboardingWindow?.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
         if (notification.object as? NSWindow) === accessibilityWizardWindow {
             accessibilityWizardWindow = nil
             KeychainHelper.migrateIfNeeded()
             KeychainHelper.warmUpCache()
             configurePrimaryInteractionMode()
             showOnboardingIfNeededOnLaunch(afterAccessibility: true)
+            presentReleaseNotesIfNeeded()
             return
         }
         if (notification.object as? NSWindow) === onboardingWindow {
@@ -492,29 +536,50 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         handleSelectionAssistantConsentRequired(anchor: anchor, bundleID: bundleID)
     }
 
-    func showSettingsWindow() {
+    var isSettingsWindowVisible: Bool { settingsWindow?.isVisible == true }
+
+    func closeSettingsWindow() { settingsWindow?.close() }
+
+    func showSettingsWindow(section: SettingsSection? = nil, sourceBundleID: String? = nil) {
+        let navigation = SettingsNavigation.shared
+        if let section { navigation.section = section }
+        if let sourceBundleID { navigation.styleSourceBundleID = sourceBundleID }
+        else if !isSettingsWindowVisible { navigation.styleSourceBundleID = nil }
         if settingsWindow == nil {
             let vm = AppViewModel()
             settingsViewModel = vm
             let root = ContentView(viewModel: vm)
             let hosting = NSHostingView(rootView: root)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
+                contentRect: NSRect(x: 0, y: 0, width: 940, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = "Textora Settings"
+            window.minSize = NSSize(width: 840, height: 600)
+            window.delegate = self
+            window.setFrameAutosaveName("TextoraSettings.v2")
             // Default true would release the window when closed → dangling ref / crash on second open.
             window.isReleasedWhenClosed = false
             window.center()
             window.contentView = hosting
             settingsWindow = window
         } else {
+            settingsViewModel?.flushPendingSave()
             settingsViewModel?.reloadFromUserDefaults()
         }
+        if navigation.section == .writing && navigation.writingTab == .style || FeatureWindows.shared.isStyleEditorOpen {
+            selectionAssistant.suspendForStyleEditing()
+        }
+        if onboardingWindow?.isVisible == true { onboardingWindow?.level = .normal }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func settingsNavigationDidChange() {
+        guard isSettingsWindowVisible, FeatureWindows.shared.isStyleEditorOpen else { return }
+        selectionAssistant.suspendForStyleEditing()
     }
 
     func showQuickSetupWindow() {
@@ -552,6 +617,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 onFinish: { [weak self] in
                     guard let self else { return }
                     guard self.onboardingViewModel?.completeOnboarding() == true else { return }
+                    ReleaseNotesPresentation.markSeen(version: ReleaseNotes.currentVersion())
                     self.closeOnboardingWindow()
                     let needsAccessibility = self.hasAnyConfiguredKey() || OfflineDictationSettings.isEnabled
                     if needsAccessibility && (self.shouldOpenAccessibilityAfterOnboarding || !self.textAccess.hasAccessibilityPermission()) {

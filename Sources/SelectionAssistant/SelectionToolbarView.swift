@@ -4,7 +4,6 @@ import SwiftUI
 struct SelectionToolbarView: View {
     @ObservedObject var viewModel: SelectionAssistantViewModel
     let onApply: () -> Void
-    let onTranslationCopied: () -> Void
     let onClose: () -> Void
 
     @State private var isLogoHovering = false
@@ -24,7 +23,7 @@ struct SelectionToolbarView: View {
     static let tooltipTopReserve: CGFloat = 0
 
     static func hotKeyPanelHeight(for viewModel: SelectionAssistantViewModel) -> CGFloat {
-        if viewModel.status == .meaningUnclear { return 510 }
+        if viewModel.status == .meaningUnclear { return 538 }
         let resultText = viewModel.presentationMode == .hotKeyTranslate
             ? viewModel.translatedText
             : viewModel.rewrittenText
@@ -47,7 +46,7 @@ struct SelectionToolbarView: View {
             minimum: 80,
             maximum: 230
         )
-        return min(max(95 + originalHeight + resultHeight, 240), 483)
+        return min(max(123 + originalHeight + resultHeight, 268), 511)
     }
 
     private static func hotKeyCardHeight(
@@ -78,6 +77,7 @@ struct SelectionToolbarView: View {
         ZStack(alignment: .topLeading) {
             VStack(alignment: .leading, spacing: 7) {
                 topRow
+                StyleQuickControls(bundleID: viewModel.sourceBundleID).frame(height: 22)
 
                 if viewModel.isLanguagePickerExpanded {
                     compactLanguageDropdown
@@ -103,6 +103,7 @@ struct SelectionToolbarView: View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 0) {
                 hotKeyHeader
+                StyleQuickControls(bundleID: viewModel.sourceBundleID).padding(.horizontal, 16).frame(height: 28)
 
                 Rectangle()
                     .fill(Color.white.opacity(0.08))
@@ -221,6 +222,7 @@ struct SelectionToolbarView: View {
         }
         .buttonStyle(.plain)
         .help(viewModel.presentationMode == .hotKeyTranslate ? "Translation language" : "Rewrite profile")
+        .disabled(viewModel.isApplying)
     }
 
     private var hotKeyPickerDropdown: some View {
@@ -234,8 +236,7 @@ struct SelectionToolbarView: View {
                             isSelected: language == viewModel.translationLanguage
                         ) {
                             isHotKeyPickerExpanded = false
-                            viewModel.translationLanguage = language
-                            viewModel.translate()
+                            viewModel.selectTranslationLanguage(language)
                         }
                     }
                 } else {
@@ -343,7 +344,8 @@ struct SelectionToolbarView: View {
                 .background(Color.white.opacity(isResultHovering ? 0.06 : 0))
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .onHover { isResultHovering = $0 }
-                .accessibilityLabel(viewModel.presentationMode == .hotKeyTranslate ? "Insert translation" : "Apply rewrite")
+                .accessibilityLabel(viewModel.presentationMode == .hotKeyTranslate
+                    ? (viewModel.applicationNeedsSelection ? "Copy translation" : "Insert translation") : "Apply rewrite")
             } else {
                 hotKeyResultContents
             }
@@ -352,21 +354,34 @@ struct SelectionToolbarView: View {
 
     private var hotKeyResultIsActionable: Bool {
         viewModel.presentationMode == .hotKeyTranslate
-            ? viewModel.translationStatus == .ready && !viewModel.isApplying
+            ? viewModel.canUseTranslation
             : viewModel.canApply
+    }
+
+    private var translationResultTitle: String {
+        if !viewModel.resultNotice.isEmpty { return viewModel.resultNotice }
+        switch viewModel.translationStatus {
+        case .idle: return "Translation"
+        case .translating: return "Translation · Translating…"
+        case .error: return "Translation · Could not translate"
+        case .ready:
+            return viewModel.applicationNeedsSelection ? "Translation · Click to copy" : "Translation · Click to insert or copy"
+        }
     }
 
     private var hotKeyResultContents: some View {
         hotKeyCard(
-            title: viewModel.status == .meaningUnclear ? "After · Meaning unclear" : rewriteResultHasError ? "After · Could not safely rewrite" : viewModel.resultNotice.isEmpty
+            title: viewModel.status == .meaningUnclear ? "After · Meaning unclear" : rewriteResultHasError ? "After · Could not rewrite" : viewModel.resultNotice.isEmpty
                 ? (viewModel.presentationMode == .hotKeyTranslate
-                    ? "Translation · Click to insert or copy"
+                    ? translationResultTitle
                     : "After · Click or press Enter to apply")
                 : viewModel.resultNotice,
             titleColor: Color(red: 0.42, green: 0.62, blue: 1.0)
         ) {
             Group {
-                if viewModel.presentationMode == .hotKeyTranslate {
+                if viewModel.applicationNeedsSelection && !viewModel.isTranslationMode {
+                    applicationRecoveryView
+                } else if viewModel.presentationMode == .hotKeyTranslate {
                     switch viewModel.translationStatus {
                     case .idle, .translating:
                         hotKeyProgress("Translating...")
@@ -393,12 +408,36 @@ struct SelectionToolbarView: View {
                     case .error(let message):
                         VStack(alignment: .leading, spacing: 6) {
                             hotKeyError(message)
-                            Button("Retry") { viewModel.retryReview() }.buttonStyle(.borderless)
+                            Button("Retry") { viewModel.retryReview() }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(Color(red: 0.42, green: 0.62, blue: 1.0))
                         }
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var applicationRecoveryView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if viewModel.presentationMode == .standard {
+                Text(viewModel.resultNotice)
+                    .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ScrollView {
+                Text(viewModel.isTranslationMode ? viewModel.translatedText : viewModel.rewrittenText)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack {
+                Button("Copy result") { viewModel.copyApplicationResult() }
+                Button("Close", action: onClose)
+            }
+            .buttonStyle(.borderless)
+            .disabled(viewModel.isApplying)
         }
     }
 
@@ -727,7 +766,7 @@ struct SelectionToolbarView: View {
         return LazyVGrid(columns: columns, alignment: .trailing, spacing: 6) {
             ForEach(TranslationLanguage.allCases) { language in
                 Button {
-                    viewModel.translationLanguage = language
+                    viewModel.selectTranslationLanguage(language)
                 } label: {
                     Text(language.flag)
                         .font(.system(size: 19))
@@ -743,6 +782,7 @@ struct SelectionToolbarView: View {
                 }
                 .buttonStyle(.plain)
                 .help(language.displayName)
+                .disabled(viewModel.isApplying)
             }
         }
         .padding(6)
@@ -759,18 +799,19 @@ struct SelectionToolbarView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text(viewModel.translationLanguage.flag)
-                Text(viewModel.resultNotice.isEmpty ? "Translation · Click the result to insert or copy" : viewModel.resultNotice)
+                Text(translationResultTitle)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.white.opacity(0.58))
                 Spacer(minLength: 0)
                 if case .ready = viewModel.translationStatus {
                     Button {
-                        if viewModel.copyTranslation() { onTranslationCopied() }
+                        viewModel.copyTranslation()
                     } label: {
                         Image(systemName: "doc.on.doc")
                     }
                     .buttonStyle(.plain)
                     .help("Copy translation")
+                    .disabled(!viewModel.canUseTranslation)
                 }
             }
 
@@ -791,7 +832,7 @@ struct SelectionToolbarView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.isApplyingTranslation)
+                    .disabled(!viewModel.canUseTranslation)
                     .help("Insert translation or copy if insertion is unavailable")
                 case .error(let message):
                     Text(message)
@@ -826,33 +867,39 @@ struct SelectionToolbarView: View {
                 .foregroundStyle(Color.white.opacity(0.34))
                 .frame(width: 16)
             Group {
-                switch viewModel.status {
-                case .meaningUnclear: meaningClarificationView
-                case .checking, .waiting, .idle: hotKeyProgress("Improving…")
-                case .applying: hotKeyProgress("Inserting…")
-                case .noChanges:
-                    Label("Looks good", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                case .error(let message):
-                    VStack {
-                        hotKeyError(message)
-                        Button("Retry") { viewModel.retryReview() }.buttonStyle(.borderless)
+                if viewModel.applicationNeedsSelection {
+                    applicationRecoveryView
+                } else {
+                    switch viewModel.status {
+                    case .meaningUnclear: meaningClarificationView
+                    case .checking, .waiting, .idle: hotKeyProgress("Improving…")
+                    case .applying: hotKeyProgress("Inserting…")
+                    case .noChanges:
+                        Label("Looks good", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    case .error(let message):
+                        VStack {
+                            hotKeyError(message)
+                            Button("Retry") { viewModel.retryReview() }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(Color(red: 0.42, green: 0.62, blue: 1.0))
+                        }
+                    case .ready:
+                        Button(action: onApply) {
+                            rewritePreviewColumn(
+                                title: viewModel.resultNotice.isEmpty ? "After · Click to apply" : viewModel.resultNotice,
+                                text: viewModel.rewrittenText,
+                                tint: Color(red: 0.25, green: 0.72, blue: 1.0),
+                                highlightedText: highlightedAfterText()
+                            )
+                            .contentShape(Rectangle())
+                            .background(Color.white.opacity(isResultHovering ? 0.08 : 0))
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { isResultHovering = $0 }
+                        .accessibilityLabel("Apply rewritten text")
+                        .disabled(!viewModel.canApply)
+                        .help("Apply rewritten text (⌘Return)")
                     }
-                case .ready:
-                    Button(action: onApply) {
-                        rewritePreviewColumn(
-                            title: viewModel.resultNotice.isEmpty ? "After · Click to apply" : viewModel.resultNotice,
-                            text: viewModel.rewrittenText,
-                            tint: Color(red: 0.25, green: 0.72, blue: 1.0),
-                            highlightedText: highlightedAfterText()
-                        )
-                        .contentShape(Rectangle())
-                        .background(Color.white.opacity(isResultHovering ? 0.08 : 0))
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { isResultHovering = $0 }
-                    .accessibilityLabel("Apply rewritten text")
-                    .disabled(!viewModel.canApply)
-                    .help("Apply rewritten text (⌘Return)")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -871,39 +918,59 @@ struct SelectionToolbarView: View {
     }
 
     private var meaningClarificationView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Meaning unclear", systemImage: "questionmark.circle")
-                    .foregroundStyle(.orange)
-                Text("Choose the intended meaning, or explain in your own words. Nothing is applied yet.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                ForEach(Array(viewModel.meaningQuestions.enumerated()), id: \.offset) { index, question in
-                    Text(question.question).font(.system(size: 12, weight: .semibold))
-                    ForEach(question.options, id: \.self) { option in
-                        Button {
-                            viewModel.selectMeaningAnswer(option, for: index)
-                        } label: {
-                            HStack(alignment: .top) {
-                                Image(systemName: viewModel.meaningAnswers[index] == option ? "largecircle.fill.circle" : "circle")
-                                Text(option).fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: 0)
-                            }.contentShape(Rectangle())
-                        }.buttonStyle(.plain).font(.system(size: 12))
+        ScrollViewReader { proxy in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Answered \(viewModel.meaningQuestions.count - viewModel.unansweredMeaningQuestionIndices.count) of \(viewModel.meaningQuestions.count)")
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    if let next = viewModel.unansweredMeaningQuestionIndices.first, !viewModel.canClarifyMeaning {
+                        Button("Go to question \(next + 1)") {
+                            proxy.scrollTo(next, anchor: .top)
+                        }.buttonStyle(.borderless)
                     }
+                }.font(.system(size: 11))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(Array(viewModel.meaningQuestions.enumerated()), id: \.offset) { index, question in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("\(index + 1). \(question.question)")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                ForEach(question.options, id: \.self) { option in
+                                    Button {
+                                        viewModel.selectMeaningAnswer(option, for: index)
+                                        if let next = viewModel.unansweredMeaningQuestionIndices.first {
+                                            proxy.scrollTo(next, anchor: .top)
+                                        }
+                                    } label: {
+                                        HStack(alignment: .top) {
+                                            Image(systemName: viewModel.meaningAnswers[index] == option ? "largecircle.fill.circle" : "circle")
+                                            Text(option).fixedSize(horizontal: false, vertical: true)
+                                            Spacer(minLength: 0)
+                                        }.contentShape(Rectangle())
+                                    }.buttonStyle(.plain).font(.system(size: 12))
+                                }
+                            }.id(index)
+                        }
+                    }.padding(6)
                 }
-            }.padding(6)
+                Text(viewModel.canClarifyMeaning
+                     ? "Ready to preview. Nothing is applied yet."
+                     : "Answer every question above, or explain in your own words.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("None of these - explain my meaning") {
+                    viewModel.rejectMeaningOptions()
+                    isMeaningInputFocused = true
+                }.buttonStyle(.borderless).font(.system(size: 11))
+                TextField("Your intended meaning, in any language…", text: $viewModel.customMeaning)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isMeaningInputFocused)
+                    .accessibilityLabel("Clarify the intended meaning in your own words")
+                Button("Preview rewrite") { viewModel.clarifyMeaning() }
+                    .disabled(!viewModel.canClarifyMeaning)
             }
-            Button("None of these — explain my meaning") {
-                viewModel.rejectMeaningOptions()
-                isMeaningInputFocused = true
-            }.buttonStyle(.borderless).font(.system(size: 11))
-            TextField("Your intended meaning, in any language…", text: $viewModel.customMeaning)
-                .textFieldStyle(.roundedBorder)
-                .focused($isMeaningInputFocused)
-                .accessibilityLabel("Clarify the intended meaning in your own words")
-            Button("Preview rewrite") { viewModel.clarifyMeaning() }
-                .disabled(!viewModel.canClarifyMeaning)
         }
     }
 
@@ -1014,7 +1081,7 @@ struct SelectionToolbarView: View {
     }
 
     private var panelHeight: CGFloat {
-        if viewModel.status == .meaningUnclear && !viewModel.isTranslationMode { return 346 }
+        if viewModel.status == .meaningUnclear && !viewModel.isTranslationMode { return 374 }
         let baseHeight: CGFloat
         if viewModel.isLanguagePickerExpanded {
             baseHeight = 170
@@ -1025,7 +1092,7 @@ struct SelectionToolbarView: View {
         } else {
             baseHeight = 50
         }
-        return baseHeight
+        return baseHeight + 28
     }
 
     @ViewBuilder

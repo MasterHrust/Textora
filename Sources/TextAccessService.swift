@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import UniformTypeIdentifiers
+import WebKit
 
 extension Notification.Name {
     static let textoraAccessibilityPermissionDidChange = Notification.Name("textoraAccessibilityPermissionDidChange")
@@ -179,6 +180,8 @@ enum TextoraCharacterGeometry {
 }
 
 final class TextAccessService {
+    /// Identify our shortcuts precisely; never ignore real user input for a time window.
+    static let syntheticSelectionEventTag: Int64 = 0x5458544F5241
     struct TextAnchor {
         let rect: CGRect
         let source: Source
@@ -220,6 +223,12 @@ final class TextAccessService {
         let rect: CGRect
     }
 
+    struct InsertionTargetIdentity {
+        let identifier: String
+        let role: String
+        let window: AXUIElement
+    }
+
     struct FocusedTextContext {
         let text: String
         let frame: CGRect
@@ -230,6 +239,7 @@ final class TextAccessService {
         let targetBundleID: String
         let anchor: TextAnchor
         let textFragments: [TextFragment]
+        let insertionIdentity: InsertionTargetIdentity?
 
         init(
             text: String,
@@ -240,7 +250,8 @@ final class TextAccessService {
             targetAppPID: pid_t,
             targetBundleID: String,
             anchor: TextAnchor? = nil,
-            textFragments: [TextFragment] = []
+            textFragments: [TextFragment] = [],
+            insertionIdentity: InsertionTargetIdentity? = nil
         ) {
             self.text = text
             self.frame = frame
@@ -256,7 +267,31 @@ final class TextAccessService {
                 rawRect: nil
             )
             self.textFragments = textFragments
+            self.insertionIdentity = insertionIdentity
         }
+    }
+
+    func capturingInsertionIdentity(_ context: FocusedTextContext) -> FocusedTextContext {
+        guard let identifier = axString(of: context.targetElement, attribute: "AXIdentifier"), !identifier.isEmpty,
+              let role = axString(of: context.targetElement, attribute: kAXRoleAttribute), !role.isEmpty,
+              let window = axElement(of: context.targetElement, attribute: kAXWindowAttribute as String) else { return context }
+        return FocusedTextContext(text: context.text, frame: context.frame, usesSelection: context.usesSelection,
+            selectedRange: context.selectedRange, targetElement: context.targetElement, targetAppPID: context.targetAppPID,
+            targetBundleID: context.targetBundleID, anchor: context.anchor, textFragments: context.textFragments,
+            insertionIdentity: InsertionTargetIdentity(identifier: identifier, role: role, window: window))
+    }
+
+    static func sameInsertionTarget(_ captured: FocusedTextContext, _ fresh: FocusedTextContext) -> Bool {
+        if CFEqual(captured.targetElement, fresh.targetElement) { return true }
+        guard let before = captured.insertionIdentity, let after = fresh.insertionIdentity,
+              !before.identifier.isEmpty, before.identifier == after.identifier,
+              !before.role.isEmpty, before.role == after.role,
+              CFEqual(before.window, after.window), !captured.frame.isEmpty, !fresh.frame.isEmpty else { return false }
+        let tolerance: CGFloat = 2
+        return abs(captured.frame.minX - fresh.frame.minX) <= tolerance
+            && abs(captured.frame.minY - fresh.frame.minY) <= tolerance
+            && abs(captured.frame.width - fresh.frame.width) <= tolerance
+            && abs(captured.frame.height - fresh.frame.height) <= tolerance
     }
 
     struct SelectedTextSignal {
@@ -292,6 +327,14 @@ final class TextAccessService {
         var originalValue: String? = nil
     }
 
+    /// An explicitly permitted recording destination without an insertion target.
+    /// It carries no text or AX element and can only produce a manual-copy result.
+    struct DictationOrigin {
+        let appPID: pid_t
+        let bundleID: String
+        let anchor: CGRect
+    }
+
     struct DictationMicPlacement {
         let caretFrame: CGRect?
         let fieldFrame: CGRect
@@ -306,15 +349,35 @@ final class TextAccessService {
 
     enum DictationTargetResult {
         case success(DictationTarget)
+        case copyOnly(DictationOrigin)
         case permissionRequired(bundleID: String, anchor: CGRect)
+        case permissionDenied
         case secureField
         case unavailable
     }
 
+    enum ApplyFailureReason: String, CaseIterable {
+        case targetChanged, selectionUnavailable, selectionChanged, copyUnconfirmed, formattingUnavailable
+
+        var message: String {
+            switch self {
+            case .targetChanged: return "The target app or field changed."
+            case .selectionUnavailable: return "Could not read the selected text."
+            case .selectionChanged: return "The selected text or range changed."
+            case .copyUnconfirmed: return "Could not confirm the selection by copying it."
+            case .formattingUnavailable: return "Could not prepare text with its original formatting."
+            }
+        }
+    }
+
     enum ApplyResult: Equatable {
         case success
+        /// The write was accepted/dispatched, but the editor did not expose
+        /// matching readback. Terminal outcome: never retry the same selection.
+        case dispatched
         case failed
         case unsupportedTarget
+        case rejected(ApplyFailureReason)
         /// The corrected text was armed on the system pasteboard because
         /// the only available write strategy (Cmd+A + Cmd+V over the full
         /// value) would have destroyed surrounding layout — e.g. in Slack
@@ -555,20 +618,35 @@ final class TextAccessService {
     }
 
     func captureDictationTarget() -> DictationTargetResult {
-        guard hasAccessibilityPermission(), let element = focusedDictationElement() else { return .unavailable }
-        guard !shouldIgnoreDictationInput(element: element, includeAppConsent: false) else {
-            return isSecureInputField(element) || hasSensitiveFieldHint(element) ? .secureField : .unavailable
+        guard hasAccessibilityPermission() else { return .unavailable }
+        // Slack may not expose any editable AX element until accessibility is
+        // enabled. Resolve consent before looking for that element, so an
+        // unknown/denied app is not misreported as a missing cursor.
+        if let app = NSWorkspace.shared.frontmostApplication,
+           Self.needsExplicitDictationAccessibility(bundleID: app.bundleIdentifier ?? "") {
+            switch appConsentStatus(for: app.bundleIdentifier ?? "") {
+            case .unknown:
+                return .permissionRequired(bundleID: app.bundleIdentifier ?? "", anchor: focusedWindowFrame() ?? .zero)
+            case .denied: return .permissionDenied
+            case .allowed: break
+            }
         }
+        guard let element = focusedDictationElement() else { return .unavailable }
+        if isSecureInputField(element) || hasSensitiveFieldHint(element) { return .secureField }
         var pid: pid_t = 0
-        guard AXUIElementGetPid(element, &pid) == .success, pid != 0 else { return .unavailable }
+        guard AXUIElementGetPid(element, &pid) == .success, pid != 0,
+              pid != ProcessInfo.processInfo.processIdentifier,
+              pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return .unavailable }
         let bundleID = resolvedBundleID(forOwningPID: pid)
+        guard !isTransientPopupLike(element), !helperSuppressedBundleIDs.contains(bundleID) else { return .unavailable }
         let capturedElementFrame = elementFrame(of: element)
         let anchor = capturedElementFrame ?? focusedWindowFrame() ?? .zero
         switch appConsentStatus(for: bundleID) {
         case .unknown: return .permissionRequired(bundleID: bundleID, anchor: anchor)
-        case .denied: return .unavailable
+        case .denied: return .permissionDenied
         case .allowed: break
         }
+        guard !shouldIgnoreDictationInput(element: element, includeAppConsent: false) else { return .unavailable }
         return .success(DictationTarget(
             element: element,
             appPID: pid,
@@ -581,6 +659,67 @@ final class TextAccessService {
             identifier: axString(of: element, attribute: "AXIdentifier"),
             originalValue: valueText(of: element)
         ))
+    }
+
+    /// Used only after explicit target resolution failed. Recording remains useful,
+    /// but no app-wide target is manufactured and no automatic paste is permitted.
+    func captureCopyOnlyDictationOrigin(expectedPID: pid_t, expectedBundleID: String) -> DictationTargetResult {
+        let trusted = hasAccessibilityPermission()
+        guard trusted, let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier == expectedPID,
+              application.bundleIdentifier == expectedBundleID,
+              !expectedBundleID.isEmpty else { return .unavailable }
+        let isOwnApplication = expectedPID == ProcessInfo.processInfo.processIdentifier || expectedBundleID == Bundle.main.bundleIdentifier
+        let isSuppressedApplication = helperSuppressedBundleIDs.contains(expectedBundleID)
+        guard !isOwnApplication, !isSuppressedApplication else { return .unavailable }
+        let consent = appConsentStatus(for: expectedBundleID)
+        switch consent {
+        case .unknown:
+            return .permissionRequired(bundleID: expectedBundleID, anchor: focusedWindowFrame() ?? .zero)
+        case .denied: return .permissionDenied
+        case .allowed: break
+        }
+        // A focused field may have changed during the bounded AX preparation.
+        // Check exclusions without reading its value, selection or clipboard.
+        let sensitive = focusedElement().map { isSecureInputField($0) || hasSensitiveFieldHint($0) } ?? false
+        if sensitive { return .secureField }
+        guard Self.canUseCopyOnlyDictation(originPID: expectedPID, originBundleID: expectedBundleID,
+            currentPID: application.processIdentifier, currentBundleID: application.bundleIdentifier,
+            accessibilityTrusted: trusted, consent: consent,
+            isOwnApplication: isOwnApplication, isSuppressedApplication: isSuppressedApplication,
+            isSensitiveField: sensitive) else { return .unavailable }
+        return .copyOnly(DictationOrigin(appPID: expectedPID, bundleID: expectedBundleID,
+            anchor: focusedWindowFrame() ?? .zero))
+    }
+
+    static func canUseCopyOnlyDictation(originPID: pid_t, originBundleID: String,
+                                       currentPID: pid_t?, currentBundleID: String?,
+                                       accessibilityTrusted: Bool, consent: AppConsentStatus,
+                                       isOwnApplication: Bool, isSuppressedApplication: Bool,
+                                       isSensitiveField: Bool) -> Bool {
+        accessibilityTrusted && consent == .allowed && originPID > 0 && currentPID == originPID
+            && !originBundleID.isEmpty && currentBundleID == originBundleID
+            && !isOwnApplication && !isSuppressedApplication && !isSensitiveField
+    }
+
+    static func needsExplicitDictationAccessibility(bundleID: String) -> Bool {
+        bundleID.lowercased() == "com.tinyspeck.slackmacgap"
+    }
+
+    /// Electron's documented assistive-technology handshake. This does not
+    /// grant macOS permissions, send keys, or touch the clipboard. Only an
+    /// explicit dictation attempt in an already permitted Slack may request it.
+    func prepareDictationAccessibility(expectedPID: pid_t) -> Bool {
+        guard hasAccessibilityPermission(),
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier == expectedPID,
+              let bundleID = app.bundleIdentifier,
+              Self.needsExplicitDictationAccessibility(bundleID: bundleID),
+              appConsentStatus(for: bundleID) == .allowed else { return false }
+        let application = AXUIElementCreateApplication(expectedPID)
+        if axBool(of: application, attribute: "AXManualAccessibility") == true { return true }
+        return AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString,
+                                          kCFBooleanTrue) == .success
     }
 
     /// Lightweight visibility/geometry check for the dictation affordance. It deliberately
@@ -1524,6 +1663,7 @@ final class TextAccessService {
     private func readClipboardAfterCopyIfSelectionLikely(
         allowGoogleSheetsGrid: Bool = false
     ) -> String? {
+        guard !Task.isCancelled else { return nil }
         if isGoogleSheetsFrontmost(), !allowGoogleSheetsGrid {
             let isActiveCellEditor = focusedElement().map(isGoogleSheetsTextEditFocus) ?? false
             guard isActiveCellEditor else {
@@ -1544,22 +1684,30 @@ final class TextAccessService {
         let pasteboard = NSPasteboard.general
         let snapshot = snapshotPasteboard(pasteboard)
         let oldChangeCount = pasteboard.changeCount
+        guard !Task.isCancelled else { return nil }
         triggerCopyShortcut()
         // Poll: Electron/Slack sometimes applies the copy slightly after the shortcut.
         for _ in 0 ..< 14 {
             usleep(50_000)
+            guard !Task.isCancelled else { return nil }
             if pasteboard.changeCount != oldChangeCount { break }
         }
         guard pasteboard.changeCount != oldChangeCount else {
             textoraDiagLog("clipboardProbe", "no pasteboard change after copy; refusing stale clipboard")
             return nil
         }
+        let copiedChangeCount = pasteboard.changeCount
         let containsObjectPayload = pasteboardContainsObjectPayload(pasteboard)
         let copied = containsObjectPayload ? nil : extractPlainTextFromPasteboard(pasteboard)
         if containsObjectPayload {
             textoraDiagLog("clipboardProbe", "rejected non-text pasteboard payload")
         }
-        restorePasteboard(pasteboard, snapshot: snapshot)
+        // A real user shortcut cancels the read. Do not overwrite a newer copy
+        // (or cut) with the snapshot captured before that user action.
+        guard !Task.isCancelled else { return nil }
+        if pasteboard.changeCount == copiedChangeCount {
+            restorePasteboard(pasteboard, snapshot: snapshot)
+        }
         return copied
     }
 
@@ -1734,7 +1882,7 @@ final class TextAccessService {
     func selectedTextContextAnyFocus(
         minLength: Int = 1,
         maxLength: Int = 1600,
-        allowClipboardFallback: Bool = true,
+        allowClipboardFallback: Bool = false,
         allowBrowserClipboardSelection: Bool = false
     ) -> FocusedTextContext? {
         if allowClipboardFallback,
@@ -1771,7 +1919,12 @@ final class TextAccessService {
             let bundleID = resolvedBundleID(forOwningPID: pid)
 
             let range = selectedRange(of: focused)
-            guard let range, range.length > 0 else {
+            let selectedAX = Self.passiveSelectedText(
+                selectedText: selectedText(of: focused),
+                value: isTextualSelectionElement(focused) ? valueText(of: focused) : nil,
+                range: range
+            ) ?? ""
+            guard !selectedAX.isEmpty || (range?.length ?? 0) > 0 else {
                 element = axElement(of: focused, attribute: kAXParentAttribute as String)
                 depth += 1
                 continue
@@ -1782,7 +1935,6 @@ final class TextAccessService {
                 ?? elementFrame(of: focused)
                 ?? focusedWindowFrame()
 
-            let selectedAX = selectedText(of: focused)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             var selected = selectedAX
             if selected.isEmpty, allowClipboardFallback, bundleID != "com.apple.mail" {
                 // Mail/Electron can expose selection without returning AXSelectedText; use robust live-copy probe.
@@ -1851,6 +2003,19 @@ final class TextAccessService {
             )
         }
         return nil
+    }
+
+    /// AX ranges are UTF-16 offsets, not Swift Character indices. Reject stale
+    /// ranges instead of reading a different fragment or copying in the background.
+    static func passiveSelectedText(selectedText: String?, value: String?, range: CFRange?) -> String? {
+        if let selectedText, !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return selectedText
+        }
+        guard let value, let range, range.location >= 0, range.length > 0 else { return nil }
+        let text = value as NSString
+        guard range.location <= text.length, range.length <= text.length - range.location else { return nil }
+        let selected = text.substring(with: NSRange(location: range.location, length: range.length))
+        return selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : selected
     }
 
     private func shouldBlockBrowserClipboardSelectionProbe(_ element: AXUIElement) -> Bool {
@@ -2213,14 +2378,10 @@ final class TextAccessService {
             return applyBrowserRewrittenText(rewritten, basedOn: context)
         }
         if context.usesSelection {
-            let shouldUseClipboardSelectionPaste = prefersClipboardSelectionPasteReplaceForBundle(context.targetBundleID)
-                || context.anchor.source == .clipboardFallback
-            // Do not attempt a second mutation after an unconfirmed write:
-            // the target may have accepted it but delayed its AX readback.
-            let confirmed = shouldUseClipboardSelectionPaste
-                ? applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
-                : applySelectedTextDirect(rewritten, basedOn: context)
-            return confirmed ? .success : .failed
+            // AXSelectedText replaces characters without carrying their rich
+            // attributes. Use the same verified, styled clipboard transaction
+            // for native editors as for browser/Electron selections.
+            return applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
         }
         if applyProtectedPhysicalRewritePlan(rewritten, basedOn: context) {
             textoraDiagLog("applyRewrittenText", "success via unifiedPhysicalRewrite")
@@ -2246,38 +2407,12 @@ final class TextAccessService {
             + "selectedRange=\(context.selectedRange.map { "\($0.location):\($0.length)" } ?? "nil")"
         )
 
-        if applyBrowserRewriteStrategies(rewritten, basedOn: context) {
-            return .success
-        }
-        // Do not fall back to simulated typing here. Besides losing Gmail
-        // formatting, a retry is unsafe when the browser accepted the paste
-        // but exposed a stale AX value during verification.
-        textoraDiagLog("applyBrowserRewrittenText", "rich paste was not confirmed -> failed")
-        return .failed
-    }
-
-    private func applyBrowserRewriteStrategies(
-        _ rewritten: String,
-        basedOn context: FocusedTextContext
-    ) -> Bool {
-        guard normalized(rewritten) != normalized(context.text) else {
-            textoraDiagLog("applyBrowserRewrittenText", "no-op: rewritten equals original")
-            return true
-        }
-
+        guard normalized(rewritten) != normalized(context.text) else { return .success }
         if context.usesSelection {
-            let applied = applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
-            if applied {
-                textoraDiagLog("applyBrowserRewrittenText", "success via rich selection paste")
-            }
-            return applied
+            return applyClipboardSelectionPasteReplace(rewritten, basedOn: context)
         }
-
-        let applied = applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: context)
-        if applied {
-            textoraDiagLog("applyBrowserRewrittenText", "success via rich range paste")
-        }
-        return applied
+        // Range rewrites still need verification to protect surrounding text.
+        return applySingleEnvelopeClipboardRangePaste(rewritten, basedOn: context) ? .success : .failed
     }
 
     func applyLocalizedRewrite(
@@ -2587,81 +2722,86 @@ final class TextAccessService {
         !context.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func applyClipboardSelectionPasteReplace(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
+    private func applyClipboardSelectionPasteReplace(_ rewritten: String, basedOn context: FocusedTextContext) -> ApplyResult {
         let pasteboard = NSPasteboard.general
         let snapshot = snapshotPasteboard(pasteboard)
-        let baselineChangeCount = pasteboard.changeCount
+        var ownedChangeCount = pasteboard.changeCount
+        defer {
+            // A user copy during readback belongs to the user, not this transaction.
+            if pasteboard.changeCount == ownedChangeCount {
+                restorePasteboard(pasteboard, snapshot: snapshot)
+            }
+        }
         let originalValue = valueText(of: context.targetElement)
-
-        // Best effort: restore original selection before browser-native copy/paste.
-        if let range = context.selectedRange {
-            var r = range
-            if let value = AXValueCreate(.cfRange, &r) {
-                _ = AXUIElementSetAttributeValue(
-                    context.targetElement,
-                    kAXSelectedTextRangeAttribute as CFString,
-                    value
-                )
-                usleep(35_000)
-            }
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else {
+            return .rejected(.targetChanged)
         }
 
-        // 1) Copy current selection (app-native; works for browsers + Electron webviews)
+        // Validate the live selection before writing. Do not reset AX ranges:
+        // web editors may report child-relative offsets for a full-field value.
+        let beforeCopy = pasteboard.changeCount
         triggerCopyShortcut()
-        usleep(120_000)
+        let copiedChangeCount = Self.waitForCopiedSelection(expected: context.text, baselineChangeCount: beforeCopy,
+            read: { (pasteboard.changeCount, pasteboard.string(forType: .string)) },
+            shouldContinue: { !Task.isCancelled && NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID },
+            pause: { usleep(50_000) })
+        let observedChangeCount = pasteboard.changeCount
         let copiedBefore = pasteboard.string(forType: .string) ?? ""
-        // In Docs multi-line selections can serialize differently (\n vs paragraph separators),
-        // so keep this guard minimal: only require some selection signal.
-        let hasSelectionSignal = pasteboard.changeCount != baselineChangeCount
-            && !copiedBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && normalized(copiedBefore) == normalized(context.text)
-        guard hasSelectionSignal else {
-            restorePasteboard(pasteboard, snapshot: snapshot)
-            return false
+        guard let copiedChangeCount, observedChangeCount == copiedChangeCount,
+              Self.copiedReplacementWasConfirmed(replacement: context.text, copied: copiedBefore,
+            changeCountBefore: beforeCopy, changeCountAfter: observedChangeCount) else {
+            return .rejected(.copyUnconfirmed)
         }
+        ownedChangeCount = observedChangeCount
         let richSource = richTextFromPasteboard(pasteboard, matching: copiedBefore)
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else {
+            return .rejected(.targetChanged)
+        }
+        guard pasteboard.changeCount == ownedChangeCount else { return .rejected(.copyUnconfirmed) }
+        let prepared = writeReplacementToPasteboard(rewritten, preserving: richSource, pasteboard: pasteboard)
+        ownedChangeCount = pasteboard.changeCount
+        guard prepared else { return .rejected(.formattingUnavailable) }
 
-        // 2) Paste rewritten text over selection.
-        guard writeReplacementToPasteboard(rewritten, preserving: richSource, pasteboard: pasteboard) else {
-            restorePasteboard(pasteboard, snapshot: snapshot)
-            return false
-        }
-        guard triggerPasteShortcut() else {
-            restorePasteboard(pasteboard, snapshot: snapshot)
-            return false
-        }
-        if waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context) {
-            restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
-            return true
-        }
+        let result = Self.performSelectionReplacement(write: {
+            guard !Task.isCancelled,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else { return false }
+            return triggerPasteShortcut()
+        }, confirm: {
+            // Let the destination consume the pasteboard before restoring it,
+            // even when focus changes or cancellation arrives after dispatch.
+            usleep(120_000)
+            return waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context)
+        })
+        textoraDiagLog("clipboardSelectionPasteReplace", "result=\(result)")
+        return result
+    }
 
-        // 3) Verify by selecting previous range and copying again (best effort).
-        if let range = context.selectedRange {
-            var r = range
-            r.length = (rewritten as NSString).length
-            if let value = AXValueCreate(.cfRange, &r) {
-                _ = AXUIElementSetAttributeValue(
-                    context.targetElement,
-                    kAXSelectedTextRangeAttribute as CFString,
-                    value
-                )
-                usleep(35_000)
-            }
+    /// Wait for one copy command to finish; never repeatedly issue Cmd+C or
+    /// accept unchanged clipboard content, even if it happens to match.
+    static func waitForCopiedSelection(expected: String, baselineChangeCount: Int,
+                                       read: () -> (changeCount: Int, text: String?),
+                                       shouldContinue: () -> Bool, pause: () -> Void,
+                                       attempts: Int = 14) -> Int? {
+        for _ in 0..<max(0, attempts) {
+            guard shouldContinue() else { return nil }
+            pause()
+            guard shouldContinue() else { return nil }
+            let sample = read()
+            guard sample.changeCount != baselineChangeCount else { continue }
+            guard let text = sample.text else { continue }
+            return copiedReplacementWasConfirmed(replacement: expected, copied: text,
+                changeCountBefore: baselineChangeCount, changeCountAfter: sample.changeCount) ? sample.changeCount : nil
         }
-        let beforeVerificationCopy = pasteboard.changeCount
-        triggerCopyShortcut()
-        usleep(120_000)
-        let copiedAfter = pasteboard.string(forType: .string) ?? ""
-        let ok = Self.copiedReplacementWasConfirmed(replacement: rewritten, copied: copiedAfter,
-            changeCountBefore: beforeVerificationCopy, changeCountAfter: pasteboard.changeCount)
+        return nil
+    }
 
-        // Always restore user clipboard after our flow.
-        restorePasteboardIfNeeded(pasteboard, snapshot: snapshot, baselineChangeCount: baselineChangeCount)
-        textoraDiagLog(
-            "clipboardSelectionPasteReplace",
-            "verify copiedAfterOK=\(ok) copiedAfter=\(textoraDiagPreview(copiedAfter))"
-        )
-        return ok
+    /// Readback is diagnostic after an accepted write, never a reason to select,
+    /// copy, undo, or write again. Many editors expose stale/incomplete AX values.
+    static func performSelectionReplacement(write: () -> Bool, confirm: () -> Bool) -> ApplyResult {
+        guard write() else { return .failed }
+        return confirm() ? .success : .dispatched
     }
 
     private func applyDiffBasedClipboardSelectionPaste(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
@@ -5569,22 +5709,24 @@ final class TextAccessService {
         }
     }
 
-    private func applySelectedTextDirect(_ rewritten: String, basedOn context: FocusedTextContext) -> Bool {
+    private func applySelectedTextDirect(_ rewritten: String, basedOn context: FocusedTextContext) -> ApplyResult {
         let target = context.targetElement
         let originalValue = valueText(of: target)
-        let status = AXUIElementSetAttributeValue(
-            target,
-            kAXSelectedTextAttribute as CFString,
-            rewritten as CFTypeRef
-        )
-        guard status == .success else { return false }
-        return waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context)
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else {
+            return .unsupportedTarget
+        }
+        return Self.performSelectionReplacement(write: {
+            AXUIElementSetAttributeValue(target, kAXSelectedTextAttribute as CFString, rewritten as CFTypeRef) == .success
+        }, confirm: {
+            waitForSelectionReplacement(originalValue: originalValue, rewritten: rewritten, context: context)
+        })
     }
 
     private func waitForSelectionReplacement(originalValue: String?, rewritten: String, context: FocusedTextContext) -> Bool {
         // Electron may publish the new value late or replace its AX node after
         // paste. Poll on the text worker; never issue a second write here.
-        for _ in 0..<12 {
+        for _ in 0..<4 {
             guard !Task.isCancelled,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == context.targetAppPID else { return false }
             if Self.directReplacementWasConfirmed(before: originalValue, after: valueText(of: context.targetElement),
@@ -5660,33 +5802,190 @@ final class TextAccessService {
         let representations: [(type: NSPasteboard.PasteboardType, data: Data)]
     }
 
-    private func richTextFromPasteboard(
+    /// Keep the clipboard representation with its text. AppKit's HTML reader
+    /// and writer use CSS pixel sizes, while RTF uses typographic points. An
+    /// RTF → attributed string → HTML round trip therefore changes font size.
+    struct RichTextSelection {
+        let text: NSAttributedString
+        let pasteboardType: NSPasteboard.PasteboardType
+        let documentType: NSAttributedString.DocumentType
+        var html: Data? = nil
+    }
+
+    /// Resolve CSS with the modern browser's defaults before AppKit imports
+    /// it. AppKit's HTML importer has a 12px base (even its newer async API),
+    /// whereas a browser uses 16px. Absolute computed sizes avoid that mismatch.
+    @MainActor
+    private final class BrowserHTMLNormalizer: NSObject, WKNavigationDelegate {
+        private let webView: WKWebView
+        private var continuation: CheckedContinuation<Data?, Never>?
+        private var timeoutTask: Task<Void, Never>?
+
+        override init() {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .nonPersistent()
+            configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+            webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
+            super.init()
+            webView.navigationDelegate = self
+        }
+
+        func normalize(_ data: Data) async -> Data? {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                timeoutTask = Task { [weak self] in
+                    do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                    catch { return }
+                    self?.finish(nil)
+                }
+                // Clipboard HTML is local data, not a webpage to execute or
+                // fetch. Permit only its inline CSS; run our code in isolation.
+                let policy = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">"
+                webView.loadHTMLString(policy + String(decoding: data, as: UTF8.self), baseURL: nil)
+            }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(navigationAction.request.url?.absoluteString == "about:blank" ? .allow : .cancel)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            Task { [weak self] in
+                guard let self, continuation != nil else { return }
+                let html = try? await webView.callAsyncJavaScript("""
+                    // Text rewriting cannot preserve embedded objects. Refuse
+                    // the conversion rather than silently deleting them.
+                    if (document.querySelector('img,svg,math,iframe,frame,object,embed,form,input,button,video,audio,source')) return null;
+                    // Preserve the source's CSS, including generic font families
+                    // and inheritance. Do not turn the browser default into an
+                    // explicit Times/Serif font through AppKit's HTML exporter.
+                    const resolvedRules = new Map();
+                    function readRules(rules) {
+                        for (const rule of rules) {
+                            if (rule.selectorText && rule.style) {
+                                for (const element of document.querySelectorAll(rule.selectorText)) {
+                                    const properties = resolvedRules.get(element) || new Set();
+                                    for (const property of rule.style) properties.add(property);
+                                    resolvedRules.set(element, properties);
+                                }
+                            } else if (rule.cssRules && (!rule.conditionText || matchMedia(rule.conditionText).matches)) {
+                                readRules(rule.cssRules);
+                            }
+                        }
+                    }
+                    for (const sheet of document.styleSheets) readRules(sheet.cssRules);
+                    function hasAuthoredSize(element) {
+                        for (let parent = element; parent; parent = parent.parentElement) {
+                            const rules = resolvedRules.get(parent);
+                            if (parent.style.fontSize || (parent.tagName === 'FONT' && parent.hasAttribute('size')) ||
+                                (rules && (rules.has('font-size') || rules.has('font')))) return true;
+                        }
+                        return false;
+                    }
+                    // Snapshot first: changing a parent before measuring its
+                    // children would apply nested em/% sizes more than once.
+                    const snapshots = Array.from(document.querySelectorAll('*'), element => {
+                        const computed = getComputedStyle(element);
+                        return [element, hasAuthoredSize(element) ? computed.fontSize : null, Array.from(resolvedRules.get(element) || [], property =>
+                            [property, computed.getPropertyValue(property)])];
+                    });
+                    for (const [element, size, properties] of snapshots) {
+                        for (const [property, value] of properties) element.style.setProperty(property, value);
+                        if (size) element.style.setProperty('font-size', size, 'important');
+                    }
+                    for (const property of ['font-family','font-size','font-weight','font-style','color','line-height','text-align','direction','letter-spacing','word-spacing']) {
+                        const value = document.documentElement.style.getPropertyValue(property);
+                        if (value && !document.body.style.getPropertyValue(property)) document.body.style.setProperty(property, value);
+                    }
+                    document.querySelectorAll('script,style,iframe,frame,object,embed,link,meta,img,svg,math,form,input,button,video,audio,source').forEach(element => element.remove());
+                    for (const element of document.querySelectorAll('*')) {
+                        for (const attribute of Array.from(element.attributes)) {
+                            if (!['style','href','face','size','color','dir','start','type','align','colspan','rowspan'].includes(attribute.name))
+                                element.removeAttribute(attribute.name);
+                        }
+                        if (element.hasAttribute('href') && !/^(https?:|mailto:|tel:|#)/i.test(element.getAttribute('href')))
+                            element.removeAttribute('href');
+                        for (const property of Array.from(element.style)) {
+                            if (/url\\s*\\(|expression\\s*\\(/i.test(element.style.getPropertyValue(property)))
+                                element.style.removeProperty(property);
+                        }
+                    }
+                    // XML serialization lets Foundation parse without HTML
+                    // tidy, which adds newlines inside otherwise plain divs.
+                    return new XMLSerializer().serializeToString(document.documentElement);
+                    """, arguments: [:], in: nil, contentWorld: .defaultClient)
+                finish((html as? String)?.data(using: .utf8))
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(nil) }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(nil) }
+
+        private func finish(_ data: Data?) {
+            guard let continuation else { return }
+            self.continuation = nil
+            timeoutTask?.cancel()
+            webView.navigationDelegate = nil
+            webView.stopLoading()
+            continuation.resume(returning: data)
+        }
+    }
+
+    /// The text worker owns a clipboard transaction synchronously. Only that
+    /// worker may wait; the main thread remains free for WebKit and UI events.
+    private final class HTMLImportResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var text: RichTextSelection?
+
+        func finish(_ text: RichTextSelection?) {
+            lock.lock()
+            self.text = text
+            lock.unlock()
+            ready.signal()
+        }
+
+        func wait() -> RichTextSelection? {
+            guard ready.wait(timeout: .now() + 3) == .success else { return nil }
+            lock.lock()
+            defer { lock.unlock() }
+            return text
+        }
+    }
+
+    private static func importBrowserHTML(_ data: Data) -> RichTextSelection? {
+        precondition(!Thread.isMainThread, "HTML import must run on the text worker")
+        let result = HTMLImportResult()
+        Task { @MainActor in
+            let normalizedData = await BrowserHTMLNormalizer().normalize(data)
+            let text = normalizedData.flatMap {
+                try? NSAttributedString(data: $0, options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue
+                ], documentAttributes: nil)
+            }
+            result.finish(text.map { RichTextSelection(text: $0, pasteboardType: .html, documentType: .html, html: normalizedData) })
+        }
+        return result.wait()
+    }
+
+    /// Call from the serialized text worker, never from the main thread.
+    func richTextFromPasteboard(
         _ pasteboard: NSPasteboard,
         matching expectedText: String
-    ) -> NSAttributedString? {
-        if !Thread.isMainThread {
-            return DispatchQueue.main.sync { self.richTextFromPasteboard(pasteboard, matching: expectedText) }
+    ) -> RichTextSelection? {
+        // Web editors' HTML is the authoritative CSS representation. Their
+        // accompanying RTF can use different units/rounded font sizes.
+        if let html = pasteboard.data(forType: .html),
+           let source = Self.importBrowserHTML(html),
+           normalized(source.text.string) == normalized(expectedText) {
+            return source
         }
-        let candidates: [(NSPasteboard.PasteboardType, NSAttributedString.DocumentType)] = [
-            (.rtf, .rtf),
-            (.html, .html)
-        ]
-        for (pasteboardType, documentType) in candidates {
-            guard let data = pasteboard.data(forType: pasteboardType) else { continue }
-            var options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-                .documentType: documentType
-            ]
-            if documentType == .html {
-                options[.characterEncoding] = String.Encoding.utf8.rawValue
-            }
-            guard let attributed = try? NSAttributedString(
-                data: data,
-                options: options,
-                documentAttributes: nil
-            ), normalized(attributed.string) == normalized(expectedText) else {
-                continue
-            }
-            return attributed
+        if let rtf = pasteboard.data(forType: .rtf),
+           let text = NSAttributedString(rtf: rtf, documentAttributes: nil),
+           normalized(text.string) == normalized(expectedText) {
+            return RichTextSelection(text: text, pasteboardType: .rtf, documentType: .rtf)
         }
         return nil
     }
@@ -5694,7 +5993,7 @@ final class TextAccessService {
     private func captureRichTextFromActiveSelection(
         expectedText: String,
         pasteboard: NSPasteboard
-    ) -> NSAttributedString? {
+    ) -> RichTextSelection? {
         guard !expectedText.isEmpty else { return nil }
         let beforeCopyChangeCount = pasteboard.changeCount
         triggerCopyShortcut()
@@ -5710,33 +6009,135 @@ final class TextAccessService {
         return richTextFromPasteboard(pasteboard, matching: expectedText)
     }
 
+    /// Change text nodes in the original browser markup instead of exporting
+    /// Cocoa fonts back to CSS. This keeps font stacks, inheritance, lists,
+    /// paragraph styles and inline emphasis intact. Ambiguous mappings fail
+    /// before pasting and use the existing manual-copy recovery.
+    static func htmlReplacementPreservingFormatting(_ replacement: String, source: RichTextSelection) -> Data? {
+        guard let html = source.html,
+              let document = try? XMLDocument(data: html, options: .nodePreserveWhitespace),
+              let body = try? document.nodes(forXPath: "//*[local-name()='body']").first,
+              let nodes = try? body.nodes(forXPath: ".//text()") else { return nil }
+        let original = source.text.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty else { return nil }
+        let sourceRange = (source.text.string as NSString).range(of: original)
+        let mapped = NSMutableAttributedString(attributedString: source.text.attributedSubstring(from: sourceRange))
+        let nodeKey = NSAttributedString.Key("TextoraHTMLTextNode")
+        let gapKey = NSAttributedString.Key("TextoraHTMLStructuralWhitespace")
+        let ns = original as NSString
+        var cursor = 0
+        var mappedNodes: [XMLNode] = []
+        var nodeText: [String] = []
+        var linkedNodes: [Bool] = []
+        func isStructuralGap(_ value: String) -> Bool {
+            value.replacingOccurrences(of: #"(?m)^\h*(?:[•◦▪‣]|\d+[.)])\h*"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        for node in nodes {
+            let raw = node.stringValue ?? ""
+            guard !raw.isEmpty else { continue }
+            let searchRange = NSRange(location: cursor, length: ns.length - cursor)
+            var range = ns.range(of: raw, range: searchRange)
+            if range.location == NSNotFound {
+                let collapsed = raw.replacingOccurrences(of: #"[\t\r\n ]+"#, with: " ", options: .regularExpression)
+                range = ns.range(of: collapsed, range: searchRange)
+            }
+            if range.location == NSNotFound {
+                guard raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                continue
+            }
+            guard isStructuralGap(ns.substring(with: NSRange(location: cursor, length: range.location - cursor))) else { return nil }
+            mapped.addAttribute(nodeKey, value: mappedNodes.count, range: range)
+            mappedNodes.append(node)
+            nodeText.append(ns.substring(with: range))
+            linkedNodes.append(mapped.attribute(.link, at: range.location, effectiveRange: nil) != nil)
+            cursor = NSMaxRange(range)
+        }
+        var gaps: [String] = []
+        var layout: [Int] = []
+        mapped.enumerateAttribute(nodeKey, in: NSRange(location: 0, length: mapped.length)) { value, range, _ in
+            if let index = value as? Int { layout.append(index); return }
+            gaps.append(ns.substring(with: range))
+            layout.append(-gaps.count)
+            mapped.addAttribute(gapKey, value: gaps.count - 1, range: range)
+        }
+        guard gaps.allSatisfy(isStructuralGap), !mappedNodes.isEmpty else { return nil }
+        let rewritten = attributedReplacementPreservingFormatting(source: mapped, rewritten: replacement)
+        var values = Array(repeating: "", count: mappedNodes.count)
+        var newGaps = Array(repeating: "", count: gaps.count)
+        var lastNode = -1
+        var valid = true
+        rewritten.enumerateAttributes(in: NSRange(location: 0, length: rewritten.length)) { attributes, range, _ in
+            let text = (rewritten.string as NSString).substring(with: range)
+            if let index = attributes[nodeKey] as? Int {
+                guard index >= lastNode else { valid = false; return }
+                // Do not accidentally extend a link when the diff explicitly
+                // placed new punctuation/text outside the original link.
+                if linkedNodes[index], attributes[.link] == nil { valid = false; return }
+                lastNode = index
+                values[index] += text
+            } else if let index = attributes[gapKey] as? Int {
+                newGaps[index] += text
+            } else { valid = false }
+        }
+        // Keep paragraph/list boundaries exactly. An edit that crosses an
+        // unmapped boundary cannot safely be applied to this HTML fragment.
+        let reconstructed = layout.map { $0 >= 0 ? values[$0] : newGaps[-$0 - 1] }.joined()
+        guard valid, gaps == newGaps, reconstructed == replacement else { return nil }
+        for (index, node) in mappedNodes.enumerated() {
+            guard values[index].filter({ $0.isNewline }) == nodeText[index].filter({ $0.isNewline }) else { return nil }
+            node.stringValue = values[index]
+        }
+        // Keep body-level inherited styles without inserting a document body
+        // into the destination editor or carrying its default margin.
+        let wrapper = XMLElement(name: "div")
+        if let element = body as? XMLElement {
+            for name in ["style", "dir"] {
+                if let value = element.attribute(forName: name)?.stringValue {
+                    wrapper.addAttribute(XMLNode.attribute(withName: name, stringValue: value) as! XMLNode)
+                }
+            }
+        }
+        for child in body.children ?? [] { child.detach(); wrapper.addChild(child) }
+        return wrapper.xmlString.data(using: .utf8)
+    }
+
     @discardableResult
-    private func writeReplacementToPasteboard(
+    func writeReplacementToPasteboard(
         _ replacement: String,
-        preserving source: NSAttributedString?,
+        preserving source: RichTextSelection?,
         pasteboard: NSPasteboard
     ) -> Bool {
+        // A failed rich-text import is not evidence that the source is plain.
+        // Let the user paste manually instead of silently dropping formatting.
+        guard source != nil || !(pasteboard.types ?? []).contains(where: { $0 == .html || $0 == .rtf }) else { return false }
+        if let source {
+            var containsAttachment = false
+            source.text.enumerateAttribute(.attachment, in: NSRange(location: 0, length: source.text.length)) { value, _, stop in
+                if value != nil { containsAttachment = true; stop.pointee = true }
+            }
+            guard !containsAttachment else { return false }
+        }
         let item = NSPasteboardItem()
         item.setString(replacement, forType: .string)
 
-        if let source, source.length > 0 {
+        if let source, source.text.length > 0, source.documentType == .html {
+            guard let html = Self.htmlReplacementPreservingFormatting(replacement, source: source),
+                  item.setData(html, forType: .html) else { return false }
+        } else if let source, source.text.length > 0 {
             let styled = Self.attributedReplacementPreservingFormatting(
-                source: source,
+                source: source.text,
                 rewritten: replacement
             )
             let fullRange = NSRange(location: 0, length: styled.length)
-            if let rtf = try? styled.data(
+            // Export only the source rich format. Advertising synthesized HTML
+            // for RTF (or RTF for HTML) lets the destination choose a version
+            // with a different font size. Plain text remains the fallback.
+            guard let data = try? styled.data(
                 from: fullRange,
-                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-            ) {
-                item.setData(rtf, forType: .rtf)
-            }
-            if let html = try? styled.data(
-                from: fullRange,
-                documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
-            ) {
-                item.setData(html, forType: .html)
-            }
+                documentAttributes: [.documentType: source.documentType]
+            ) else { return false }
+            guard item.setData(data, forType: source.pasteboardType) else { return false }
         }
 
         pasteboard.clearContents()
@@ -6747,28 +7148,93 @@ end tell
     }
 
     private func focusedDictationElement() -> AXUIElement? {
-        if let editable = focusedEditableElement() {
-            return editable
-        }
+        guard let application = NSWorkspace.shared.frontmostApplication else { return nil }
+        let pid = application.processIdentifier
+        let focused = focusedElement()
+        let candidate = Self.resolveDictationFocus(
+            focused: focused,
+            alternateFocusedElements: {
+                let app = AXUIElementCreateApplication(pid)
+                let appFocused = self.axElement(of: app, attribute: kAXFocusedUIElementAttribute as String)
+                let window = self.axElement(of: app, attribute: kAXFocusedWindowAttribute as String)
+                let windowFocused = window.flatMap { self.axElement(of: $0, attribute: kAXFocusedUIElementAttribute as String) }
+                return [appFocused, windowFocused].compactMap { $0 }
+            },
+            isSameNode: { CFEqual($0, $1) },
+            isOwnedByOriginalApp: { element in
+                var owner: pid_t = 0
+                return AXUIElementGetPid(element, &owner) == .success && owner == pid
+            },
+            focusedChild: { self.axElement(of: $0, attribute: kAXFocusedUIElementAttribute as String) },
+            parent: { self.axElement(of: $0, attribute: kAXParentAttribute as String) },
+            isExcluded: { element in
+                self.isSecureInputField(element) || self.hasSensitiveFieldHint(element)
+                    || self.isTransientPopupLike(element)
+                    || self.axBool(of: element, attribute: kAXEnabledAttribute as String) == false
+                    || self.axBool(of: element, attribute: "AXReadOnly") == true
+                    || (["AXTextField", "AXTextArea", "AXComboBox"].contains(self.axString(of: element, attribute: kAXRoleAttribute) ?? "")
+                        && self.axBool(of: element, attribute: "AXEditable") == false)
+            },
+            isEditable: { element in
+                Self.isWritableDictationContainer(
+                    role: self.axString(of: element, attribute: kAXRoleAttribute) ?? "",
+                    subrole: self.axString(of: element, attribute: kAXSubroleAttribute) ?? "",
+                    editable: self.axBool(of: element, attribute: "AXEditable"),
+                    enabled: self.axBool(of: element, attribute: kAXEnabledAttribute as String),
+                    readOnly: self.axBool(of: element, attribute: "AXReadOnly"),
+                    selectedTextSettable: self.isAXAttributeSettable(element, attribute: kAXSelectedTextAttribute as String),
+                    valueSettable: self.isAXAttributeSettable(element, attribute: kAXValueAttribute as String))
+            }
+        )
+        if let candidate { return candidate }
         guard isGoogleDocsFrontmost() || isGoogleSheetsFrontmost() || isGoogleWorkspaceEditorFrontmost(),
-              let focused = focusedElement() else {
-            return nil
-        }
+              let focused else { return nil }
         let role = axString(of: focused, attribute: kAXRoleAttribute) ?? ""
-        let supportedCanvasRoles: Set<String> = [
-            "AXWebArea",
-            "AXGroup",
-            "AXGenericElement",
-            "AXScrollArea",
-            "AXLayoutArea"
-        ]
+        let supportedCanvasRoles: Set<String> = ["AXWebArea", "AXGroup", "AXGenericElement", "AXScrollArea", "AXLayoutArea"]
         guard supportedCanvasRoles.contains(role) else { return nil }
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(focused, &pid) == .success,
-              pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            return nil
-        }
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { return nil }
         return focused
+    }
+
+    /// Resolve only declared focus links and ancestors. No children, descendant or
+    /// page scanning: a nearby editor must never become the user's destination.
+    /// Excluded nodes are returned so callers can report secure fields without
+    /// climbing past them or trying another focus endpoint.
+    static func resolveDictationFocus<Node>(focused: Node?, alternateFocusedElements: () -> [Node],
+                                            isSameNode: (Node, Node) -> Bool,
+                                            isOwnedByOriginalApp: (Node) -> Bool,
+                                            focusedChild: (Node) -> Node?, parent: (Node) -> Node?,
+                                            isExcluded: (Node) -> Bool, isEditable: (Node) -> Bool,
+                                            maximumNodes: Int = 24) -> Node? {
+        var visited: [Node] = []
+        func resolve(_ candidate: Node?) -> Node? {
+            guard let candidate, visited.count < maximumNodes,
+                  isOwnedByOriginalApp(candidate), !visited.contains(where: { isSameNode($0, candidate) }) else { return nil }
+            visited.append(candidate)
+            if isExcluded(candidate) { return candidate }
+            if let child = focusedChild(candidate), let resolved = resolve(child) { return resolved }
+            if isEditable(candidate) { return candidate }
+            return resolve(parent(candidate))
+        }
+        if let result = resolve(focused) { return result }
+        for alternate in alternateFocusedElements() {
+            if let result = resolve(alternate) { return result }
+        }
+        return nil
+    }
+
+    static func isWritableDictationContainer(role: String, subrole: String, editable: Bool?, enabled: Bool?,
+                                              readOnly: Bool?, selectedTextSettable: Bool, valueSettable: Bool) -> Bool {
+        guard editable != false, enabled != false, readOnly != true,
+              !role.lowercased().contains("secure"), !subrole.lowercased().contains("secure") else { return false }
+        let nativeRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox"]
+        let containerRoles: Set<String> = ["AXGroup", "AXGenericElement", "AXLayoutArea"]
+        if nativeRoles.contains(role) { return true }
+        guard containerRoles.contains(role) else { return false }
+        // AXEditable is affirmative evidence; a value/selection alone also
+        // exists on documents and labels and does not make them input fields.
+        return editable == true || selectedTextSettable || valueSettable
     }
 
     private func isGoogleWorkspaceEditorFrontmost() -> Bool {
@@ -6862,6 +7328,9 @@ end tell
     /// filters used by the automatic rewrite overlays.
     private func shouldIgnoreDictationInput(element: AXUIElement, includeAppConsent: Bool) -> Bool {
         if isSecureInputField(element) { return true }
+        if axBool(of: element, attribute: kAXEnabledAttribute as String) == false || axBool(of: element, attribute: "AXReadOnly") == true { return true }
+        let role = axString(of: element, attribute: kAXRoleAttribute) ?? ""
+        if ["AXTextField", "AXTextArea", "AXComboBox"].contains(role), axBool(of: element, attribute: "AXEditable") == false { return true }
         if isTransientPopupLike(element) { return true }
         if hasSensitiveFieldHint(element) { return true }
         var pid: pid_t = 0
@@ -7157,24 +7626,25 @@ end tell
     }
 
     private func triggerCopyShortcut() {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true)
-        cmdDown?.flags = .maskCommand
-        let cUp = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
-        cUp?.flags = .maskCommand
-        cmdDown?.post(tap: .cghidEventTap)
-        cUp?.post(tap: .cghidEventTap)
+        for event in Self.clipboardShortcutEvents(keyCode: 0x08) { event.post(tap: .cghidEventTap) }
     }
 
     private func triggerPasteShortcut() -> Bool {
+        let events = Self.clipboardShortcutEvents(keyCode: 0x09)
+        guard !events.isEmpty else { return false }
+        for event in events { event.post(tap: .cghidEventTap) }
+        return true
+    }
+
+    static func clipboardShortcutEvents(keyCode: CGKeyCode) -> [CGEvent] {
         let source = CGEventSource(stateID: .combinedSessionState)
-        let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
-        cmdDown?.flags = .maskCommand
-        let vUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
-        vUp?.flags = .maskCommand
-        cmdDown?.post(tap: .cghidEventTap)
-        vUp?.post(tap: .cghidEventTap)
-        return cmdDown != nil && vUp != nil
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else { return [] }
+        for event in [down, up] {
+            event.flags = .maskCommand
+            event.setIntegerValueField(.eventSourceUserData, value: syntheticSelectionEventTag)
+        }
+        return [down, up]
     }
 
     private func triggerUndoShortcut() {

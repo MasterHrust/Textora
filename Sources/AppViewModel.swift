@@ -5,6 +5,8 @@ import Foundation
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    /// Rendering fixtures never read credentials, start monitors or persist settings.
+    let isPreview: Bool
     enum OnboardingInterfaceMode {
         case toolbox
         case hotKeys
@@ -117,6 +119,12 @@ final class AppViewModel: ObservableObject {
             SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
         }
     }
+    @Published var historyHotKey = TextoraHotKey(keyCode: 4, modifiers: UInt32(controlKey | optionKey | cmdKey), isEnabled: true) {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != historyHotKey else { return }
+            SelectionAssistantSettings.setHotKey(historyHotKey, for: .history)
+        }
+    }
     @Published var selectedMicrophoneUID = "" {
         didSet {
             guard !isReloadingFromDefaults, oldValue != selectedMicrophoneUID else { return }
@@ -137,11 +145,26 @@ final class AppViewModel: ObservableObject {
     private let aiClient = AIClient()
     private var isReloadingFromDefaults = false
     private var autoSaveTask: DispatchWorkItem?
+    private var savedCloudPreferences: [String: String] = [:]
+    private var savedAPIKeys: [AIProvider: String] = [:]
+
+    private var cloudPreferences: [String: String] {
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["provider": provider.rawValue, "model": trimmedModel,
+                provider.modelUserDefaultsKey: trimmedModel,
+                AIClient.openAICompatibleBaseURLUserDefaultsKey:
+                    customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)]
+    }
     private var accessibilityPermissionObserver: NSObjectProtocol?
     private var modelCatalogRequestID = UUID()
     private var speechModelCancellable: AnyCancellable?
 
-    init() {
+    init(isPreview: Bool = false) {
+        self.isPreview = isPreview
+        if isPreview {
+            isReloadingFromDefaults = true
+            return
+        }
         AccessibilityPermissionMonitor.shared.start()
         accessibilityPermissionObserver = NotificationCenter.default.addObserver(
             forName: .textoraAccessibilityPermissionDidChange,
@@ -169,6 +192,7 @@ final class AppViewModel: ObservableObject {
 
     /// Sync fields when reopening Settings so keys/model match disk (avoids stale SwiftUI state).
     func reloadFromUserDefaults() {
+        guard !isPreview else { return }
         isReloadingFromDefaults = true
         defer { isReloadingFromDefaults = false }
         SelectionAssistantSettings.registerDefaults()
@@ -190,15 +214,19 @@ final class AppViewModel: ObservableObject {
         OfflineDictationSettings.registerDefaults()
         offlineDictationEnabled = OfflineDictationSettings.isEnabled
         dictationHotKey = SelectionAssistantSettings.hotKey(for: .dictate)
+        historyHotKey = SelectionAssistantSettings.hotKey(for: .history)
         selectedMicrophoneUID = OfflineDictationSettings.microphoneUID
         speechModelState = SpeechModelManager.shared.state
         microphones = SpeechAudioRecorder.microphones()
         refreshLaunchAtLoginStatus()
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
+        savedCloudPreferences = cloudPreferences
+        savedAPIKeys = [.openai: openAIKey, .gemini: geminiKey, .claude: claudeKey, .other: customToken]
     }
 
     func refreshLaunchAtLoginStatus() {
+        guard !isPreview else { return }
         let state = LaunchAtLoginManager.state
         launchAtLoginEnabled = state.isRegistered
         launchAtLoginRequiresApproval = state == .requiresApproval
@@ -284,6 +312,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshAvailableModels() async {
+        guard !isPreview else { return }
         let requestedProvider = provider
         guard requestedProvider != .other else {
             availableModels = []
@@ -336,42 +365,32 @@ final class AppViewModel: ObservableObject {
 
     @discardableResult
     func saveSettings() -> Bool {
-        UserDefaults.standard.set(provider.rawValue, forKey: "provider")
-        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmedModel, forKey: provider.modelUserDefaultsKey)
-        UserDefaults.standard.set(trimmedModel, forKey: "model")
-        UserDefaults.standard.set(
-            customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
-            forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey
-        )
-        SelectionAssistantSettings.setEnabled(true)
-        UserDefaults.standard.set(toolboxEnabled, forKey: SettingsKeys.toolboxEnabled)
-        UserDefaults.standard.set(hotKeysModeEnabled, forKey: SettingsKeys.hotKeysModeEnabled)
-        SelectionAssistantSettings.setActivationMode(
-            hotKeysModeEnabled && !toolboxEnabled ? .hotkeyOnly : .automatic
-        )
-        SelectionAssistantSettings.setSelectedOperation(operation)
-        SelectionAssistantSettings.setTranslationLanguage(translationLanguage)
-        OfflineDictationSettings.isEnabled = offlineDictationEnabled
-        OfflineDictationSettings.microphoneUID = selectedMicrophoneUID
-        SelectionAssistantSettings.setHotKey(dictationHotKey, for: .dictate)
-        NotificationCenter.default.post(name: SelectionAssistantSettings.settingsDidChangeNotification, object: nil)
-        let keyResult: Result<Void, KeychainHelper.KeychainError>
-        switch provider {
-        case .openai:
-            keyResult = KeychainHelper.save(key: KeychainHelper.openAIKeyAccount, value: openAIKey)
-        case .gemini:
-            keyResult = KeychainHelper.save(key: KeychainHelper.geminiKeyAccount, value: geminiKey)
-        case .claude:
-            keyResult = KeychainHelper.save(key: KeychainHelper.claudeKeyAccount, value: claudeKey)
-        case .other:
-            keyResult = KeychainHelper.save(key: KeychainHelper.customTokenAccount, value: customToken)
+        guard !isPreview else { return true }
+        // Only save edits made in this window. Another retained window may
+        // have changed the provider/model since this one loaded its snapshot.
+        for (key, value) in cloudPreferences where savedCloudPreferences[key] != value {
+            UserDefaults.standard.set(value, forKey: key)
+            savedCloudPreferences[key] = value
         }
+        // Interface, rewrite, language, shortcuts and dictation preferences
+        // persist at the moment the user changes them. A retained Settings or
+        // onboarding window must not overwrite newer choices from the toolbar.
+        let account: String
+        let key: String
+        switch provider {
+        case .openai: account = KeychainHelper.openAIKeyAccount; key = openAIKey
+        case .gemini: account = KeychainHelper.geminiKeyAccount; key = geminiKey
+        case .claude: account = KeychainHelper.claudeKeyAccount; key = claudeKey
+        case .other: account = KeychainHelper.customTokenAccount; key = customToken
+        }
+        guard savedAPIKeys[provider] != key else { return true }
+        let keyResult = KeychainHelper.save(key: account, value: key)
         if case .failure(let error) = keyResult {
             errorText = error.localizedDescription
             onboardingErrorText = error.localizedDescription
             return false
         }
+        savedAPIKeys[provider] = key
         return true
     }
 
@@ -411,7 +430,7 @@ final class AppViewModel: ObservableObject {
 
     func moveOnboardingNext() {
         onboardingErrorText = ""
-        onboardingStep = min(6, onboardingStep + 1)
+        onboardingStep = min(8, onboardingStep + 1)
     }
 
     var onboardingInterfaceMode: OnboardingInterfaceMode {
@@ -454,6 +473,11 @@ final class AppViewModel: ObservableObject {
     }
 
     private func updateInterfaceModes(toolbox: Bool, hotKeys: Bool) {
+        if isPreview {
+            toolboxEnabled = toolbox
+            hotKeysModeEnabled = hotKeys
+            return
+        }
         isReloadingFromDefaults = true
         toolboxEnabled = toolbox
         hotKeysModeEnabled = hotKeys
@@ -469,6 +493,7 @@ final class AppViewModel: ObservableObject {
         onboardingErrorText = ""
         guard saveSettings() else { return false }
         isOnboardingComplete = true
+        UserDefaults.standard.set(true, forKey: "features.personalization.v1.seen")
         UserDefaults.standard.set(true, forKey: OnboardingDefaults.completedKey)
         UserDefaults.standard.removeObject(forKey: OnboardingDefaults.skippedKey)
         return true
@@ -587,6 +612,7 @@ final class AppViewModel: ObservableObject {
         guard !isReloadingFromDefaults else { return }
         autoSaveTask?.cancel()
         let task = DispatchWorkItem { [weak self] in
+            self?.autoSaveTask = nil
             self?.saveSettings()
         }
         autoSaveTask = task
@@ -594,6 +620,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func flushPendingSave() {
+        guard autoSaveTask != nil else { return }
         autoSaveTask?.cancel()
         autoSaveTask = nil
         _ = saveSettings()
@@ -647,18 +674,8 @@ final class AppViewModel: ObservableObject {
         let stored = (providerValue ?? legacyValue ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stored.isEmpty else { return "" }
-        let defaults: Set<String> = [
-            AIClient.Defaults.openAIModel,
-            "gemini-1.5-pro",
-            AIClient.Defaults.geminiModel,
-            "claude-3-5-sonnet-latest",
-            AIClient.Defaults.claudeModel,
-            AIClient.Defaults.customModel
-        ]
-        if defaults.contains(stored) {
-            defaultsStore.set("", forKey: provider.modelUserDefaultsKey)
-            return ""
-        }
+        // A model that used to be a default may still be an explicit user
+        // choice. Preserve it across releases just like a custom model.
         if providerValue == nil {
             defaultsStore.set(stored, forKey: provider.modelUserDefaultsKey)
         }
@@ -666,6 +683,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshAppConsents() {
+        guard !isPreview else { return }
         appConsentRows = textService.allAppConsents().map {
             AppConsentRow(id: $0.bundleID, bundleID: $0.bundleID, status: $0.status)
         }
@@ -683,6 +701,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshAccessibilityPermissionStatus() {
+        guard !isPreview else { return }
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
     }
 

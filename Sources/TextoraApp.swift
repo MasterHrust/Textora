@@ -32,7 +32,8 @@ struct TextoraApp: App {
             Button("Open Quick Setup") {
                 coordinator.showQuickSetupWindow()
             }
-            Button("Open Settings") {
+            Button("Recent Results…") { FeatureWindows.shared.showHistory() }
+            Button("Settings…") {
                 coordinator.showSettingsWindow()
             }
             Button("Support project") {

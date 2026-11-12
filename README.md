@@ -28,14 +28,38 @@ This repository does not include a Textora backend proxy.
 - **Toolbox** appears automatically near the active text field.
 - **Hotkeys** trigger rewrite, translation, or dictation without an on-screen helper.
 - Textora lives in the menu bar and can optionally launch automatically when you log in.
+- Update dialogs display the release’s changes before installation. The release tooling embeds the GitHub Release description in the signed Sparkle feed; see [UPDATES.md](UPDATES.md).
 
 ### Private offline dictation
 
-- Hold a configurable shortcut to dictate into the active text field.
+- Press the configurable shortcut to start recording, then press it again or click Stop to finish. Hold-to-record remains available in Settings > Shortcuts.
 - Speech recognition runs entirely on your Mac with the Parakeet V3 model.
 - Supports 25 languages with automatic recognition independent of keyboard layout, and microphone selection.
 - Optional speech translation sends only the recognized text to your selected AI provider; audio stays local. Translation preferences are shared between Toolbox and Hotkeys.
-- Audio is never uploaded or saved.
+- Audio is never uploaded or saved. If the active field cannot be verified, explicit dictation can still produce a result to copy; no unverified insertion is attempted.
+
+### My Style
+
+- Create editable Everyday, Work, Personal, or custom named profiles.
+- Apply one profile to all apps, or assign profiles to specific applications with a default for the rest.
+- Configure tone, length, English spelling, preserved literal terms, and short dashes.
+- Optionally turn a short description into suggested settings, then apply or discard the suggestion. Raw descriptions and profile names are never generation instructions. The editor has separate Preferences and Preview tabs; creating a profile does not enable it or change app assignments.
+- Access My Style in Settings > Writing > My Style, both result panels, and dictation preferences. It starts disabled. Settings uses a sidebar and focused tabs instead of one long page.
+
+### From thoughts to a message
+
+- Choose Text or Message directly on the recording panel, in Toolbox or Hotkeys mode. Expand translation options to choose Auto-detect or a source language and the target before Stop. Preferences are frozen when recording ends.
+- With translation off, Message immediately opens the local transcript as an editable draft. Choose Improve with AI explicitly to polish it using your selected writing profile. Translation, when enabled, prepares the translated message in one AI request.
+- Always preview before insertion; review the original transcript, clarify ambiguity, regenerate, copy, or insert into the original verified field.
+- Text and the initial Message preview stay offline with translation off, even if My Style is enabled. A provider is only needed for translation or explicit AI improvement; audio is never uploaded.
+
+### Recent Results
+
+- Opt in to encrypted local history of original and final text, including dictation. No audio or clipboard monitoring.
+- Defaults after opt-in: 7 days and 200 entries. Choose 1/7/30 days and 50/200/1000 entries in Settings.
+- Open from the menu bar, result panels, Settings, or the configurable Control-Option-Command-H shortcut, independent of interface mode.
+- Search, filter by operation, sort, copy, and delete results. Disabling saving stops new entries; existing entries expire or can be cleared.
+- History uses AES-GCM with a separate, non-synchronizing Keychain key. No plaintext fallback is used if secure storage fails.
 
 ### Bring your own AI provider
 

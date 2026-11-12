@@ -51,12 +51,19 @@ struct SpeechModelDescriptor: Equatable {
     )
 }
 
+enum DictationShortcutMode: String, CaseIterable, Identifiable {
+    case toggle, hold
+    var id: String { rawValue }
+    var title: String { self == .toggle ? "Press to start / stop" : "Hold to record" }
+}
+
 enum OfflineDictationSettings {
     static let didChangeNotification = Notification.Name("OfflineDictation.settingsDidChange")
 
     private enum Keys {
         static let enabled = "offlineDictation.enabled"
         static let microphoneUID = "offlineDictation.microphoneUID"
+        static let shortcutMode = "offlineDictation.shortcutMode"
         static let capsuleOriginX = "offlineDictation.capsule.originX"
         static let capsuleOriginY = "offlineDictation.capsule.originY"
         static let microphoneDockOriginX = "offlineDictation.microphoneDock.originX"
@@ -66,7 +73,8 @@ enum OfflineDictationSettings {
     static func registerDefaults(_ defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
             Keys.enabled: false,
-            Keys.microphoneUID: ""
+            Keys.microphoneUID: "",
+            Keys.shortcutMode: DictationShortcutMode.toggle.rawValue
         ])
     }
 
@@ -78,6 +86,21 @@ enum OfflineDictationSettings {
     static var microphoneUID: String {
         get { microphoneUID(defaults: .standard) }
         set { setMicrophoneUID(newValue, defaults: .standard) }
+    }
+
+    static var shortcutMode: DictationShortcutMode {
+        get { shortcutMode(defaults: .standard) }
+        set { setShortcutMode(newValue, defaults: .standard) }
+    }
+
+    static func shortcutMode(defaults: UserDefaults) -> DictationShortcutMode {
+        DictationShortcutMode(rawValue: defaults.string(forKey: Keys.shortcutMode) ?? "") ?? .toggle
+    }
+
+    static func setShortcutMode(_ mode: DictationShortcutMode, defaults: UserDefaults) {
+        // The active recording keeps its initial shortcut behavior. No hotkey
+        // registration or microphone controller restart is needed for this choice.
+        defaults.set(mode.rawValue, forKey: Keys.shortcutMode)
     }
 
     static func isEnabled(defaults: UserDefaults) -> Bool {

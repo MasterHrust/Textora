@@ -11,7 +11,37 @@ import SwiftUI
 @MainActor
 final class SelectionAssistantController: NSObject, NSWindowDelegate {
     private let textService = TextAccessService()
-    private let viewModel = SelectionAssistantViewModel()
+    private let viewModel: SelectionAssistantViewModel
+    private(set) var isPausedForStyleEditing = false
+    private var restorePanelAfterStyleEditing = false
+    private var preservesStyleEditingContext: Bool { isPausedForStyleEditing || FeatureWindows.shared.isStyleEditorOpen }
+
+    init(viewModel: SelectionAssistantViewModel? = nil) {
+        self.viewModel = viewModel ?? SelectionAssistantViewModel()
+        super.init()
+    }
+
+    /// Cancel only focus reads and Return interception, retaining the original result and target.
+    func suspendForStyleEditing() {
+        if !isPausedForStyleEditing { restorePanelAfterStyleEditing = panel?.isVisible == true }
+        isPausedForStyleEditing = true
+        resolveGeneration += 1
+        contextReadTask?.cancel()
+        selectionDebounceTask?.cancel(); selectionDebounceTask = nil
+        fallbackResolveTask?.cancel(); fallbackResolveTask = nil
+        hidePanel()
+    }
+
+    func resumeAfterStyleEditing(restorePanel: Bool = true) {
+        guard isPausedForStyleEditing, !FeatureWindows.shared.isStyleEditorOpen else { return }
+        isPausedForStyleEditing = false
+        let restore = restorePanelAfterStyleEditing
+        restorePanelAfterStyleEditing = false
+        if restorePanel && restore, !viewModel.originalText.isEmpty {
+            let anchor = lockedAnchor ?? stableSelectionAnchor ?? lastSelectionGestureAnchor ?? mouseAnchor()
+            showOrMovePanel(near: anchor)
+        }
+    }
     private var panel: NSPanel?
     private var timer: Timer?
     private var pendingSelectionKey: String?
@@ -31,7 +61,6 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     private var suppressSelectionUntil = Date.distantPast
     private var contextMenuSuppressionUntil = Date.distantPast
     private var transientSelectionLossGraceUntil = Date.distantPast
-    private var ignoreCommandCUntil = Date.distantPast
     private var mouseDownPoint: CGPoint?
     private var didDragSinceMouseDown = false
     private var selectionGestureID = 0
@@ -74,7 +103,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         createPanelIfNeeded()
         installInputMonitorsIfNeeded()
         timer?.invalidate()
-        let timer = Timer(timeInterval: 0.10, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.tick()
             }
@@ -106,7 +135,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         suppressSelectionUntil = .distantPast
         contextMenuSuppressionUntil = .distantPast
         transientSelectionLossGraceUntil = .distantPast
-        ignoreCommandCUntil = .distantPast
+        contextReadTask?.cancel()
         mouseDownPoint = nil
         didDragSinceMouseDown = false
         selectionGestureID += 1
@@ -151,6 +180,8 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func tick() {
+        guard !preservesStyleEditingContext, BackgroundTextPollingGate.shared.allowsPolling(), Date() >= suppressSelectionUntil,
+              !isContextMenuSuppressed else { return }
         guard panel?.isKeyWindow != true, !contextResolutionInFlight, !viewModel.isApplying, !tickInFlight, automaticDetectionEnabled else { return }
         guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
         tickInFlight = true
@@ -158,7 +189,8 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         Task { @MainActor in
             defer { tickInFlight = false }
             let signal = await SelectionTextWorker.shared.signal()
-            guard panel?.isKeyWindow != true, generation == resolveGeneration, timer != nil, !viewModel.isApplying else { return }
+            guard !preservesStyleEditingContext, BackgroundTextPollingGate.shared.allowsPolling(), panel?.isKeyWindow != true,
+                  generation == resolveGeneration, timer != nil, !viewModel.isApplying else { return }
             if signal.blocked { hideForNoSelection(); return }
             tickWithCoalescedFocus(signal: signal.selection)
         }
@@ -284,6 +316,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
 
     private func hideForNoSelection() {
         resolveGeneration += 1
+        contextReadTask?.cancel()
         selectionDebounceTask?.cancel()
         selectionDebounceTask = nil
         fallbackResolveTask?.cancel()
@@ -339,7 +372,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         let task = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard self.resolveGeneration == generation else { return }
+                guard !self.preservesStyleEditingContext, self.resolveGeneration == generation else { return }
                 guard self.pendingSelectionKey == expectedKey else {
                     self.trace(
                         "resolve skipped stale",
@@ -363,7 +396,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                     return
                 }
                 let context = await self.readSelectedTextContextForToolbar()
-                guard self.resolveGeneration == generation else { return }
+                guard !self.preservesStyleEditingContext, self.resolveGeneration == generation else { return }
                 guard let context else {
                     self.trace("resolve no context", key: expectedKey)
                     if self.shouldHoldPanelDuringTransientSelectionLoss { return }
@@ -394,7 +427,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
 
-    private func readSelectedTextContextForToolbar() async -> TextAccessService.FocusedTextContext? {
+    private func readSelectedTextContextForToolbar(intent: SelectionTextWorker.ReadIntent = .automatic) async -> TextAccessService.FocusedTextContext? {
         let generation = resolveGeneration
         // A busy reader is not a missing selection. Keep only the latest
         // generation eligible to run after an uncancellable AX/clipboard read.
@@ -402,18 +435,16 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             let runningID = contextReadID
             _ = await running.value
             if contextReadID == runningID { contextReadTask = nil }
-            guard generation == resolveGeneration, !Task.isCancelled else { return nil }
+            guard !preservesStyleEditingContext, generation == resolveGeneration, !Task.isCancelled else { return nil }
         }
-        guard generation == resolveGeneration, !Task.isCancelled else { return nil }
+        guard !preservesStyleEditingContext, generation == resolveGeneration, !Task.isCancelled else { return nil }
         let readID = UUID()
         contextReadID = readID
-        let task = Task { await SelectionTextWorker.shared.selection() }
+        let task = Task { await SelectionTextWorker.shared.selection(intent: intent) }
         contextReadTask = task
         defer { if contextReadID == readID { contextReadTask = nil } }
-        ignoreCommandCUntil = Date().addingTimeInterval(1.25)
         let context = await task.value
-        ignoreCommandCUntil = Date().addingTimeInterval(0.45)
-        guard generation == resolveGeneration, !Task.isCancelled else { return nil }
+        guard !preservesStyleEditingContext, generation == resolveGeneration, !Task.isCancelled else { return nil }
         return context
     }
 
@@ -426,7 +457,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.fallbackResolveTask = nil
-                guard self.resolveGeneration == generation else { return }
+                guard !self.preservesStyleEditingContext, self.resolveGeneration == generation else { return }
                 guard !DraggableFloatingPanel.isAnyPanelTrackingPointer else { return }
                 self.lastFallbackProbeAt = Date()
                 guard UserDefaults.standard.bool(forKey: SelectionAssistantSettings.Keys.enabled) else {
@@ -460,7 +491,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                     }
                 }
                 let resolved = await self.readSelectedTextContextForToolbar()
-                guard self.resolveGeneration == generation else { return }
+                guard !self.preservesStyleEditingContext, self.resolveGeneration == generation else { return }
                 guard let context = resolved else {
                     self.trace("fallback no context")
                     if self.shouldHoldPanelDuringTransientSelectionLoss {
@@ -558,23 +589,30 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                 guard type == .keyDown, let refcon else {
                     return Unmanaged.passUnretained(event)
                 }
+                guard event.getIntegerValueField(.eventSourceUserData) != TextAccessService.syntheticSelectionEventTag else {
+                    return Unmanaged.passUnretained(event)
+                }
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
+                if BackgroundTextPollingGate.isTypingKey(keyCode: UInt16(truncatingIfNeeded: keyCode),
+                    command: flags.contains(.maskCommand), shift: flags.contains(.maskShift)) {
+                    BackgroundTextPollingGate.shared.pauseForTyping()
+                }
                 guard flags.contains(.maskCommand) else {
                     return Unmanaged.passUnretained(event)
                 }
-                if keyCode == 0 || keyCode == 8 {
+                if keyCode == 0 || SelectionAssistantController.isUserClipboardShortcut(keyCode: UInt16(keyCode), characters: nil, modifiers: .command) {
                     let controller = Unmanaged<SelectionAssistantController>
                         .fromOpaque(refcon)
                         .takeUnretainedValue()
                     Task { @MainActor in
-                        guard controller.panel?.isKeyWindow != true, !controller.viewModel.isApplying else { return }
+                        guard !controller.preservesStyleEditingContext, controller.panel?.isKeyWindow != true, !controller.viewModel.isApplying else { return }
                         if keyCode == 0 {
                             controller.resetResolvedSelectionState()
                             controller.beginNewSelectionGesture("cmdA")
                             controller.allowFallbackProbeBriefly()
                         } else {
-                            controller.handleCommandCEvent()
+                            controller.suppressForUserCopy()
                         }
                     }
                 }
@@ -594,6 +632,8 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func handleSelectionGestureEvent(_ event: NSEvent) {
+        guard !preservesStyleEditingContext else { return }
+        guard event.cgEvent?.getIntegerValueField(.eventSourceUserData) != TextAccessService.syntheticSelectionEventTag else { return }
         if DraggableFloatingPanel.isAnyPanelTrackingPointer || event.window is DraggableFloatingPanel {
             mouseDownPoint = nil
             didDragSinceMouseDown = false
@@ -608,6 +648,19 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         // Copy/select shortcuts generated by the insertion pipeline must not
         // clear its context or cancel its task. Escape still cancels above.
         guard !viewModel.isApplying else { return }
+        if event.type == .keyDown,
+           BackgroundTextPollingGate.isTypingKey(keyCode: event.keyCode, command: event.modifierFlags.contains(.command),
+                                                  shift: event.modifierFlags.contains(.shift)),
+           !([UInt16(36), 76].contains(event.keyCode) && viewModel.canApply) {
+            BackgroundTextPollingGate.shared.pauseForTyping()
+            if panel?.isVisible == true { hideForNoSelection() }
+        }
+        if event.type == .keyDown,
+           Self.isUserClipboardShortcut(keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
+                                        modifiers: event.modifierFlags) {
+            suppressForUserCopy()
+            return
+        }
         if !automaticDetectionEnabled {
             if event.type == .leftMouseDown, panel?.isVisible == true, !isMouseInsidePanel {
                 hideForNoSelection()
@@ -645,6 +698,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                 suppressSelectionUntil = .distantPast
             }
         case .leftMouseUp:
+            BackgroundTextPollingGate.shared.resumeForSelection()
             if didDragSinceMouseDown {
                 lastSelectionGestureAnchor = mouseAnchor()
                 beginNewSelectionGesture("mouseDrag")
@@ -666,16 +720,12 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isCommandA = flags.contains(.command)
                 && (event.charactersIgnoringModifiers?.lowercased() == "a" || event.keyCode == 0)
-            let isCommandC = flags.contains(.command)
-                && (event.charactersIgnoringModifiers?.lowercased() == "c" || event.keyCode == 8)
             let isKeyboardSelection = flags.contains(.shift)
                 && [UInt16(115), 119, 123, 124, 125, 126].contains(event.keyCode)
             if isCommandA {
                 resetResolvedSelectionState()
                 beginNewSelectionGesture("cmdA")
                 allowFallbackProbeBriefly()
-            } else if isCommandC {
-                handleCommandCEvent()
             } else if isKeyboardSelection {
                 beginNewSelectionGesture("keyboardSelection")
                 allowFallbackProbeBriefly()
@@ -685,19 +735,18 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func handleCommandCEvent() {
-        guard !Self.shouldIgnoreCopyEvent(isApplying: viewModel.isApplying, now: Date(), ignoreUntil: ignoreCommandCUntil) else {
-            trace("ignore internal copy")
-            return
-        }
-        suppressForUserCopy()
-    }
-
-    static func shouldIgnoreCopyEvent(isApplying: Bool, now: Date, ignoreUntil: Date) -> Bool {
-        isApplying || now < ignoreUntil
+    nonisolated static func isUserClipboardShortcut(keyCode: UInt16, characters: String?, modifiers: NSEvent.ModifierFlags,
+                                                   sourceUserData: Int64 = 0) -> Bool {
+        sourceUserData != TextAccessService.syntheticSelectionEventTag && modifiers.contains(.command)
+            && ([UInt16(7), 8, 9].contains(keyCode) || ["c", "x", "v"].contains(characters?.lowercased() ?? ""))
     }
 
     private func suppressForUserCopy() {
+        // Invalidate already running reads as well as debounce timers. Cancelling
+        // a DispatchWorkItem alone does not stop its unstructured async task.
+        resolveGeneration += 1
+        contextReadTask?.cancel()
+        fallbackProbeAllowedUntil = .distantPast
         suppressSelectionUntil = Date().addingTimeInterval(1.25)
         selectionDebounceTask?.cancel()
         selectionDebounceTask = nil
@@ -710,10 +759,13 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         transientSelectionLossGraceUntil = .distantPast
         viewModel.clear()
         hidePanel()
-        trace("suppress copy")
+        trace("suppress user clipboard shortcut")
     }
 
     private func suppressForContextMenu() {
+        resolveGeneration += 1
+        contextReadTask?.cancel()
+        fallbackProbeAllowedUntil = .distantPast
         contextMenuSuppressionUntil = Date().addingTimeInterval(8.0)
         suppressSelectionUntil = max(suppressSelectionUntil, contextMenuSuppressionUntil)
         selectionDebounceTask?.cancel()
@@ -749,6 +801,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func beginNewSelectionGesture(_ reason: String) {
+        BackgroundTextPollingGate.shared.resumeForSelection()
         resolveGeneration += 1
         selectionGestureID += 1
         pendingWeakSelectionRangeSignature = nil
@@ -796,9 +849,6 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             viewModel: viewModel,
             onApply: { [weak self] in
                 self?.applyCurrentRewrite()
-            },
-            onTranslationCopied: { [weak self] in
-                self?.hideForNoSelection()
             },
             onClose: { [weak self] in
                 self?.hideForNoSelection()
@@ -850,6 +900,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     private func showOrMovePanel(near anchor: CGRect) {
+        guard !preservesStyleEditingContext else { return }
         createPanelIfNeeded()
         guard let panel else { return }
         let size = currentPanelSize
@@ -875,8 +926,8 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         updateReturnHotKeyRegistration()
     }
 
-    private func applyCurrentRewrite() {
-        guard viewModel.canApply else { return }
+    func applyCurrentRewrite() {
+        guard !preservesStyleEditingContext, viewModel.canApply else { return }
         resolveGeneration += 1
         selectionDebounceTask?.cancel()
         selectionDebounceTask = nil
@@ -894,7 +945,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     private func updateReturnHotKeyRegistration() {
         let canApplyResult = !viewModel.hasTranslationContent
             && viewModel.presentationMode != .hotKeyTranslate && viewModel.canApply
-        let shouldRegister = panel?.isVisible == true
+        let shouldRegister = !preservesStyleEditingContext && panel?.isVisible == true
             && canApplyResult
         guard shouldRegister else {
             unregisterReturnHotKeys()
@@ -1011,6 +1062,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
     }
 
     func performHotKeyAction(_ action: TextoraHotKeyAction) {
+        guard !preservesStyleEditingContext else { return }
         resetResolvedSelectionState()
         viewModel.clear()
         allowFallbackProbeBriefly()
@@ -1040,7 +1092,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         let generation = resolveGeneration
         Task { @MainActor [weak self] in
         guard let self else { return }
-        let resolved = await readSelectedTextContextForToolbar()
+        let resolved = await readSelectedTextContextForToolbar(intent: .userInvoked)
         guard resolveGeneration == generation else { return }
         guard let context = resolved else {
             hideForNoSelection()
@@ -1057,7 +1109,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         case .translate:
             viewModel.setSelectionContext(context, automaticallyCheck: false, preservePresentation: true)
             viewModel.translate()
-        case .dictate:
+        case .dictate, .history:
             return
         }
         showOrMovePanel(near: anchor)
@@ -1079,7 +1131,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         } else {
             contentHeight = viewModel.showsTranslationPanel ? 164 : 50
         }
-        return CGSize(width: Self.panelWidth, height: contentHeight + Self.panelTopReserve)
+        return CGSize(width: Self.panelWidth, height: contentHeight + 28 + Self.panelTopReserve)
     }
 
     private var currentPanelTopReserve: CGFloat {

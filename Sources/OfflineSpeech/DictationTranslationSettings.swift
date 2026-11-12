@@ -4,24 +4,43 @@ struct DictationTranslationSettings: Equatable {
     var enabled: Bool
     var source: TranslationLanguage
     var target: TranslationLanguage
+    var automaticSource = false
+    var sourceLanguageName: String? { automaticSource ? nil : source.displayName }
 
     static func load(_ defaults: UserDefaults = .standard) -> Self {
-        Self(enabled: defaults.bool(forKey: "dictation.translation.enabled"),
-             source: TranslationLanguage(rawValue: defaults.string(forKey: "dictation.translation.source") ?? "russian") ?? .russian,
-             target: TranslationLanguage(rawValue: defaults.string(forKey: "dictation.translation.target") ?? "english") ?? .english)
+        let source = defaults.string(forKey: "dictation.translation.source") ?? "auto"
+        return Self(enabled: defaults.bool(forKey: "dictation.translation.enabled"),
+             source: TranslationLanguage(rawValue: source) ?? .russian,
+             target: TranslationLanguage(rawValue: defaults.string(forKey: "dictation.translation.target") ?? "english") ?? .english,
+             automaticSource: TranslationLanguage(rawValue: source) == nil)
+    }
+}
+
+/// Editable preferences become one immutable processing configuration at Stop.
+struct DictationSessionOptions: Equatable {
+    let outputMode: DictationOutputMode
+    let translation: DictationTranslationSettings
+
+    static func load(_ defaults: UserDefaults = .standard) -> Self {
+        Self(outputMode: DictationOutputMode(rawValue: defaults.string(forKey: "dictation.outputMode") ?? "") ?? .text,
+             translation: .load(defaults))
     }
 }
 
 struct DictationTranslationSettingsView: View {
+    @ObservedObject private var styleStore: PersonalStyleStore
+    init(styleStore: PersonalStyleStore? = nil) { self.styleStore = styleStore ?? .shared }
     @AppStorage("dictation.translation.enabled") private var enabled = false
-    @AppStorage("dictation.translation.source") private var source = "russian"
+    @AppStorage("dictation.translation.source") private var source = "auto"
     @AppStorage("dictation.translation.target") private var target = "english"
     @AppStorage("dictation.translation.configured") private var configured = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            DictationOutputSettingsView(styleStore: styleStore)
+            Divider()
             Toggle("Translate dictated text", isOn: $enabled)
             Group {
-                languageRow("From", selection: $source)
+                languageRow("From", selection: $source, allowsAutomatic: true)
                 languageRow("To", selection: $target)
                 Button {
                     let previousSource = source
@@ -31,22 +50,22 @@ struct DictationTranslationSettingsView: View {
                 } label: {
                     Label("Swap languages", systemImage: "arrow.left.arrow.right")
                 }
+                .disabled(source == "auto")
             }
             .disabled(!enabled)
             Text("Shared by Toolbox and Hotkeys. Translation sends the transcript to your AI provider. Audio stays on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
-            Button("Save dictation preferences") { configured = true }
-                .controlSize(.small)
         }
         .onChange(of: enabled) { _, _ in configured = true }
         .onChange(of: source) { _, _ in configured = true }
         .onChange(of: target) { _, _ in configured = true }
     }
 
-    private func languageRow(_ title: String, selection: Binding<String>) -> some View {
+    private func languageRow(_ title: String, selection: Binding<String>, allowsAutomatic: Bool = false) -> some View {
         HStack(spacing: 10) {
             Text(title).frame(width: 42, alignment: .leading)
             Picker(title, selection: selection) {
+                if allowsAutomatic { Text("Auto-detect").tag("auto") }
                 ForEach(TranslationLanguage.allCases) { language in
                     Text("\(language.flag) \(language.displayName)").tag(language.rawValue)
                 }
@@ -58,7 +77,7 @@ struct DictationTranslationSettingsView: View {
 struct DictationTranslationControl: View {
     @Binding var tip: MicrophoneTip?
     @AppStorage("dictation.translation.enabled") private var enabled = false
-    @AppStorage("dictation.translation.source") private var source = "russian"
+    @AppStorage("dictation.translation.source") private var source = "auto"
     @AppStorage("dictation.translation.target") private var target = "english"
     @AppStorage("dictation.translation.configured") private var configured = false
     @Binding var isPresented: Bool
@@ -76,7 +95,7 @@ struct DictationTranslationControl: View {
             Button {
                 isPresented = true
             } label: {
-                Text((TranslationLanguage(rawValue: source) ?? .russian).flag)
+                Text(source == "auto" ? "🌐" : (TranslationLanguage(rawValue: source) ?? .russian).flag)
                     .font(.system(size: 16))
             }
             .help("Dictation translation languages")
@@ -94,6 +113,7 @@ struct DictationTranslationControl: View {
                 Image(systemName: "arrow.left.arrow.right")
             }
             .help("Swap languages")
+            .disabled(source == "auto")
             .accessibilityLabel("Swap languages")
             .modifier(MicrophoneTipAnchor(target: .swap, active: $tip))
             Button { isPresented = true } label: {

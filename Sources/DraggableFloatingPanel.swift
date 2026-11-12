@@ -19,6 +19,9 @@ final class DraggableFloatingPanel: NSPanel {
     var constrainDragFrame: ((CGRect) -> CGRect)?
     var dragRegionContains: ((NSPoint, NSRect) -> Bool)?
     var allowsDragging = true
+    /// Recording controls may need keyboard focus. Idle helpers keep their
+    /// existing non-key behaviour so they never steal typing from the editor.
+    var allowsKeyboardInteraction = false
     /// Uses WindowServer's native drag loop. This is preferable for small utility panels whose
     /// SwiftUI content can otherwise coalesce mouse-drag events while the host app is inactive.
     var usesNativeWindowDragging = false
@@ -47,7 +50,7 @@ final class DraggableFloatingPanel: NSPanel {
     private var currentSessionAllowsDragging = false
     private var dragUpdateTimer: Timer?
 
-    override var canBecomeKey: Bool { false }
+    override var canBecomeKey: Bool { allowsKeyboardInteraction }
 
     deinit {
         dragUpdateTimer?.invalidate()

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Combine
 
 enum TranslationLanguage: String, CaseIterable, Identifiable {
     case english
@@ -126,11 +127,15 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
     private var meaningClarification = ""
 
+    var unansweredMeaningQuestionIndices: [Int] {
+        meaningQuestions.indices.filter { index in
+            !(meaningAnswers[index].map { meaningQuestions[index].options.contains($0) } ?? false)
+        }
+    }
+
     var canClarifyMeaning: Bool {
         !customMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || (!meaningQuestions.isEmpty && meaningQuestions.indices.allSatisfy { index in
-                meaningAnswers[index].map { meaningQuestions[index].options.contains($0) } ?? false
-            })
+            || (!meaningQuestions.isEmpty && unansweredMeaningQuestionIndices.isEmpty)
     }
 
     func clarifyMeaning() {
@@ -177,19 +182,21 @@ final class SelectionAssistantViewModel: ObservableObject {
     @Published var operation: RewriteOperation {
         didSet {
             guard oldValue != operation else { return }
-            SelectionAssistantSettings.setSelectedOperation(operation)
-            if selectingRecommendation || isTranslationMode { return }
+            if !selectingRecommendation { SelectionAssistantSettings.setSelectedOperation(operation) }
+            if selectingRecommendation || isTranslationMode || applicationNeedsSelection || isApplying { return }
             manuallySelectedOperation = operation
+            explicitlyRequestedRewrite = true
             if status == .meaningUnclear { return }
             if status == .checking, UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.smartAIEnabled) { return }
             if reviews[operation] == .error {
                 rewrittenText = ""
-                status = .error("This variant changed protected text. Choose another mode or retry.")
+                status = .error("Empty rewrite. Please retry.")
                 return
             }
             if let result = reviewedTexts[operation] {
                 rewrittenText = result
                 status = normalized(result) == normalized(originalText) ? .noChanges : .ready
+                rememberResult()
                 return
             }
             if let context = currentContext {
@@ -205,6 +212,7 @@ final class SelectionAssistantViewModel: ObservableObject {
             SelectionAssistantSettings.setTranslationLanguage(translationLanguage)
             translatedText = ""
             translationStatus = .idle
+            resultNotice = ""
             isLanguagePickerExpanded = false
         }
     }
@@ -217,10 +225,14 @@ final class SelectionAssistantViewModel: ObservableObject {
     @Published var isLanguagePickerExpanded = false
     @Published private(set) var presentationMode: PresentationMode = .standard
     @Published private(set) var isTranslationMode = false
-    @Published private(set) var applicationNeedsReview = false
+    @Published private(set) var applicationNeedsSelection = false
 
-    private let textService = TextAccessService()
     private let aiClient = AIClient()
+    private let history: RecentResults
+    private let styleStore: PersonalStyleStore
+    private var styleRefreshAllowsCopyOnly = false
+    private let pasteboard: NSPasteboard
+    private let translator: (@MainActor (String, TranslationLanguage) async throws -> String)?
     private var currentContext: TextAccessService.FocusedTextContext?
     private var currentFingerprint: String?
     private var rewriteTask: Task<Void, Never>?
@@ -230,8 +242,44 @@ final class SelectionAssistantViewModel: ObservableObject {
     var isApplying: Bool { status == .applying || isApplyingTranslation }
     private(set) var requestID = 0
     private var translationRequestID = 0
+    private var styleSubscription: AnyCancellable?
+    private var requestStyle: StyleProfile?
+    private var historyToken: Int?
+    private var historyID = UUID()
+    private var explicitlyRequestedRewrite = false
+    var sourceBundleID: String? { currentContext?.targetBundleID }
 
-    init() {
+    private func styleChanged() {
+        guard let context = currentContext, !isApplying,
+              styleStore.profile(for: context.targetBundleID)?.cacheKey != requestStyle?.cacheKey else { return }
+        explicitlyRequestedRewrite = true
+        if isTranslationMode {
+            translationTask?.cancel()
+            translationRequestID += 1
+            translationStatus = .idle
+            translate()
+        } else {
+            styleRefreshAllowsCopyOnly = applicationNeedsSelection
+            startCheck(for: context)
+        }
+    }
+
+    private func rememberResult(status: String = "Ready") {
+        let text = isTranslationMode ? translatedText : rewrittenText
+        guard !text.isEmpty, let context = currentContext else { return }
+        history.record(OperationResult(id: historyID, kind: isTranslationMode ? .translate : .rewrite,
+            source: originalText, result: text, application: OriginApplication.name(context.targetBundleID),
+            language: isTranslationMode ? translationLanguage.displayName : nil, style: requestStyle?.name, status: status), token: historyToken)
+    }
+
+    init(pasteboard: NSPasteboard = .general,
+         translator: (@MainActor (String, TranslationLanguage) async throws -> String)? = nil,
+         styleStore: PersonalStyleStore? = nil,
+         history: RecentResults? = nil) {
+        self.history = history ?? .shared
+        self.styleStore = styleStore ?? .shared
+        self.pasteboard = pasteboard
+        self.translator = translator
         SelectionAssistantSettings.registerDefaults()
         operation = SelectionAssistantSettings.selectedOperation()
         if UserDefaults.standard.object(forKey: SelectionAssistantSettings.Keys.translationLanguage) != nil {
@@ -243,10 +291,12 @@ final class SelectionAssistantViewModel: ObservableObject {
             translationLanguage = saved
             SelectionAssistantSettings.setTranslationLanguage(saved)
         }
+        styleSubscription = NotificationCenter.default.publisher(for: PersonalStyleStore.changed, object: self.styleStore)
+            .sink { [weak self] _ in Task { @MainActor in self?.styleChanged() } }
     }
 
     var canApply: Bool {
-        guard !applicationNeedsReview else { return false }
+        guard !applicationNeedsSelection else { return false }
         guard !isApplyingTranslation else { return false }
         guard case .ready = status else { return false }
         return !rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -255,6 +305,20 @@ final class SelectionAssistantViewModel: ObservableObject {
 
     var canTranslate: Bool {
         !isApplying && translationStatus != .translating && currentContext != nil && !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var canUseTranslation: Bool {
+        translationStatus == .ready && !translatedText.isEmpty && !isApplying
+    }
+
+    func selectTranslationLanguage(_ language: TranslationLanguage) {
+        guard !isApplying else { return }
+        let changed = translationLanguage != language
+        translationLanguage = language
+        isLanguagePickerExpanded = false
+        // Changing the language of an existing translation is itself an
+        // explicit translation request in both presentations.
+        if isTranslationMode, changed || translationStatus != .ready { translate() }
     }
 
     var showsTranslationPanel: Bool {
@@ -278,7 +342,8 @@ final class SelectionAssistantViewModel: ObservableObject {
     func prepareForSelectionMove() {
         isTranslationMode = false
         resetMeaning()
-        applicationNeedsReview = false
+        applicationNeedsSelection = false
+        resultNotice = ""
         applyTask?.cancel()
         isApplyingTranslation = false
         rewriteTask?.cancel()
@@ -299,7 +364,7 @@ final class SelectionAssistantViewModel: ObservableObject {
 
     func clear() {
         resetMeaning()
-        applicationNeedsReview = false
+        applicationNeedsSelection = false
         // Translation is an explicit action for one selection, not a sticky workflow.
         isTranslationMode = false
         applyTask?.cancel()
@@ -343,16 +408,21 @@ final class SelectionAssistantViewModel: ObservableObject {
     ) {
         if !preservePresentation { presentationMode = .standard }
         let fingerprint = Self.fingerprint(for: context)
-        if fingerprint == currentFingerprint, isTranslationMode, translationStatus != .idle { return }
-        if fingerprint == currentFingerprint, !rewrittenText.isEmpty || status == .checking || status == .noChanges || status == .meaningUnclear {
+        if !applicationNeedsSelection, fingerprint == currentFingerprint, isTranslationMode, translationStatus != .idle { return }
+        if !applicationNeedsSelection, fingerprint == currentFingerprint, !rewrittenText.isEmpty || status == .checking || status == .noChanges || status == .meaningUnclear {
             return
         }
         // Preserve translation only for an explicit HotKey Translate invocation.
         // Repeated notifications above retain the current selection's preview.
         if presentationMode != .hotKeyTranslate { isTranslationMode = false }
         currentContext = context
+        styleRefreshAllowsCopyOnly = false
+        historyID = UUID()
+        historyToken = history.consentToken
+        explicitlyRequestedRewrite = preservePresentation && presentationMode == .hotKeyRewrite
         resetMeaning()
-        applicationNeedsReview = false
+        applicationNeedsSelection = false
+        resultNotice = ""
         applyTask?.cancel()
         isApplyingTranslation = false
         manuallySelectedOperation = nil
@@ -364,7 +434,6 @@ final class SelectionAssistantViewModel: ObservableObject {
         requestID += 1
         translationRequestID += 1
         currentFingerprint = fingerprint
-        resultNotice = ""
         originalText = context.text
         rewrittenText = ""
         translatedText = ""
@@ -380,6 +449,7 @@ final class SelectionAssistantViewModel: ObservableObject {
 
     func apply(onFinished: @escaping () -> Void) {
         guard canApply, let context = currentContext else { return }
+        rememberResult(status: "Insertion requested")
         status = .applying
         let text = rewrittenText
         let generation = requestID
@@ -387,30 +457,71 @@ final class SelectionAssistantViewModel: ObservableObject {
             guard let self, self.requestID == generation else { return }
             let result = await SelectionTextWorker.shared.apply(text, captured: context)
             guard !Task.isCancelled, self.requestID == generation else { return }
-            switch result {
-            case .success:
-                self.clear()
-                onFinished()
-            case .clipboardArmed, .failed, .unsupportedTarget:
-                self.markUnconfirmedApplication()
-            }
+            self.completeApplication(result, onFinished: onFinished)
         }
     }
 
-    func markUnconfirmedApplication() {
-        applicationNeedsReview = true
-        resultNotice = "Check the original field. Select text again to retry."
-        status = .ready
+    func completeApplication(_ result: TextAccessService.ApplyResult, onFinished: () -> Void) {
+        switch result {
+        case .success, .dispatched:
+            rememberResult(status: result == .success ? "Inserted" : "Sent to app")
+            // Close quietly when the write was sent. Lack of AX readback is
+            // neither a failed insertion nor permission to send another paste.
+            clear()
+            onFinished()
+        case .clipboardArmed, .failed, .unsupportedTarget, .rejected:
+            rememberResult(status: "Copied after insertion refusal")
+            rewriteTask?.cancel()
+            translationTask?.cancel()
+            requestID += 1
+            translationRequestID += 1
+            reviews = [:]
+            reviewedTexts = [:]
+            recommendation = nil
+            applicationNeedsSelection = true
+            isApplyingTranslation = false
+            let text = isTranslationMode ? translatedText : rewrittenText
+            let failureMessage: String
+            if case .rejected(let reason) = result { failureMessage = reason.message }
+            else { failureMessage = "Could not insert." }
+            resultNotice = writeToClipboard(text)
+                ? "\(failureMessage) Copied to clipboard - press ⌘V."
+                : "Could not insert or copy. Select and copy the result below."
+            status = .ready
+        }
+    }
+
+    func copyApplicationResult() {
+        copyResult(isTranslationMode ? translatedText : rewrittenText)
+    }
+
+    func copyRewrite() {
+        guard !rewrittenText.isEmpty else { return }
+        copyResult(rewrittenText)
     }
 
     private func copyResult(_ text: String) {
-        NSPasteboard.general.clearContents()
-        resultNotice = NSPasteboard.general.setString(text, forType: .string)
-            ? "Copied — press ⌘V" : "Could not copy"
+        rememberResult(status: "Copied")
+        guard !text.isEmpty else { return }
+        resultNotice = writeToClipboard(text)
+            ? "Copied - press ⌘V" : "Could not copy"
+    }
+
+    private func writeToClipboard(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        pasteboard.clearContents()
+        return pasteboard.setString(text, forType: .string)
     }
 
     func applyTranslation(onFinished: @escaping () -> Void = {}) {
-        guard translationStatus == .ready, !translatedText.isEmpty, !isApplying, let context = currentContext else { return }
+        guard canUseTranslation, let context = currentContext else { return }
+        // An invalid insertion target does not invalidate the captured source
+        // or the translated result. Subsequent clicks copy without retrying AX.
+        if applicationNeedsSelection {
+            copyTranslation()
+            return
+        }
+        rememberResult(status: "Insertion requested")
         let text = translatedText
         let generation = translationRequestID
         isApplyingTranslation = true
@@ -418,11 +529,7 @@ final class SelectionAssistantViewModel: ObservableObject {
             let result = await SelectionTextWorker.shared.apply(text, captured: context)
             guard !Task.isCancelled, generation == translationRequestID else { return }
             isApplyingTranslation = false
-            switch result {
-            case .success: clear(); onFinished()
-            case .clipboardArmed: resultNotice = "Copied — press ⌘V"
-            case .failed, .unsupportedTarget: copyResult(text)
-            }
+            completeApplication(result, onFinished: onFinished)
         }
     }
 
@@ -458,28 +565,27 @@ final class SelectionAssistantViewModel: ObservableObject {
         translationRequestID += 1
         let id = translationRequestID
 
-        let config = providerConfig()
-        guard let config else {
-            translationStatus = .error("Add AI key in Settings")
-            return
-        }
-
         let text = originalText
         let language = translationLanguage
+        requestStyle = styleStore.profile(for: sourceBundleID)
+        let style = requestStyle
+        historyToken = history.consentToken
+        historyID = UUID()
+
         translatedText = ""
+        resultNotice = ""
         translationStatus = .translating
         translationTask = Task { @MainActor in
             do {
-                let out = try await aiClient.translateText(
-                    provider: config.provider,
-                    model: config.model,
-                    apiKey: config.key,
-                    text: text,
-                    targetLanguage: language.displayName
-                )
-                guard id == translationRequestID else { return }
-                translatedText = out.trimmingCharacters(in: .whitespacesAndNewlines)
-                translationStatus = translatedText.isEmpty ? .error("Empty translation") : .ready
+                let out: String
+                if let translator { out = try await translator(text, language) }
+                else {
+                    guard let config = Self.providerConfiguration() else { throw FeatureError.noProvider }
+                    out = try await aiClient.translateText(provider: config.provider, model: config.model, apiKey: config.key,
+                        text: text, targetLanguage: language.displayName, style: style)
+                }
+                guard id == translationRequestID, !Task.isCancelled else { return }
+                acceptTranslation(out)
             } catch is CancellationError {
                 guard id == translationRequestID else { return }
             } catch {
@@ -490,17 +596,25 @@ final class SelectionAssistantViewModel: ObservableObject {
         }
     }
 
+    func acceptTranslation(_ text: String) {
+        guard isTranslationMode, currentContext != nil else { return }
+        translatedText = GeneratedTextStyle.shortDashes(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        translationStatus = translatedText.isEmpty ? .error("Empty translation") : .ready
+        rememberResult()
+    }
+
     @discardableResult
     func copyTranslation() -> Bool {
         guard case .ready = translationStatus,
               !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        return pasteboard.setString(translatedText, forType: .string)
+        rememberResult(status: "Copied")
+        let copied = writeToClipboard(translatedText)
+        resultNotice = copied ? "Copied - press ⌘V" : "Could not copy"
+        return copied
     }
 
     func retryReview() {
-        guard !isTranslationMode else { return }
+        guard !isTranslationMode, !applicationNeedsSelection else { return }
         guard let currentContext else { return }
         reviewedTexts = [:]
         reviews = [:]
@@ -535,16 +649,18 @@ final class SelectionAssistantViewModel: ObservableObject {
         let operation = operation
         let smart = UserDefaults.standard.bool(forKey: AppViewModel.SettingsKeys.smartAIEnabled)
         let clarification = meaningClarification
+        requestStyle = styleStore.profile(for: context.targetBundleID)
+        let style = requestStyle
         let key = [config.provider.rawValue, config.model, String(config.key.hashValue),
                    UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? "",
-                   smart ? "smart" : operation.rawValue, text, clarification].joined(separator: "\u{1f}")
+                   smart ? "smart" : operation.rawValue, text, clarification, style?.cacheKey ?? "no-style"].joined(separator: "\u{1f}")
         rewriteTask = Task { @MainActor in
             do {
                 if smart {
                     let results = try await RewriteReviewService.shared.review(key: key) { [aiClient] in
                         try await aiClient.overlaySuggestions(
                         provider: config.provider, model: config.model, apiKey: config.key,
-                        text: text, requireCompleteReview: true, clarification: clarification
+                        text: text, requireCompleteReview: true, clarification: clarification, style: style
                         )
                     }
                     guard id == requestID, !Task.isCancelled else { return }
@@ -559,7 +675,7 @@ final class SelectionAssistantViewModel: ObservableObject {
                     text: text,
                     requireCompleteReview: true,
                     selectedOperation: operation,
-                    clarification: clarification
+                    clarification: clarification, style: style
                 )
                     return results.filter { $0.operation == operation }
                 }
@@ -577,7 +693,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     func acceptReview(_ results: [OverlaySuggestion], generation: Int) {
-        guard !isTranslationMode, generation == requestID, currentContext != nil else { return }
+        guard !isTranslationMode, (!applicationNeedsSelection || styleRefreshAllowsCopyOnly), generation == requestID, currentContext != nil else { return }
         meaningQuestions = results.first(where: { !$0.meaningQuestions.isEmpty })?.meaningQuestions ?? []
         meaningAnswers = [:]
         customMeaning = ""
@@ -589,40 +705,25 @@ final class SelectionAssistantViewModel: ObservableObject {
             status = .meaningUnclear
             return
         }
-        reviewedTexts = Dictionary(results.filter { $0.validationError == nil }.map { ($0.operation, $0.text) }, uniquingKeysWith: { _, latest in latest })
+        reviewedTexts = Dictionary(results.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map { ($0.operation, $0.text) }, uniquingKeysWith: { _, latest in latest })
         reviews = reviewedTexts.mapValues { normalized($0) == normalized(originalText) ? .clean : .suggestion }
-        for result in results where result.validationError != nil { reviews[result.operation] = .error }
+        for result in results where reviewedTexts[result.operation] == nil { reviews[result.operation] = .error }
         recommendation = results.first { $0.isRecommended && reviews[$0.operation] == .suggestion }?.operation
         selectingRecommendation = true
         let fallback = reviews[operation] == .error
-            ? results.first(where: { $0.validationError == nil && reviews[$0.operation] == .suggestion })?.operation
-                ?? results.first(where: { $0.validationError == nil })?.operation ?? operation
+            ? results.first(where: { reviews[$0.operation] == .suggestion })?.operation
+                ?? results.first(where: { reviewedTexts[$0.operation] != nil })?.operation ?? operation
             : operation
         operation = manuallySelectedOperation ?? recommendation ?? fallback
         selectingRecommendation = false
         if reviews[operation] == .error {
             rewrittenText = ""
-            status = .error("This variant changed protected text. Choose another mode or retry.")
+            status = .error("Empty rewrite. Please retry.")
             return
         }
         rewrittenText = reviewedTexts[operation] ?? originalText
         status = normalized(rewrittenText) == normalized(originalText) ? .noChanges : .ready
-    }
-
-    private func freshApplyContext(expectedFingerprint: String?) -> TextAccessService.FocusedTextContext? {
-        guard let expectedFingerprint, let captured = currentContext else { return nil }
-        guard let fresh = textService.selectedTextContextAnyFocus(
-            minLength: 1,
-            maxLength: 6000,
-            allowClipboardFallback: true,
-            allowBrowserClipboardSelection: true
-        ) else {
-            return nil
-        }
-        guard CFEqual(captured.targetElement, fresh.targetElement),
-              captured.selectedRange?.location == fresh.selectedRange?.location,
-              captured.selectedRange?.length == fresh.selectedRange?.length else { return nil }
-        return Self.fingerprint(for: fresh) == expectedFingerprint ? fresh : nil
+        if explicitlyRequestedRewrite { rememberResult() }
     }
 
     private func providerConfig() -> (provider: AIProvider, model: String, key: String)? {
