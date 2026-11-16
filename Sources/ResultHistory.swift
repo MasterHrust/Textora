@@ -66,6 +66,8 @@ enum HistoryEncryptionKey {
 actor ResultHistoryStore {
     private let url: URL
     private let key: (Bool) throws -> SymmetricKey
+    // Reuse an authorized key throughout this store's lifetime.
+    private var cachedEncryptionKey: SymmetricKey?
     private var entries: [OperationResult] = []
     private var loaded = false
     private var epoch = 0
@@ -89,7 +91,9 @@ actor ResultHistoryStore {
         guard !loaded else { return }
         if FileManager.default.fileExists(atPath: url.path) {
             let box = try AES.GCM.SealedBox(combined: Data(contentsOf: url))
-            let plaintext = try AES.GCM.open(box, using: key(false))
+            let encryptionKey = try cachedEncryptionKey ?? key(false)
+            let plaintext = try AES.GCM.open(box, using: encryptionKey)
+            cachedEncryptionKey = encryptionKey
             entries = try JSONDecoder().decode([OperationResult].self, from: plaintext)
         }
         loaded = true
@@ -135,7 +139,9 @@ actor ResultHistoryStore {
             return
         }
         let plaintext = try JSONEncoder().encode(entries)
-        guard let encrypted = try AES.GCM.seal(plaintext, using: key(true)).combined else { throw FeatureError.unavailableKeychain }
+        let encryptionKey = try cachedEncryptionKey ?? key(true)
+        guard let encrypted = try AES.GCM.seal(plaintext, using: encryptionKey).combined else { throw FeatureError.unavailableKeychain }
+        cachedEncryptionKey = encryptionKey
         var directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                attributes: [.posixPermissions: 0o700])

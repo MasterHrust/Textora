@@ -3,7 +3,7 @@ import Carbon
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, writing, dictation, shortcuts, history, about
+    case general, writing, dictation, shortcuts, history, advancedDebug, about
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -12,6 +12,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dictation: return "Dictation"
         case .shortcuts: return "Shortcuts"
         case .history: return "Recent Results"
+        case .advancedDebug: return "Advanced Debug"
         case .about: return "About & Updates"
         }
     }
@@ -22,6 +23,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dictation: return "mic"
         case .shortcuts: return "keyboard"
         case .history: return "clock.arrow.circlepath"
+        case .advancedDebug: return "ladybug"
         case .about: return "info.circle"
         }
     }
@@ -32,6 +34,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dictation: return "Recognize speech on this Mac and choose what happens next."
         case .shortcuts: return "Use Textora from the keyboard, wherever you write."
         case .history: return "Keep a private, optional record of text you have processed."
+        case .advancedDebug: return "Inspect LLM requests, responses and timing."
         case .about: return "Version, updates and help with Textora."
         }
     }
@@ -79,16 +82,18 @@ struct ContentView: View {
     @ObservedObject private var updates = AppUpdateManager.shared
     @ObservedObject var navigation: SettingsNavigation
     @ObservedObject private var styleStore: PersonalStyleStore
+    @ObservedObject private var debugLog: LLMDebugLog
 
-    init(viewModel: AppViewModel, navigation: SettingsNavigation? = nil, styleStore: PersonalStyleStore? = nil) {
+    init(viewModel: AppViewModel, navigation: SettingsNavigation? = nil, styleStore: PersonalStyleStore? = nil,
+         debugLog: LLMDebugLog? = nil) {
         self.viewModel = viewModel
         self.navigation = navigation ?? .shared
         self.styleStore = styleStore ?? .shared
+        self.debugLog = debugLog ?? (viewModel.isPreview ? LLMDebugLog() : .shared)
     }
 
     private let bundleIDTextWidth: CGFloat = 210
     private let actionPickerWidth: CGFloat = 140
-    private let donateURL = "https://paypal.me/RShytskou"
 
     var body: some View {
         HStack(spacing: 0) {
@@ -216,6 +221,8 @@ struct ContentView: View {
                     Button("Open Recent Results…") { FeatureWindows.shared.showHistory() }
                 }
             }
+        case .advancedDebug:
+            AdvancedDebugView(log: debugLog).padding(24)
         case .about:
             page {
                 settingsGroup("Textora") { systemSection }
@@ -235,7 +242,7 @@ struct ContentView: View {
                         Button("What’s New…") { FeatureWindows.shared.showOverview() }
                     }
                 }
-                settingsGroup("Support") { donateSection }
+                settingsGroup("Developer") { developerSection }
             }
         }
     }
@@ -352,6 +359,9 @@ struct ContentView: View {
             ))
             .toggleStyle(.checkbox)
             .disabled(!updates.isReady)
+            Text("Checks every 5 hours while Textora is running.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let message = updates.unavailableMessage {
                 Text(message)
                     .font(.caption)
@@ -635,15 +645,10 @@ struct ContentView: View {
         }
     }
 
-    private var donateSection: some View {
+    private var developerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Textora is free and open-source. If it helps you, you can support development with a donation.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Donate") {
-                guard let url = URL(string: donateURL) else { return }
-                NSWorkspace.shared.open(url)
-            }
+            Text(AppContact.developerCredit)
+            Link("Feature Request", destination: AppContact.featureRequestURL)
         }
     }
 

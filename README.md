@@ -8,7 +8,7 @@
   A private, open-source writing assistant for macOS that rewrites, translates, and dictates text directly in the apps you already use.
 </p>
 
-[Support the project](https://paypal.me/RShytskou)
+Developed by **Roman Shytskou**.
 
 All AI requests are sent directly from your Mac using your own API key (BYO key).  
 This repository does not include a Textora backend proxy.
@@ -66,6 +66,13 @@ This repository does not include a Textora backend proxy.
 - Supports OpenAI, Gemini, Claude, and OpenAI-compatible endpoints.
 - Loads available models from supported providers while still allowing an automatic recommended model.
 - API keys stay in the macOS Data Protection Keychain and requests go directly from your Mac to the selected provider.
+
+### Advanced Debug
+
+- Open **Settings > Advanced Debug** and enable LLM request logging before reproducing a slow request or an error.
+- Inspect the provider, model, endpoint, HTTP status, full request duration, request body and response body. Rewrite, Translate, Summary and model refresh requests use the same journal.
+- API keys and credentials are redacted before display or copying. Request and response text can still contain private content, so review a copied log before sharing it.
+- Logging starts disabled and keeps up to 50 requests in memory for the current app session. Clear the journal or turn logging off to remove entries; no debug log is written to disk.
 
 ### Safety and app control
 
@@ -188,9 +195,9 @@ Contributions are welcome:
 3. Ensure the app builds successfully.
 4. Open a pull request with a clear summary and test notes.
 
-## Support
+## Feature Requests
 
-If Textora helps you, you can support development here: [paypal.me/RShytskou](https://paypal.me/RShytskou).
+Send feature requests to [indepcode@proton.me](mailto:indepcode@proton.me).
 
 ## License
 

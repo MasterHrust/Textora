@@ -112,7 +112,7 @@ struct AIClient {
         return URLSession(configuration: configuration, delegate: SecureAIURLSessionDelegate(), delegateQueue: nil)
     }()
 
-    private static func secureData(for request: URLRequest) async throws -> (Data, URLResponse) {
+    private static func secureData(for request: URLRequest, provider: String) async throws -> (Data, URLResponse) {
         guard SecureAITransportPolicy.allows(request.url) else {
             throw NSError(
                 domain: "Textora.Security",
@@ -120,7 +120,20 @@ struct AIClient {
                 userInfo: [NSLocalizedDescriptionKey: "Use HTTPS for AI endpoints, or HTTP for a local server on localhost."]
             )
         }
-        return try await secureSession.data(for: request)
+        let capture = await LLMDebugLog.shared.begin(request, provider: provider)
+        do {
+            let (data, response) = try await secureSession.data(for: request)
+            if let capture {
+                await LLMDebugLog.shared.finish(capture, data: data, response: response,
+                    endedAt: DispatchTime.now().uptimeNanoseconds)
+            }
+            return (data, response)
+        } catch {
+            if let capture {
+                await LLMDebugLog.shared.finish(capture, error: error, endedAt: DispatchTime.now().uptimeNanoseconds)
+            }
+            throw error
+        }
     }
 
     enum Defaults {
@@ -150,7 +163,7 @@ struct AIClient {
             return try await availableClaudeModels(apiKey: key)
         case .local, .other:
             let base = baseURL ?? Self.configuredCompatibleBaseURL(for: provider)
-            return try await availableCompatibleModels(baseURL: base, apiKey: key)
+            return try await availableCompatibleModels(baseURL: base, apiKey: key, provider: provider.displayName)
         }
     }
 
@@ -1130,9 +1143,9 @@ struct AIClient {
         )
     }
 
-    private func availableCompatibleModels(baseURL: String, apiKey: String) async throws -> [AIModelOption] {
+    private func availableCompatibleModels(baseURL: String, apiKey: String, provider: String) async throws -> [AIModelOption] {
         let request = try Self.compatibleModelsRequest(baseURL: baseURL, apiKey: apiKey)
-        let data = try await modelCatalogData(for: request, provider: "OpenAI-compatible")
+        let data = try await modelCatalogData(for: request, provider: provider)
         return try Self.decodeCompatibleModels(data)
     }
 
@@ -1206,7 +1219,7 @@ struct AIClient {
     }
 
     private func modelCatalogData(for request: URLRequest, provider: String) async throws -> Data {
-        let (data, response) = try await Self.secureData(for: request)
+        let (data, response) = try await Self.secureData(for: request, provider: provider)
         guard let http = response as? HTTPURLResponse else {
             throw modelCatalogError(provider: provider, detail: "No HTTP response")
         }
@@ -1291,7 +1304,7 @@ struct AIClient {
         )
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await Self.secureData(for: request)
+        let (data, response) = try await Self.secureData(for: request, provider: "GPT")
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "Textora", code: 2, userInfo: [NSLocalizedDescriptionKey: "OpenAI request failed: no HTTP response"])
         }
@@ -1355,7 +1368,7 @@ struct AIClient {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await Self.secureData(for: request)
+        let (data, response) = try await Self.secureData(for: request, provider: "Gemini")
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw NSError(domain: "Textora", code: 5, userInfo: [NSLocalizedDescriptionKey: "Gemini request failed"])
         }
@@ -1400,7 +1413,7 @@ struct AIClient {
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await Self.secureData(for: request)
+        let (data, response) = try await Self.secureData(for: request, provider: "Claude")
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "Textora", code: 16, userInfo: [NSLocalizedDescriptionKey: "Claude request failed: no HTTP response"])
         }
@@ -1457,7 +1470,7 @@ struct AIClient {
         )
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await Self.secureData(for: request)
+        let (data, response) = try await Self.secureData(for: request, provider: provider.displayName)
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "Textora", code: 11, userInfo: [NSLocalizedDescriptionKey: "OpenAI-compatible request failed: no HTTP response"])
         }
@@ -1550,14 +1563,16 @@ extension AIClient {
     }
 
     @MainActor
-    func summarize(text: String, options: SummaryOptions) async throws -> TextSummary {
+    func summarize(text: String, options: SummaryOptions,
+                   configuration: (provider: AIProvider, model: String, key: String)? = nil) async throws -> TextSummary {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw FeatureError.invalidResponse }
-        return try Self.decodeSummary(try await featureRequest(prompt: Self.summaryPrompt(options: options), text: text))
+        return try Self.decodeSummary(try await featureRequest(prompt: Self.summaryPrompt(options: options), text: text, configuration: configuration))
     }
 
     @MainActor
-    private func featureRequest(prompt: String, text: String) async throws -> String {
-        guard let config = SelectionAssistantViewModel.providerConfiguration() else { throw FeatureError.noProvider }
+    private func featureRequest(prompt: String, text: String,
+                                configuration: (provider: AIProvider, model: String, key: String)? = nil) async throws -> String {
+        guard let config = configuration ?? SelectionAssistantViewModel.providerConfiguration() else { throw FeatureError.noProvider }
         switch config.provider {
         case .openai: return try await rewriteOpenAI(model: config.model.isEmpty ? Defaults.openAIModel : config.model,
             apiKey: config.key, text: text, operation: .humanize, systemPromptOverride: prompt)

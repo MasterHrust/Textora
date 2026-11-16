@@ -87,6 +87,7 @@ enum ReleaseNotesPresentation {
 @MainActor
 final class AppUpdateManager: ObservableObject {
     static let shared = AppUpdateManager()
+    static let automaticCheckInterval: TimeInterval = 5 * 60 * 60
 
     @Published private(set) var canCheckForUpdates = true
     @Published private(set) var automaticallyChecksForUpdates = false
@@ -115,6 +116,9 @@ final class AppUpdateManager: ObservableObject {
             return
         }
         do {
+            // Apply the current schedule even if an earlier release persisted
+            // its interval in Sparkle's preferences. The opt-in flag is separate.
+            controller.updater.updateCheckInterval = Self.automaticCheckInterval
             try controller.updater.start()
             controller.updater.publisher(for: \.canCheckForUpdates)
                 .assign(to: &$canCheckForUpdates)

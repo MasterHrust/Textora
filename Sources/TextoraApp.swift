@@ -5,7 +5,6 @@ struct TextoraApp: App {
     @NSApplicationDelegateAdaptor(TextoraAppDelegate.self) private var appDelegate
     @StateObject private var coordinator = AppCoordinator.shared
     @ObservedObject private var updates = AppUpdateManager.shared
-    private let donateURL = "https://paypal.me/RShytskou"
 
     init() {
         UserDefaults.standard.register(defaults: [
@@ -36,14 +35,13 @@ struct TextoraApp: App {
             Button("Settings…") {
                 coordinator.showSettingsWindow()
             }
-            Button("Support project") {
-                guard let url = URL(string: donateURL) else { return }
-                NSWorkspace.shared.open(url)
-            }
+            Link("Feature Request", destination: AppContact.featureRequestURL)
             Button("Check for Updates…") {
                 updates.checkForUpdates()
             }
             .disabled(!updates.canCheckForUpdates)
+            Divider()
+            Text(AppContact.developerCredit).font(.caption)
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }

@@ -1,5 +1,17 @@
 import Foundation
 
+enum AppContact {
+    static let developerCredit = "Developed by Roman Shytskou"
+    static let email = "indepcode@proton.me"
+    static let featureRequestURL: URL = {
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = email
+        components.queryItems = [URLQueryItem(name: "subject", value: "Textora Feature Request")]
+        return components.url!
+    }()
+}
+
 enum AIProvider: String, CaseIterable, Identifiable {
     case openai
     case gemini

@@ -258,6 +258,83 @@ final class PersonalizationTests: XCTestCase {
         XCTAssertEqual(restored, [entry])
     }
 
+    func testHistoryLoadsEncryptionKeyOnceAcrossRewriteTranslateSummaryAndCopy() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let key = SymmetricKey(size: .bits256)
+        var requests: [Bool] = []
+        let repository = ResultHistoryStore(url: url, key: { create in
+            requests.append(create)
+            return key
+        })
+        _ = try await repository.configure(HistoryPolicy(enabled: true), epoch: 1)
+        XCTAssertTrue(requests.isEmpty)
+        for kind in OperationResult.Kind.allCases {
+            var entry = OperationResult(kind: kind, source: "Original", result: "Result")
+            _ = try await repository.record(entry, token: 1)
+            entry.status = "Copied"
+            _ = try await repository.record(entry, token: 1)
+        }
+        XCTAssertEqual(requests, [true], "Saving each result and copying it must reuse the authorized key")
+
+        let reopened = ResultHistoryStore(url: url, key: { create in
+            requests.append(create)
+            return key
+        })
+        let restored = try await reopened.configure(HistoryPolicy(enabled: true), epoch: 0)
+        XCTAssertEqual(restored.count, OperationResult.Kind.allCases.count)
+        _ = try await reopened.remove([restored[0].id])
+        _ = try await reopened.record(OperationResult(kind: .translate, source: "Before", result: "After"), token: 0)
+        _ = try await reopened.clear(epoch: 1)
+        _ = try await reopened.record(OperationResult(kind: .summary, source: "Conversation", result: "Summary"), token: 1)
+        XCTAssertEqual(requests, [true, false], "Reading existing history authorizes the key once for subsequent writes and clears")
+    }
+
+    func testHistoryRetriesKeychainFailureThenReusesSuccessfulKey() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let key = SymmetricKey(size: .bits256)
+        var attempts = 0
+        let repository = ResultHistoryStore(url: url, key: { _ in
+            attempts += 1
+            if attempts == 1 { throw FeatureError.unavailableKeychain }
+            return key
+        })
+        _ = try await repository.configure(HistoryPolicy(enabled: true), epoch: 1)
+        let entry = OperationResult(kind: .rewrite, source: "Original", result: "Rewritten")
+        do {
+            _ = try await repository.record(entry, token: 1)
+            XCTFail("The first key access should fail")
+        } catch { XCTAssertFalse(FileManager.default.fileExists(atPath: url.path)) }
+        _ = try await repository.record(entry, token: 1)
+        _ = try await repository.record(entry, token: 1)
+        XCTAssertEqual(attempts, 2)
+    }
+
+    func testHistoryCanRetryDecryptionAfterTheKeyIsRecovered() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let correctKey = SymmetricKey(size: .bits256)
+        let wrongKey = SymmetricKey(size: .bits256)
+        let original = ResultHistoryStore(url: url, key: { _ in correctKey })
+        _ = try await original.configure(HistoryPolicy(enabled: true), epoch: 1)
+        let entry = OperationResult(kind: .summary, source: "Conversation", result: "Summary")
+        _ = try await original.record(entry, token: 1)
+        var attempts = 0
+        let reopened = ResultHistoryStore(url: url, key: { _ in
+            attempts += 1
+            return attempts == 1 ? wrongKey : correctKey
+        })
+        do {
+            _ = try await reopened.configure(HistoryPolicy(enabled: true), epoch: 0)
+            XCTFail("A wrong key must fail to decrypt history")
+        } catch { XCTAssertTrue(FileManager.default.fileExists(atPath: url.path)) }
+        let restored = try await reopened.configure(HistoryPolicy(enabled: true), epoch: 0)
+        XCTAssertEqual(restored, [entry])
+        _ = try await reopened.record(entry, token: 0)
+        XCTAssertEqual(attempts, 2, "Cache only a key that successfully decrypts existing history")
+    }
+
     func testSummaryDecoderKeepsSectionsAndRejectsIncompleteResults() throws {
         let raw = #"{"overview":" Team discussed a release. ","sections":[{"title":"Decisions and tasks","items":["Alex will confirm the date."]}]}"#
         let summary = try AIClient.decodeSummary(raw)
@@ -1010,7 +1087,8 @@ final class PersonalizationTests: XCTestCase {
             ("writing-style", .writing, "style"), ("writing-provider", .writing, "provider"),
             ("writing-operations", .writing, "operations"), ("dictation-recording", .dictation, "recording"),
             ("dictation-output", .dictation, "output"), ("shortcuts", .shortcuts, nil),
-            ("history-settings", .history, nil), ("about-updates", .about, nil)
+            ("history-settings", .history, nil), ("advanced-debug", .advancedDebug, nil),
+            ("advanced-debug-populated", .advancedDebug, nil), ("about-updates", .about, nil)
         ]
         for (name, section, tab) in settingsPages {
             for dark in [false, true] {
@@ -1020,9 +1098,24 @@ final class PersonalizationTests: XCTestCase {
                 if tab == "provider" { navigation.writingTab = .provider }
                 if tab == "operations" { navigation.writingTab = .operations }
                 if tab == "output" { navigation.dictationTab = .output }
-                let view = ContentView(viewModel: model, navigation: navigation, styleStore: style).defaultAppStorage(defaults)
+                let debugLog = LLMDebugLog()
+                if name == "advanced-debug-populated" {
+                    debugLog.isEnabled = true
+                    var request = URLRequest(url: URL(string: "http://localhost:1234/v1/chat/completions")!)
+                    request.httpMethod = "POST"
+                    request.setValue("Bearer snapshot-secret-123456", forHTTPHeaderField: "Authorization")
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": "qwen3:8b", "messages": [["role": "user", "content": "Summarize the meeting notes."]]
+                    ])
+                    let capture = try XCTUnwrap(debugLog.begin(request, provider: "Local LLM"))
+                    let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil))
+                    debugLog.finish(capture, data: Data(#"{"choices":[{"message":{"content":"The team agreed to release on Friday."}}],"usage":{"completion_tokens":12}}"#.utf8),
+                        response: response, endedAt: capture.startedAt + 8_420_000_000)
+                }
+                let view = ContentView(viewModel: model, navigation: navigation, styleStore: style, debugLog: debugLog).defaultAppStorage(defaults)
                 try snapshot(view, name: "settings-\(name)-\(dark ? "dark" : "light")", size: CGSize(width: 900, height: 650), dark: dark, directory: directory)
-                if section == .writing {
+                if section == .writing || section == .advancedDebug || section == .about {
                     try snapshot(view, name: "settings-minimum-\(name)-\(dark ? "dark" : "light")", size: CGSize(width: 840, height: 600), dark: dark, directory: directory)
                 }
             }
@@ -1073,7 +1166,14 @@ final class PersonalizationTests: XCTestCase {
                 size: FeatureWindows.overviewWindowSize(notes: bugFixes), dark: dark, directory: directory)
             try snapshot(NewFeaturesView(notes: nil, version: "1.4.2"), name: "release-unavailable-\(dark ? "dark" : "light")",
                 size: FeatureWindows.overviewWindowSize(notes: nil), dark: dark, directory: directory)
-            let featureSize = FeatureWindows.overviewWindowSize(notes: ReleaseNotes.current())
+            let featureNotes = try XCTUnwrap(ReleaseNotes.parse("""
+            # Textora 1.4.0
+            Writing profiles for your applications.
+
+            ## My Style
+            - Choose a profile in Settings.
+            """, for: "1.4.0"))
+            let featureSize = FeatureWindows.overviewWindowSize(notes: featureNotes)
             let maintenanceSize = FeatureWindows.overviewWindowSize(notes: bugFixes)
             let fallbackSize = FeatureWindows.overviewWindowSize(notes: nil)
             XCTAssertLessThan(maintenanceSize.height, featureSize.height)

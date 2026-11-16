@@ -415,7 +415,7 @@ final class AppViewModel: ObservableObject {
     }
 
     @discardableResult
-    func saveSettings() -> Bool {
+    func saveSettings(saveKey: (String, String) -> Result<Void, KeychainHelper.KeychainError> = { KeychainHelper.save(key: $0, value: $1) }) -> Bool {
         guard !isPreview else { return true }
         // Only save edits made in this window. Another retained window may
         // have changed the provider/model since this one loaded its snapshot.
@@ -426,23 +426,24 @@ final class AppViewModel: ObservableObject {
         // Interface, rewrite, language, shortcuts and dictation preferences
         // persist at the moment the user changes them. A retained Settings or
         // onboarding window must not overwrite newer choices from the toolbar.
-        let account: String
-        let key: String
-        switch provider {
-        case .openai: account = KeychainHelper.openAIKeyAccount; key = openAIKey
-        case .gemini: account = KeychainHelper.geminiKeyAccount; key = geminiKey
-        case .claude: account = KeychainHelper.claudeKeyAccount; key = claudeKey
-        case .other: account = KeychainHelper.customTokenAccount; key = customToken
-        case .local: account = KeychainHelper.localTokenAccount; key = localToken
+        for keyProvider in AIProvider.allCases {
+            let key = apiKey(for: keyProvider)
+            guard savedAPIKeys[keyProvider] != key else { continue }
+            let account: String
+            switch keyProvider {
+            case .openai: account = KeychainHelper.openAIKeyAccount
+            case .gemini: account = KeychainHelper.geminiKeyAccount
+            case .claude: account = KeychainHelper.claudeKeyAccount
+            case .other: account = KeychainHelper.customTokenAccount
+            case .local: account = KeychainHelper.localTokenAccount
+            }
+            if case .failure(let error) = saveKey(account, key) {
+                errorText = error.localizedDescription
+                onboardingErrorText = error.localizedDescription
+                return false
+            }
+            savedAPIKeys[keyProvider] = key
         }
-        guard savedAPIKeys[provider] != key else { return true }
-        let keyResult = KeychainHelper.save(key: account, value: key)
-        if case .failure(let error) = keyResult {
-            errorText = error.localizedDescription
-            onboardingErrorText = error.localizedDescription
-            return false
-        }
-        savedAPIKeys[provider] = key
         return true
     }
 

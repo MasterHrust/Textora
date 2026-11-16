@@ -21,6 +21,13 @@ private final class FontTestNavigationDelegate: NSObject, WKNavigationDelegate {
 }
 
 final class SecurityAndSettingsTests: XCTestCase {
+    @MainActor
+    func testAutomaticUpdatesUseAFiveHourInterval() throws {
+        XCTAssertEqual(AppUpdateManager.automaticCheckInterval, 18_000)
+        let interval = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "SUScheduledCheckInterval") as? NSNumber)
+        XCTAssertEqual(interval.doubleValue, AppUpdateManager.automaticCheckInterval)
+    }
+
     func testSummaryShortcutDefaultsAndSavedChoicesSurviveRegistration() throws {
         let suiteName = "TextoraTests.SummaryShortcut.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -108,6 +115,10 @@ final class SecurityAndSettingsTests: XCTestCase {
 
     @MainActor
     func testLocalAndOtherLoadModelsFromUnsavedURLsAndGenerateWithoutTokens() async throws {
+        let log = LLMDebugLog.shared
+        log.clear()
+        log.isEnabled = true
+        defer { log.isEnabled = false }
         let listener = try NWListener(using: .tcp, on: .any)
         let listening = expectation(description: "Local compatible server ready")
         listener.stateUpdateHandler = { state in
@@ -198,8 +209,13 @@ final class SecurityAndSettingsTests: XCTestCase {
             let result = try await AIClient().rewriteText(provider: provider, model: "llama-local", apiKey: "", text: "hello", operation: .fixGrammar)
             XCTAssertEqual(result, "Hello")
             let summarySource = String(repeating: "Conversation message. ", count: 500) + "SOURCE_END"
-            let summary = try await AIClient().summarize(text: summarySource, options: SummaryOptions(language: .russian))
+            let summary = try await AIClient().summarize(text: summarySource, options: SummaryOptions(language: .russian),
+                configuration: (provider: provider, model: "llama-local", key: ""))
             XCTAssertEqual(summary.overview, "Обсуждение релиза.")
+            let requests = log.entries.filter { $0.provider == provider.displayName }
+            XCTAssertTrue(requests.contains { $0.requestText.hasPrefix("GET") && $0.endpoint.contains("/models") })
+            XCTAssertTrue(requests.contains { $0.requestText.contains("SOURCE_END") && $0.responseText.contains("Обсуждение релиза.") })
+            XCTAssertTrue(requests.filter { $0.requestText.hasPrefix("POST") }.allSatisfy { $0.statusCode == 200 && $0.duration != nil })
             settings.compatibleBaseURL = ""
             XCTAssertTrue(settings.availableModels.isEmpty)
             XCTAssertFalse(settings.canLoadModels)
