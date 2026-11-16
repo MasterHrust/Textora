@@ -12,6 +12,7 @@ import SwiftUI
 final class SelectionAssistantController: NSObject, NSWindowDelegate {
     private let textService = TextAccessService()
     private let viewModel: SelectionAssistantViewModel
+    private let summary = SummaryWindowController()
     private(set) var isPausedForStyleEditing = false
     private var restorePanelAfterStyleEditing = false
     private var preservesStyleEditingContext: Bool { isPausedForStyleEditing || FeatureWindows.shared.isStyleEditorOpen }
@@ -427,7 +428,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: task)
     }
 
-    private func readSelectedTextContextForToolbar(intent: SelectionTextWorker.ReadIntent = .automatic) async -> TextAccessService.FocusedTextContext? {
+    private func readSelectedTextContextForToolbar(intent: SelectionTextWorker.ReadIntent = .automatic, maxLength: Int = 6000) async -> TextAccessService.FocusedTextContext? {
         let generation = resolveGeneration
         // A busy reader is not a missing selection. Keep only the latest
         // generation eligible to run after an uncancellable AX/clipboard read.
@@ -440,7 +441,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         guard !preservesStyleEditingContext, generation == resolveGeneration, !Task.isCancelled else { return nil }
         let readID = UUID()
         contextReadID = readID
-        let task = Task { await SelectionTextWorker.shared.selection(intent: intent) }
+        let task = Task { await SelectionTextWorker.shared.selection(intent: intent, maxLength: maxLength) }
         contextReadTask = task
         defer { if contextReadID == readID { contextReadTask = nil } }
         let context = await task.value
@@ -852,6 +853,9 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
             },
             onClose: { [weak self] in
                 self?.hideForNoSelection()
+            },
+            onSummary: { [weak self] in
+                self?.performHotKeyAction(.summary)
             }
         )
         let host = NSHostingView(rootView: root)
@@ -1092,10 +1096,16 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         let generation = resolveGeneration
         Task { @MainActor [weak self] in
         guard let self else { return }
-        let resolved = await readSelectedTextContextForToolbar(intent: .userInvoked)
+        let resolved = await readSelectedTextContextForToolbar(intent: .userInvoked, maxLength: action == .summary ? Int.max : 6000)
         guard resolveGeneration == generation else { return }
         guard let context = resolved else {
             hideForNoSelection()
+            if action == .summary { summary.show(source: "", application: nil) }
+            return
+        }
+        if action == .summary {
+            hideForNoSelection()
+            summary.show(source: context.usesSelection ? context.text : "", application: OriginApplication.name(context.targetBundleID))
             return
         }
         let key = selectionKey(for: context)
@@ -1109,7 +1119,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         case .translate:
             viewModel.setSelectionContext(context, automaticallyCheck: false, preservePresentation: true)
             viewModel.translate()
-        case .dictate, .history:
+        case .dictate, .history, .summary:
             return
         }
         showOrMovePanel(near: anchor)

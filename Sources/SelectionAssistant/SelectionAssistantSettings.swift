@@ -14,6 +14,7 @@ enum TextoraHotKeyAction: UInt32 {
     case translate = 2
     case dictate = 3
     case history = 4
+    case summary = 5
 }
 
 enum TextoraHotKeyPhase {
@@ -76,6 +77,9 @@ enum SelectionAssistantSettings {
         static let historyHotKeyCode = "hotkey.history.keyCode"
         static let historyHotKeyModifiers = "hotkey.history.modifiers"
         static let historyHotKeyEnabled = "hotkey.history.enabled"
+        static let summaryHotKeyCode = "hotkey.summary.keyCode"
+        static let summaryHotKeyModifiers = "hotkey.summary.modifiers"
+        static let summaryHotKeyEnabled = "hotkey.summary.enabled"
         static let dictateHotKeyCode = "hotkey.dictate.keyCode"
         static let dictateHotKeyModifiers = "hotkey.dictate.modifiers"
         static let dictateHotKeyEnabled = "hotkey.dictate.enabled"
@@ -114,7 +118,10 @@ enum SelectionAssistantSettings {
             Keys.dictateHotKeyEnabled: true,
             Keys.historyHotKeyCode: 4,
             Keys.historyHotKeyModifiers: UInt32(controlKey | optionKey | cmdKey),
-            Keys.historyHotKeyEnabled: true
+            Keys.historyHotKeyEnabled: true,
+            Keys.summaryHotKeyCode: 1,
+            Keys.summaryHotKeyModifiers: UInt32(controlKey | optionKey | cmdKey),
+            Keys.summaryHotKeyEnabled: true
         ])
         if !defaults.bool(forKey: Keys.exclusiveInterfaceModeMigration) || legacyFloating {
             let hotKeys = savedHotKeys ?? (legacyActivationMode == SelectionActivationMode.hotkeyOnly.rawValue)
@@ -246,6 +253,8 @@ enum SelectionAssistantSettings {
             return (Keys.historyHotKeyCode, Keys.historyHotKeyModifiers, Keys.historyHotKeyEnabled)
         case .dictate:
             return (Keys.dictateHotKeyCode, Keys.dictateHotKeyModifiers, Keys.dictateHotKeyEnabled)
+        case .summary:
+            return (Keys.summaryHotKeyCode, Keys.summaryHotKeyModifiers, Keys.summaryHotKeyEnabled)
         }
     }
 }
@@ -290,7 +299,7 @@ final class GlobalHotKeyManager {
 
         registrationError = nil
         registrationErrors.removeAll()
-        var actions: [TextoraHotKeyAction] = cloudHotKeysEnabled ? [.rewrite, .translate] : []
+        var actions: [TextoraHotKeyAction] = cloudHotKeysEnabled ? [.rewrite, .translate, .summary] : []
         if dictationEnabled { actions.append(.dictate) }
         if historyEnabled { actions.append(.history) }
         for action in actions {

@@ -32,6 +32,7 @@ enum KeychainHelper {
     static let geminiKeyAccount = "geminiKey"
     static let claudeKeyAccount = "claudeKey"
     static let customTokenAccount = "customToken"
+    static let localTokenAccount = "localToken"
 
     // MARK: - Public API
 

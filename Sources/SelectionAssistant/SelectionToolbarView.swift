@@ -5,6 +5,7 @@ struct SelectionToolbarView: View {
     @ObservedObject var viewModel: SelectionAssistantViewModel
     let onApply: () -> Void
     let onClose: () -> Void
+    var onSummary: () -> Void = {}
 
     @State private var isLogoHovering = false
     @State private var isHotKeyPickerExpanded = false
@@ -15,11 +16,11 @@ struct SelectionToolbarView: View {
         let labels = RewriteOperation.allCases.reduce(CGFloat.zero) {
             $0 + ($1.rawValue as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11.5, weight: .heavy)]).width + 14
         }
-        return max(520, ceil(labels + CGFloat(max(0, RewriteOperation.allCases.count - 1)) * 4 + 255))
+        return max(630, ceil(labels + CGFloat(max(0, RewriteOperation.allCases.count - 1)) * 4 + 365))
     }
     private var panelWidth: CGFloat { Self.toolPanelWidth }
     static let hotKeyPanelWidth: CGFloat = 510
-    static let hotKeyBodyFontSize: CGFloat = 13.5
+    static let hotKeyBodyFontSize: CGFloat = TextoraPanelStyle.bodyFontSize
     static let tooltipTopReserve: CGFloat = 0
 
     static func hotKeyPanelHeight(for viewModel: SelectionAssistantViewModel) -> CGFloat {
@@ -298,25 +299,7 @@ struct SelectionToolbarView: View {
         .buttonStyle(.plain)
     }
 
-    private var hotKeyLogo: some View {
-        Group {
-            if let image = NSImage(named: "helper-icon") {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-            } else {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-        }
-        .frame(width: 36, height: 36)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.92))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
+    private var hotKeyLogo: some View { TextoraPanelLogo() }
 
     private var hotKeyOriginalCard: some View {
         hotKeyCard(title: viewModel.presentationMode == .hotKeyTranslate ? "Original" : "Before") {
@@ -480,30 +463,8 @@ struct SelectionToolbarView: View {
     }
 
 
-    private var hotKeyBadgeBackground: some View {
-        Capsule()
-            .fill(
-                LinearGradient(
-                    colors: [Color.white.opacity(0.10), Color.white.opacity(0.07)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-    }
-
-    private var hotKeyBackground: some View {
-        RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.075, green: 0.08, blue: 0.10).opacity(0.99),
-                        Color(red: 0.105, green: 0.105, blue: 0.125).opacity(0.99)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-    }
+    private var hotKeyBadgeBackground: some View { TextoraPanelStyle.badgeBackground }
+    private var hotKeyBackground: some View { TextoraPanelStyle.background }
 
     private var hotKeyOriginalCardHeight: CGFloat {
         Self.hotKeyCardHeight(
@@ -640,6 +601,19 @@ struct SelectionToolbarView: View {
             }
             .buttonStyle(.plain)
             .disabled(!viewModel.canTranslate)
+
+            Button(action: onSummary) {
+                Label("Summary", systemImage: "text.alignleft")
+                    .font(.system(size: 12.5, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .frame(height: 31)
+                    .background(Capsule().fill(Color.white.opacity(0.11)))
+                    .overlay(Capsule().stroke(Color.white.opacity(0.13), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Summarize selected text")
+            .disabled(viewModel.originalText.isEmpty || viewModel.isApplying)
         }
     }
 
@@ -1159,7 +1133,7 @@ struct SelectionToolbarView: View {
     }
 }
 
-private struct SelectionWindowDragHandle: NSViewRepresentable {
+struct SelectionWindowDragHandle: NSViewRepresentable {
     func makeNSView(context: Context) -> DragHandleView {
         DragHandleView()
     }
@@ -1312,4 +1286,65 @@ private enum PreviewDiff {
         }
         return merged
     }
+}
+
+
+enum TextoraPanelStyle {
+    static let bodyFontSize: CGFloat = 13.5
+    static let secondaryText = Color.white.opacity(0.56)
+    static let border = Color.white.opacity(0.16)
+    static var accent: LinearGradient {
+        LinearGradient(colors: [Color(red: 0.12, green: 0.70, blue: 1.0),
+                                Color(red: 0.42, green: 0.36, blue: 1.0),
+                                Color(red: 0.90, green: 0.20, blue: 0.86)],
+                       startPoint: .leading, endPoint: .trailing)
+    }
+    static var badgeBackground: some View {
+        Capsule()
+            .fill(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.10), Color.white.opacity(0.07)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+    }
+
+    static var background: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.075, green: 0.08, blue: 0.10).opacity(0.99),
+                        Color(red: 0.105, green: 0.105, blue: 0.125).opacity(0.99)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+    }
+
+}
+
+struct TextoraPanelLogo: View {
+    var body: some View {
+        Group {
+            if let image = NSImage(named: "helper-icon") {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 36, height: 36)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
 }

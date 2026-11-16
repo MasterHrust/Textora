@@ -640,7 +640,7 @@ final class SelectionAssistantViewModel: ObservableObject {
 
         let config = providerConfig()
         guard let config else {
-            status = .error("Add AI key in Settings")
+            status = .error("Configure your AI provider in Settings")
             return
         }
 
@@ -652,7 +652,7 @@ final class SelectionAssistantViewModel: ObservableObject {
         requestStyle = styleStore.profile(for: context.targetBundleID)
         let style = requestStyle
         let key = [config.provider.rawValue, config.model, String(config.key.hashValue),
-                   UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? "",
+                   config.provider.isOpenAICompatible ? AIClient.configuredCompatibleBaseURL(for: config.provider) : "",
                    smart ? "smart" : operation.rawValue, text, clarification, style?.cacheKey ?? "no-style"].joined(separator: "\u{1f}")
         rewriteTask = Task { @MainActor in
             do {
@@ -745,16 +745,15 @@ final class SelectionAssistantViewModel: ObservableObject {
         case .claude:
             fallbackModel = AIClient.Defaults.claudeModel
             key = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
-        case .other:
-            fallbackModel = AIClient.Defaults.customModel
-            key = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
-            let base = defaults
-                .string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !base.isEmpty else { return nil }
+        case .local, .other:
+            fallbackModel = provider == .local ? "" : AIClient.Defaults.customModel
+            let account = provider == .local ? KeychainHelper.localTokenAccount : KeychainHelper.customTokenAccount
+            key = KeychainHelper.read(key: account) ?? ""
+            guard AIClient.validatedOpenAICompatibleURL(from: AIClient.configuredCompatibleBaseURL(for: provider)) != nil else { return nil }
         }
-        guard !key.isEmpty else { return nil }
+        guard provider.isOpenAICompatible || !key.isEmpty else { return nil }
         let model = defaults.string(forKey: "model") ?? fallbackModel
+        guard provider != .local || !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return (provider, model.isEmpty ? fallbackModel : model, key)
     }
 

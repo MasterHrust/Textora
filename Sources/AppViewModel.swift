@@ -57,8 +57,10 @@ final class AppViewModel: ObservableObject {
             )
             model = storedModel(for: provider, allowLegacyValue: false)
             UserDefaults.standard.set(model, forKey: "model")
+            modelCatalogRequestID = UUID()
             availableModels = []
             modelCatalogError = ""
+            isLoadingModels = false
             Task { await refreshAvailableModels() }
         }
     }
@@ -75,9 +77,33 @@ final class AppViewModel: ObservableObject {
     @Published var claudeKey: String = "" {
         didSet { providerKeyDidChange(.claude, from: oldValue, to: claudeKey) }
     }
-    @Published var customToken: String = ""
+    @Published var customToken: String = "" {
+        didSet { providerKeyDidChange(.other, from: oldValue, to: customToken) }
+    }
     /// OpenAI-compatible Chat Completions base URL (e.g. `https://api.example.com` or `https://host/v1`).
-    @Published var customOpenAIBaseURL: String = ""
+    @Published var customOpenAIBaseURL: String = "" {
+        didSet { providerKeyDidChange(.other, from: oldValue, to: customOpenAIBaseURL) }
+    }
+    @Published var localToken: String = "" {
+        didSet { providerKeyDidChange(.local, from: oldValue, to: localToken) }
+    }
+    @Published var localBaseURL: String = "" {
+        didSet { providerKeyDidChange(.local, from: oldValue, to: localBaseURL) }
+    }
+    var compatibleBaseURL: String {
+        get { provider == .local ? localBaseURL : customOpenAIBaseURL }
+        set {
+            if provider == .local { localBaseURL = newValue }
+            else { customOpenAIBaseURL = newValue }
+        }
+    }
+    var compatibleToken: String {
+        get { provider == .local ? localToken : customToken }
+        set {
+            if provider == .local { localToken = newValue }
+            else { customToken = newValue }
+        }
+    }
     @Published var appConsentRows: [AppConsentRow] = []
     @Published var hasAccessibilityPermission: Bool = false
     @Published var detailedCorrectionsEnabled: Bool = false
@@ -105,6 +131,12 @@ final class AppViewModel: ObservableObject {
         didSet {
             guard !isReloadingFromDefaults, oldValue != translateHotKey else { return }
             SelectionAssistantSettings.setHotKey(translateHotKey, for: .translate)
+        }
+    }
+    @Published var summaryHotKey = TextoraHotKey(keyCode: 1, modifiers: UInt32(controlKey | optionKey | cmdKey), isEnabled: true) {
+        didSet {
+            guard !isReloadingFromDefaults, oldValue != summaryHotKey else { return }
+            SelectionAssistantSettings.setHotKey(summaryHotKey, for: .summary)
         }
     }
     @Published var offlineDictationEnabled = false {
@@ -153,7 +185,8 @@ final class AppViewModel: ObservableObject {
         return ["provider": provider.rawValue, "model": trimmedModel,
                 provider.modelUserDefaultsKey: trimmedModel,
                 AIClient.openAICompatibleBaseURLUserDefaultsKey:
-                    customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)]
+                    customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                AIClient.localBaseURLUserDefaultsKey: localBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)]
     }
     private var accessibilityPermissionObserver: NSObjectProtocol?
     private var modelCatalogRequestID = UUID()
@@ -203,6 +236,8 @@ final class AppViewModel: ObservableObject {
         claudeKey = KeychainHelper.read(key: KeychainHelper.claudeKeyAccount) ?? ""
         customToken = KeychainHelper.read(key: KeychainHelper.customTokenAccount) ?? ""
         customOpenAIBaseURL = UserDefaults.standard.string(forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey) ?? ""
+        localToken = KeychainHelper.read(key: KeychainHelper.localTokenAccount) ?? ""
+        localBaseURL = UserDefaults.standard.string(forKey: AIClient.localBaseURLUserDefaultsKey) ?? ""
         detailedCorrectionsEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.detailedCorrectionsEnabled)
         selectionAssistantBetaEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.selectionAssistantBetaEnabled)
         toolboxEnabled = UserDefaults.standard.bool(forKey: SettingsKeys.toolboxEnabled)
@@ -211,6 +246,7 @@ final class AppViewModel: ObservableObject {
         translationLanguage = SelectionAssistantSettings.translationLanguage()
         rewriteHotKey = SelectionAssistantSettings.hotKey(for: .rewrite)
         translateHotKey = SelectionAssistantSettings.hotKey(for: .translate)
+        summaryHotKey = SelectionAssistantSettings.hotKey(for: .summary)
         OfflineDictationSettings.registerDefaults()
         offlineDictationEnabled = OfflineDictationSettings.isEnabled
         dictationHotKey = SelectionAssistantSettings.hotKey(for: .dictate)
@@ -222,7 +258,7 @@ final class AppViewModel: ObservableObject {
         hasAccessibilityPermission = textService.hasAccessibilityPermission()
         refreshAppConsents()
         savedCloudPreferences = cloudPreferences
-        savedAPIKeys = [.openai: openAIKey, .gemini: geminiKey, .claude: claudeKey, .other: customToken]
+        savedAPIKeys = [.openai: openAIKey, .gemini: geminiKey, .claude: claudeKey, .other: customToken, .local: localToken]
     }
 
     func refreshLaunchAtLoginStatus() {
@@ -267,28 +303,36 @@ final class AppViewModel: ObservableObject {
             key = claudeKey
         case .other:
             key = customToken
+        case .local:
+            key = localToken
         }
-        guard !key.isEmpty else {
+        guard provider.isOpenAICompatible || !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorText = "API key is missing for selected provider"
             return
         }
-        if provider == .other {
-            let base = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !base.isEmpty else {
-                errorText = "API base URL is missing for Other"
+        if provider.isOpenAICompatible {
+            guard AIClient.validatedOpenAICompatibleURL(from: compatibleBaseURL) != nil else {
+                errorText = "Enter a valid API base URL for \(provider.displayName)."
+                return
+            }
+            guard provider != .local || !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                errorText = "Choose a local model or enter its ID."
                 return
             }
         }
         isLoading = true
         errorText = ""
+        let source = originalText
+        let historyToken = RecentResults.shared.consentToken
         do {
             rewrittenText = try await aiClient.rewriteText(
                 provider: provider,
                 model: model,
                 apiKey: key,
-                text: originalText,
+                text: source,
                 operation: operation
             )
+            RecentResults.shared.record(OperationResult(kind: .rewrite, source: source, result: rewrittenText), token: historyToken)
         } catch {
             errorText = error.localizedDescription
         }
@@ -299,8 +343,11 @@ final class AppViewModel: ObservableObject {
         defaultModel(for: provider)
     }
 
-    var hasCurrentProviderAPIKey: Bool {
-        !apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    var canLoadModels: Bool {
+        if provider.isOpenAICompatible {
+            return AIClient.validatedOpenAICompatibleURL(from: compatibleBaseURL) != nil
+        }
+        return !apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var modelPickerOptions: [AIModelOption] {
@@ -313,30 +360,34 @@ final class AppViewModel: ObservableObject {
 
     func refreshAvailableModels() async {
         guard !isPreview else { return }
+        let requestID = UUID()
+        modelCatalogRequestID = requestID
         let requestedProvider = provider
-        guard requestedProvider != .other else {
+        let baseURL = compatibleBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedProvider.isOpenAICompatible || AIClient.validatedOpenAICompatibleURL(from: baseURL) != nil else {
             availableModels = []
-            modelCatalogError = ""
+            modelCatalogError = "Enter a valid API base URL to load models."
             isLoadingModels = false
             return
         }
 
         let key = apiKey(for: requestedProvider).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
+        guard requestedProvider.isOpenAICompatible || !key.isEmpty else {
             availableModels = []
             modelCatalogError = "Add the API key to load available models."
             isLoadingModels = false
             return
         }
 
-        let requestID = UUID()
-        modelCatalogRequestID = requestID
         isLoadingModels = true
         modelCatalogError = ""
         do {
-            let models = try await aiClient.availableModels(provider: requestedProvider, apiKey: key)
+            let models = try await aiClient.availableModels(provider: requestedProvider, apiKey: key, baseURL: baseURL)
             guard modelCatalogRequestID == requestID, provider == requestedProvider else { return }
             availableModels = models
+            if requestedProvider.isOpenAICompatible, let first = models.first, model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                model = first.id
+            }
             if models.isEmpty {
                 modelCatalogError = "The provider returned no compatible text models."
             }
@@ -382,6 +433,7 @@ final class AppViewModel: ObservableObject {
         case .gemini: account = KeychainHelper.geminiKeyAccount; key = geminiKey
         case .claude: account = KeychainHelper.claudeKeyAccount; key = claudeKey
         case .other: account = KeychainHelper.customTokenAccount; key = customToken
+        case .local: account = KeychainHelper.localTokenAccount; key = localToken
         }
         guard savedAPIKeys[provider] != key else { return true }
         let keyResult = KeychainHelper.save(key: account, value: key)
@@ -407,12 +459,15 @@ final class AppViewModel: ObservableObject {
             claudeKey,
             customToken,
             customOpenAIBaseURL,
+            localToken,
+            localBaseURL,
             String(toolboxEnabled),
             String(hotKeysModeEnabled),
             operation.rawValue,
             translationLanguage.rawValue,
             String(rewriteHotKey.keyCode), String(rewriteHotKey.modifiers), String(rewriteHotKey.isEnabled),
             String(translateHotKey.keyCode), String(translateHotKey.modifiers), String(translateHotKey.isEnabled),
+            String(summaryHotKey.keyCode), String(summaryHotKey.modifiers), String(summaryHotKey.isEnabled),
             String(offlineDictationEnabled),
             String(dictationHotKey.keyCode), String(dictationHotKey.modifiers), String(dictationHotKey.isEnabled),
             selectedMicrophoneUID
@@ -548,16 +603,19 @@ final class AppViewModel: ObservableObject {
         case .claude:
             key = claudeKey.trimmingCharacters(in: .whitespacesAndNewlines)
             validationModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AIClient.Defaults.claudeModel : model
-        case .other:
-            key = customToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            validationModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? AIClient.Defaults.customModel : model
-            let base = customOpenAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            if base.isEmpty {
-                onboardingErrorText = "Set API URL for Other."
+        case .local, .other:
+            key = compatibleToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            validationModel = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultModel(for: provider) : model
+            if AIClient.validatedOpenAICompatibleURL(from: compatibleBaseURL) == nil {
+                onboardingErrorText = "Enter a valid API URL for \(provider.displayName)."
+                return false
+            }
+            if provider == .local && validationModel.isEmpty {
+                onboardingErrorText = "Choose a local model or enter its ID."
                 return false
             }
         }
-        guard !key.isEmpty else {
+        guard provider.isOpenAICompatible || !key.isEmpty else {
             onboardingErrorText = "Add an API key for the selected provider."
             return false
         }
@@ -636,6 +694,8 @@ final class AppViewModel: ObservableObject {
             return AIClient.Defaults.claudeModel
         case .other:
             return AIClient.Defaults.customModel
+        case .local:
+            return ""
         }
     }
 
@@ -649,6 +709,8 @@ final class AppViewModel: ObservableObject {
             return claudeKey
         case .other:
             return customToken
+        case .local:
+            return localToken
         }
     }
 

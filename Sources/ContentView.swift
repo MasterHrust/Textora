@@ -290,8 +290,11 @@ struct ContentView: View {
                     .disabled(!viewModel.hotKeysModeEnabled)
                 HotKeySettingRow(title: "Translate selected text", hotKey: $viewModel.translateHotKey)
                     .disabled(!viewModel.hotKeysModeEnabled)
+                HotKeySettingRow(title: "Summarize selected text", hotKey: $viewModel.summaryHotKey)
+                    .disabled(!viewModel.hotKeysModeEnabled)
                 if let error = GlobalHotKeyManager.shared.registrationError(for: .rewrite) { Text(error).font(.caption).foregroundStyle(.red) }
                 if let error = GlobalHotKeyManager.shared.registrationError(for: .translate) { Text(error).font(.caption).foregroundStyle(.red) }
+                if let error = GlobalHotKeyManager.shared.registrationError(for: .summary) { Text(error).font(.caption).foregroundStyle(.red) }
             }
             settingsGroup("Dictation") {
                 HotKeySettingRow(title: "Dictate", hotKey: $viewModel.dictationHotKey)
@@ -454,7 +457,9 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             modelSelectionControl
-            Text("Leave empty to let Textora use the recommended model for the selected provider.")
+            Text(viewModel.provider.isOpenAICompatible
+                 ? "Refresh models from your server or enter a model ID manually."
+                 : "Leave empty to let Textora use the recommended model for the selected provider.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             credentialFields
@@ -468,40 +473,38 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
     private var modelSelectionControl: some View {
-        if viewModel.provider == .other {
-            TextField("Model", text: $viewModel.model)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Picker("Model", selection: $viewModel.model) {
+                    Text(viewModel.provider.isOpenAICompatible ? "Select a model" : "Auto (\(viewModel.recommendedModel))").tag("")
+                    ForEach(viewModel.modelPickerOptions) { option in
+                        Text(option.pickerLabel).tag(option.id)
+                    }
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Picker("Model", selection: $viewModel.model) {
-                        Text("Auto (\(viewModel.recommendedModel))").tag("")
-                        ForEach(viewModel.modelPickerOptions) { option in
-                            Text(option.pickerLabel).tag(option.id)
-                        }
-                    }
+
+                Button {
+                    Task { await viewModel.refreshAvailableModels() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh available models")
+                .disabled(viewModel.isLoadingModels || !viewModel.canLoadModels)
+
+                if viewModel.isLoadingModels {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            if !viewModel.modelCatalogError.isEmpty {
+                Text(viewModel.modelCatalogError)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if viewModel.provider.isOpenAICompatible {
+                TextField("Or enter a model ID manually", text: $viewModel.model)
                     .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Button {
-                        Task { await viewModel.refreshAvailableModels() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .help("Refresh available models")
-                    .disabled(viewModel.isLoadingModels || !viewModel.hasCurrentProviderAPIKey)
-
-                    if viewModel.isLoadingModels {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                if !viewModel.modelCatalogError.isEmpty {
-                    Text(viewModel.modelCatalogError)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
             }
         }
     }
@@ -547,11 +550,11 @@ struct ContentView: View {
         case .claude:
             SecureField("Claude API key", text: $viewModel.claudeKey)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        case .other:
-            TextField("API base URL (OpenAI-compatible)", text: $viewModel.customOpenAIBaseURL)
+        case .local, .other:
+            TextField(viewModel.provider == .local ? "Local server URL (http://localhost:1234/v1)" : "HTTPS API base URL (OpenAI-compatible)", text: $viewModel.compatibleBaseURL)
                 .textContentType(.URL)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            SecureField("API token", text: $viewModel.customToken)
+            SecureField("API token (if required)", text: $viewModel.compatibleToken)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -656,6 +659,10 @@ struct ContentView: View {
         case .claude:
             Link("Get Claude API key", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
                 .font(.caption)
+        case .local:
+            Text("Start your local model server and enter its OpenAI-compatible API address.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .other:
             Link("OpenAI-compatible API docs", destination: URL(string: "https://platform.openai.com/docs/api-reference/chat/create")!)
                 .font(.caption)
@@ -989,11 +996,11 @@ struct OnboardingView: View {
                 Text("Textora helps you fix and improve text in any app, including email, chats, documents, and browsers.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                Text("Cloud writing tools use your own API key. Offline Dictation can be used without one.")
+                Text("Connect a cloud AI provider or a local model server. Offline Dictation runs on this Mac.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
             case 2:
-                Text("Choose an AI provider and add your key. GPT is selected by default.")
+                Text("Choose your AI provider. GPT is selected by default.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 Picker("Provider", selection: $viewModel.provider) {
@@ -1003,7 +1010,7 @@ struct OnboardingView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             case 3:
-                Text("Add your key and verify the connection.")
+                Text("Configure your AI provider and verify the connection.")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 onboardingCredentialFields
@@ -1033,7 +1040,8 @@ struct OnboardingView: View {
                             .foregroundStyle(.primary)
                         HotKeySettingRow(title: "Rewrite selected text", hotKey: $viewModel.rewriteHotKey)
                         HotKeySettingRow(title: "Translate selected text", hotKey: $viewModel.translateHotKey)
-                        Text("Suggested: ⌥⌘R for Rewrite and ⌥⌘T for Translate")
+                        HotKeySettingRow(title: "Summarize selected text", hotKey: $viewModel.summaryHotKey)
+                        Text("Suggested: ⌥⌘R for Rewrite, ⌥⌘T for Translate, ⌃⌥⌘S for Summary")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -1234,7 +1242,7 @@ struct OnboardingView: View {
 
     @ViewBuilder
     private var onboardingCredentialFields: some View {
-        if viewModel.provider == .other {
+        if viewModel.provider.isOpenAICompatible {
             Text("1. Add API details")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
@@ -1266,24 +1274,17 @@ struct OnboardingView: View {
             Link("Get Claude API key", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.orange)
-        case .other:
-            TextField("API base URL (OpenAI-compatible)", text: $viewModel.customOpenAIBaseURL)
+        case .local, .other:
+            TextField(viewModel.provider == .local ? "Local server URL (http://localhost:1234/v1)" : "HTTPS API base URL (OpenAI-compatible)", text: $viewModel.compatibleBaseURL)
                 .textContentType(.URL)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
-            SecureField("API token", text: $viewModel.customToken)
+            SecureField("API token (if required)", text: $viewModel.compatibleToken)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textFieldStyle(.roundedBorder)
         }
 
-        if viewModel.provider == .other {
-            Text("2. Enter the model name")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-            TextField("Model", text: $viewModel.model)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textFieldStyle(.roundedBorder)
-        } else {
+        Group {
             Text("2. Check available models")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
@@ -1293,11 +1294,11 @@ struct OnboardingView: View {
                     Task { await viewModel.refreshAvailableModels() }
                 } label: {
                     Label(
-                        viewModel.isLoadingModels ? "Checking..." : "Check key and load models",
+                        viewModel.isLoadingModels ? "Checking..." : (viewModel.provider.isOpenAICompatible ? "Refresh models" : "Check key and load models"),
                         systemImage: "arrow.clockwise"
                     )
                 }
-                .disabled(viewModel.isLoadingModels || !viewModel.hasCurrentProviderAPIKey)
+                .disabled(viewModel.isLoadingModels || !viewModel.canLoadModels)
                 .buttonStyle(SecondaryButtonStyle())
                 .focusEffectDisabled()
 
@@ -1321,13 +1322,18 @@ struct OnboardingView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
             Picker("Model", selection: $viewModel.model) {
-                Text("Auto (\(viewModel.recommendedModel))").tag("")
+                Text(viewModel.provider.isOpenAICompatible ? "Select a model" : "Auto (\(viewModel.recommendedModel))").tag("")
                 ForEach(viewModel.modelPickerOptions) { option in
                     Text(option.pickerLabel).tag(option.id)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(viewModel.availableModels.isEmpty)
+            if viewModel.provider.isOpenAICompatible {
+                TextField("Or enter a model ID manually", text: $viewModel.model)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textFieldStyle(.roundedBorder)
+            }
         }
     }
 }

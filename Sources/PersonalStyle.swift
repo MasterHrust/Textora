@@ -75,7 +75,7 @@ enum FeatureError: LocalizedError {
         case .invalidStyle: return "Describe writing preferences only: tone, brevity, spelling and literal terms. Use up to 500 characters."
         case .invalidResponse: return "The AI response could not be validated. Please try again."
         case .unavailableKeychain: return "Secure history storage is unavailable. No unencrypted history was saved."
-        case .noProvider: return "Add an AI key in Settings to use this feature."
+        case .noProvider: return "Configure an AI provider and model in Settings to use this feature."
         }
     }
 }

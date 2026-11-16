@@ -104,7 +104,7 @@ actor SelectionTextWorker {
         await service.insertDictatedText(text, into: target, reactivateTarget: reactivate)
     }
 
-    func selection(intent: ReadIntent = .automatic) -> TextAccessService.FocusedTextContext? {
+    func selection(intent: ReadIntent = .automatic, maxLength: Int = 6000) -> TextAccessService.FocusedTextContext? {
         let start = ProcessInfo.processInfo.systemUptime
         defer { InteractionTiming.record("selection-resolve", since: start) }
         guard !Task.isCancelled else { return nil }
@@ -112,7 +112,7 @@ actor SelectionTextWorker {
         // keyboard shortcuts: even a snapshot/restore races with ordinary paste.
         let allowClipboard = intent == .userInvoked
         if let selectionReader { return selectionReader(allowClipboard) }
-        return service.selectedTextContextAnyFocus(minLength: 1, maxLength: 6000,
+        return service.selectedTextContextAnyFocus(minLength: 1, maxLength: maxLength,
             allowClipboardFallback: allowClipboard, allowBrowserClipboardSelection: allowClipboard)
             .map { service.capturingInsertionIdentity($0) }
     }

@@ -125,7 +125,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             showOnboardingWindow()
             return
         }
-        if (hasAnyConfiguredKey() || OfflineDictationSettings.isEnabled), !textAccess.hasAccessibilityPermission() {
+        if (hasAnyConfiguredProvider() || OfflineDictationSettings.isEnabled), !textAccess.hasAccessibilityPermission() {
             configurePrimaryInteractionMode()
             schedulePrimaryInteractionRetry(reason: "accessibilityUnavailable")
             showAccessibilityWizardDeferred()
@@ -235,8 +235,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             helperStatus = "Offline dictation active"
             return
         }
-        guard hasAnyConfiguredKey() else {
-            helperStatus = OfflineDictationSettings.isEnabled ? "Offline dictation active" : "API key required"
+        guard hasAnyConfiguredProvider() else {
+            helperStatus = OfflineDictationSettings.isEnabled ? "Offline dictation active" : "AI provider setup required"
             selectionAssistant.stop()
             return
         }
@@ -249,6 +249,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         let hasEnabledHotKey = isHotKeysEnabled && (SelectionAssistantSettings.hotKey(for: .rewrite).isEnabled
             || SelectionAssistantSettings.hotKey(for: .translate).isEnabled
+            || SelectionAssistantSettings.hotKey(for: .summary).isEnabled
         )
         if isToolboxEnabled || hasEnabledHotKey {
             selectionAssistant.start(automaticDetectionEnabled: isToolboxEnabled)
@@ -298,7 +299,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
         guard event.phase == .pressed else { return }
-        guard hasAnyConfiguredKey() else {
+        guard hasAnyConfiguredProvider() else {
             showOnboardingWindow()
             return
         }
@@ -324,7 +325,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func scheduleLaunchWarmupRetry(reason: String) {
-        guard hasAnyConfiguredKey() else { return }
+        guard hasAnyConfiguredProvider() else { return }
         guard launchWarmupTask == nil else { return }
         guard launchWarmupCount < 24 else {
             logSelectionAssistantDiagnostic(
@@ -358,7 +359,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private var shouldContinueLaunchWarmup: Bool {
-        guard hasAnyConfiguredKey() else { return false }
+        guard hasAnyConfiguredProvider() else { return false }
         guard textAccess.hasAccessibilityPermission() else { return true }
         if isToolboxEnabled || isHotKeysEnabled {
             return false
@@ -373,7 +374,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func schedulePrimaryInteractionRetry(reason: String) {
-        guard hasAnyConfiguredKey() else { return }
+        guard hasAnyConfiguredProvider() else { return }
         guard primaryInteractionRetryTask == nil else { return }
         guard primaryInteractionRetryCount < 12 else {
             logSelectionAssistantDiagnostic(
@@ -619,7 +620,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                     guard self.onboardingViewModel?.completeOnboarding() == true else { return }
                     ReleaseNotesPresentation.markSeen(version: ReleaseNotes.currentVersion())
                     self.closeOnboardingWindow()
-                    let needsAccessibility = self.hasAnyConfiguredKey() || OfflineDictationSettings.isEnabled
+                    let needsAccessibility = self.hasAnyConfiguredProvider() || OfflineDictationSettings.isEnabled
                     if needsAccessibility && (self.shouldOpenAccessibilityAfterOnboarding || !self.textAccess.hasAccessibilityPermission()) {
                         self.shouldOpenAccessibilityAfterOnboarding = false
                         self.showAccessibilityWizardDeferred()
@@ -656,7 +657,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         onboardingWindow = nil
     }
 
-    private func hasAnyConfiguredKey() -> Bool {
+    private func hasAnyConfiguredProvider() -> Bool {
+        SelectionAssistantViewModel.providerConfiguration() != nil ||
         (KeychainHelper.read(key: KeychainHelper.openAIKeyAccount)?.isEmpty == false) ||
         (KeychainHelper.read(key: KeychainHelper.geminiKeyAccount)?.isEmpty == false) ||
         (KeychainHelper.read(key: KeychainHelper.claudeKeyAccount)?.isEmpty == false) ||

@@ -4,7 +4,7 @@ import CryptoKit
 import Security
 
 struct OperationResult: Identifiable, Codable, Equatable {
-    enum Kind: String, Codable, CaseIterable { case rewrite, translate, dictation, message }
+    enum Kind: String, Codable, CaseIterable { case rewrite, translate, dictation, message, summary }
     var id = UUID()
     var date = Date()
     var kind: Kind
@@ -27,21 +27,39 @@ struct HistoryPolicy: Codable, Equatable {
 }
 
 enum HistoryEncryptionKey {
-    static func load(create: Bool) throws -> SymmetricKey {
+    static func load(create: Bool, service: String = "com.textora.app.recentResults") throws -> SymmetricKey {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.textora.app.recentResults", kSecAttrAccount as String: "encryption.v1",
-            kSecUseDataProtectionKeychain as String: true, kSecAttrSynchronizable as String: false]
-        var lookup = query; lookup[kSecReturnData as String] = true; lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+            kSecAttrService as String: service, kSecAttrAccount as String: "encryption.v1"]
+        // Preserve keys created by builds with Data Protection Keychain access.
+        // New keys use the same system Keychain as the app's API credentials.
+        var protectedLookup = query
+        protectedLookup[kSecUseDataProtectionKeychain as String] = true
+        protectedLookup[kSecAttrSynchronizable as String] = false
+        protectedLookup[kSecReturnData as String] = true
+        protectedLookup[kSecMatchLimit as String] = kSecMatchLimitOne
         var data: CFTypeRef?
+        let protectedStatus = SecItemCopyMatching(protectedLookup as CFDictionary, &data)
+        if protectedStatus == errSecSuccess { return try decodedKey(data) }
+        guard protectedStatus == errSecItemNotFound || protectedStatus == errSecMissingEntitlement else {
+            throw KeychainHelper.KeychainError.security(protectedStatus)
+        }
+        var lookup = query; lookup[kSecReturnData as String] = true; lookup[kSecMatchLimit as String] = kSecMatchLimitOne
         let status = SecItemCopyMatching(lookup as CFDictionary, &data)
-        if status == errSecSuccess, let data = data as? Data, data.count == 32 { return SymmetricKey(data: data) }
-        guard status == errSecItemNotFound, create else { throw FeatureError.unavailableKeychain }
+        if status == errSecSuccess { return try decodedKey(data) }
+        guard status == errSecItemNotFound else { throw KeychainHelper.KeychainError.security(status) }
+        guard create else { throw FeatureError.unavailableKeychain }
         let key = SymmetricKey(size: .bits256)
         var insert = query
         insert[kSecValueData as String] = key.withUnsafeBytes { Data($0) }
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(insert as CFDictionary, nil) == errSecSuccess else { throw FeatureError.unavailableKeychain }
+        let insertStatus = SecItemAdd(insert as CFDictionary, nil)
+        if insertStatus == errSecDuplicateItem { return try load(create: false, service: service) }
+        guard insertStatus == errSecSuccess else { throw KeychainHelper.KeychainError.security(insertStatus) }
         return key
+    }
+
+    private static func decodedKey(_ value: CFTypeRef?) throws -> SymmetricKey {
+        guard let data = value as? Data, data.count == 32 else { throw KeychainHelper.KeychainError.invalidData }
+        return SymmetricKey(data: data)
     }
 }
 
@@ -53,7 +71,7 @@ actor ResultHistoryStore {
     private var epoch = 0
     private var policy = HistoryPolicy()
 
-    init(url: URL, key: @escaping (Bool) throws -> SymmetricKey = HistoryEncryptionKey.load) {
+    init(url: URL, key: @escaping (Bool) throws -> SymmetricKey = { try HistoryEncryptionKey.load(create: $0) }) {
         self.url = url; self.key = key
     }
     static var defaultURL: URL {

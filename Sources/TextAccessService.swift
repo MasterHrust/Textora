@@ -2716,6 +2716,7 @@ final class TextAccessService {
 
     private func prefersClipboardSelectionContextForBundle(_ bundleID: String) -> Bool {
         isBrowserBundleID(bundleID) || isSlackBundleID(bundleID) || isPDFReaderBundleID(bundleID)
+            || bundleID.lowercased().contains("mattermost")
     }
 
     private func prefersAtomicClipboardRangePaste(for context: FocusedTextContext) -> Bool {

@@ -469,7 +469,7 @@ final class OfflineDictationController {
         guard translationSettings.enabled else { return text }
         showProgress("Translating…")
         guard let config = SelectionAssistantViewModel.providerConfiguration() else {
-            throw NSError(domain: "Textora", code: 43, userInfo: [NSLocalizedDescriptionKey: "Add an AI key in Settings."])
+            throw NSError(domain: "Textora", code: 43, userInfo: [NSLocalizedDescriptionKey: "Configure an AI provider and model in Settings."])
         }
         let result = try await AIClient().translateText(provider: config.provider, model: config.model, apiKey: config.key,
             text: text, targetLanguage: translationSettings.target.displayName, sourceLanguage: translationSettings.sourceLanguageName, style: sessionStyle)

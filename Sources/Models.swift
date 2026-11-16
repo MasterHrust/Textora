@@ -4,11 +4,13 @@ enum AIProvider: String, CaseIterable, Identifiable {
     case openai
     case gemini
     case claude
+    case local
     case other
 
     var id: String { rawValue }
 
     var modelUserDefaultsKey: String { "model.\(rawValue)" }
+    var isOpenAICompatible: Bool { self == .local || self == .other }
 
     /// UI label; `rawValue` stays stable for UserDefaults persistence.
     var displayName: String {
@@ -16,6 +18,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openai: return "GPT"
         case .gemini: return "Gemini"
         case .claude: return "Claude"
+        case .local: return "Local"
         case .other: return "Other"
         }
     }

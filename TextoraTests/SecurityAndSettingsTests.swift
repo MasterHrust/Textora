@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Network
 import WebKit
 import XCTest
 @testable import Textora
@@ -20,6 +21,20 @@ private final class FontTestNavigationDelegate: NSObject, WKNavigationDelegate {
 }
 
 final class SecurityAndSettingsTests: XCTestCase {
+    func testSummaryShortcutDefaultsAndSavedChoicesSurviveRegistration() throws {
+        let suiteName = "TextoraTests.SummaryShortcut.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suggested = SelectionAssistantSettings.hotKey(for: .summary, defaults: defaults)
+        XCTAssertEqual(suggested, TextoraHotKey(keyCode: 1, modifiers: UInt32(controlKey | optionKey | cmdKey), isEnabled: true))
+        let custom = TextoraHotKey(keyCode: 32, modifiers: UInt32(cmdKey | shiftKey), isEnabled: false)
+        SelectionAssistantSettings.setHotKey(custom, for: .summary, defaults: defaults)
+        SelectionAssistantSettings.registerDefaults(defaults: defaults)
+        XCTAssertEqual(SelectionAssistantSettings.hotKey(for: .summary, defaults: defaults), custom)
+        XCTAssertEqual(TextoraHotKeyAction.rewrite.rawValue, 1)
+        XCTAssertEqual(TextoraHotKeyAction.translate.rawValue, 2)
+    }
+
     func testUnseenMainAppLoginItemCanBeRegistered() {
         XCTAssertEqual(LaunchAtLoginManager.state(for: .notFound), .disabled)
     }
@@ -29,9 +44,49 @@ final class SecurityAndSettingsTests: XCTestCase {
         XCTAssertEqual(url?.absoluteString, "https://api.example.com/v1/chat/completions")
     }
 
-    func testCompatibleURLRejectsHTTPAndEmbeddedCredentials() {
-        XCTAssertNil(AIClient.validatedOpenAICompatibleURL(from: "http://localhost:8080"))
+    func testCompatibleURLAcceptsLocalHTTPAndRejectsRemoteHTTPAndEmbeddedCredentials() {
+        XCTAssertEqual(AIClient.validatedOpenAICompatibleURL(from: "http://localhost:8080")?.absoluteString,
+                       "http://localhost:8080/v1/chat/completions")
+        XCTAssertNil(AIClient.validatedOpenAICompatibleURL(from: "http://api.example.com"))
         XCTAssertNil(AIClient.validatedOpenAICompatibleURL(from: "https://token@example.com"))
+    }
+
+    func testCompatibleModelCatalogUsesConfiguredBasePathAndOptionalToken() throws {
+        for (base, expected) in [
+            ("http://127.0.0.1:1234", "http://127.0.0.1:1234/v1/models"),
+            ("http://localhost:11434/v1/", "http://localhost:11434/v1/models"),
+            ("http://[::1]:1234/v1", "http://[::1]:1234/v1/models"),
+            ("https://api.example.com/proxy/v1/chat/completions", "https://api.example.com/proxy/v1/models")
+        ] {
+            let request = try AIClient.compatibleModelsRequest(baseURL: base, apiKey: "")
+            XCTAssertEqual(request.url?.absoluteString, expected)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        }
+        let authenticated = try AIClient.compatibleModelsRequest(baseURL: "https://api.example.com/v1", apiKey: " token ")
+        XCTAssertEqual(authenticated.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+        XCTAssertThrowsError(try AIClient.compatibleModelsRequest(baseURL: "http://remote.example.com", apiKey: ""))
+    }
+
+    func testCompatibleCatalogKeepsLocalModelIDsAndRejectsMalformedResponses() throws {
+        let data = Data(#"{"data":[{"id":"qwen3:8b"},{"id":"llama-local","name":"Llama Local"},{"id":"qwen3:8b"},{"id":" "},{}]}"#.utf8)
+        let models = try AIClient.decodeCompatibleModels(data)
+        XCTAssertEqual(models.map(\.id), ["llama-local", "qwen3:8b"])
+        XCTAssertEqual(models.first?.displayName, "Llama Local")
+        XCTAssertEqual(try AIClient.decodeCompatibleModels(Data(#"{"data":[]}"#.utf8)), [])
+        XCTAssertThrowsError(try AIClient.decodeCompatibleModels(Data(#"{"error":"unavailable"}"#.utf8)))
+    }
+
+    func testLocalHTTPTransportStaysOnTheConfiguredOrigin() throws {
+        for base in ["http://localhost:1234", "http://127.0.0.1:1234", "http://[::1]:1234"] {
+            let url = try XCTUnwrap(URL(string: base))
+            XCTAssertTrue(SecureAITransportPolicy.allows(url))
+            let localRequest = URLRequest(url: url.appendingPathComponent("v1/models"))
+            XCTAssertNotNil(SecureAITransportPolicy.redirectedRequest(originalURL: url, proposedRequest: localRequest))
+            XCTAssertNil(SecureAITransportPolicy.redirectedRequest(originalURL: url,
+                proposedRequest: URLRequest(url: try XCTUnwrap(URL(string: "http://remote.example.com/v1/models")))))
+        }
+        XCTAssertFalse(SecureAITransportPolicy.allows(URL(string: "http://localhost.example.com")))
+        XCTAssertFalse(SecureAITransportPolicy.allows(URL(string: "http://192.168.1.2:1234")))
     }
 
     func testSecureAITransportRejectsHTTPAndCredentialedURLs() throws {
@@ -51,6 +106,106 @@ final class SecurityAndSettingsTests: XCTestCase {
         XCTAssertNil(SecureAITransportPolicy.redirectedRequest(originalURL: original, proposedRequest: otherHost))
     }
 
+    @MainActor
+    func testLocalAndOtherLoadModelsFromUnsavedURLsAndGenerateWithoutTokens() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let listening = expectation(description: "Local compatible server ready")
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { listening.fulfill() }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: .global())
+            func receiveRequest(_ accumulated: Data) {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
+                    XCTAssertNil(error)
+                    let received = accumulated + (data ?? Data())
+                    guard let boundary = received.range(of: Data("\r\n\r\n".utf8)) else {
+                        if complete { XCTFail("Incomplete HTTP request"); connection.cancel() }
+                        else { receiveRequest(received) }
+                        return
+                    }
+                    let headers = String(decoding: received[..<boundary.lowerBound], as: UTF8.self)
+                    let contentLength = headers.components(separatedBy: "\r\n")
+                        .first(where: { $0.lowercased().hasPrefix("content-length:") })
+                        .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
+                    guard received.count >= boundary.upperBound + contentLength else {
+                        if complete { XCTFail("Incomplete HTTP body"); connection.cancel() }
+                        else { receiveRequest(received) }
+                        return
+                    }
+                    let request = String(decoding: received, as: UTF8.self)
+                    XCTAssertFalse(headers.lowercased().contains("authorization:"))
+                    let body: String
+                    if request.hasPrefix("GET /v1/models ") {
+                        body = #"{"data":[{"id":"qwen3:8b"},{"id":"llama-local"}]}"#
+                    } else {
+                        XCTAssertTrue(request.hasPrefix("POST /v1/chat/completions "))
+                        if request.contains("Summarize the selected text faithfully") {
+                            XCTAssertTrue(request.contains("SOURCE_END"))
+                            XCTAssertTrue(request.contains("Russian"))
+                            body = #"{"choices":[{"message":{"content":"{\"overview\":\"Обсуждение релиза.\",\"sections\":[]}"}}]}"#
+                        } else {
+                            body = #"{"choices":[{"message":{"content":"Hello"}}]}"#
+                        }
+                    }
+                    let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+                }
+            }
+            receiveRequest(Data())
+        }
+
+        listener.start(queue: .global())
+        defer { listener.cancel() }
+        await fulfillment(of: [listening], timeout: 3)
+        let port = try XCTUnwrap(listener.port)
+        let baseURL = "http://127.0.0.1:\(port.rawValue)/v1"
+        let defaults = UserDefaults.standard
+        let keys = ["provider", "model", AIProvider.other.modelUserDefaultsKey, AIProvider.local.modelUserDefaultsKey,
+                    AIClient.openAICompatibleBaseURLUserDefaultsKey, AIClient.localBaseURLUserDefaultsKey]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
+        defer {
+            for key in keys {
+                if let value = previous[key] ?? nil { defaults.set(value, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
+            }
+        }
+        let settings = AppViewModel()
+        for provider in [AIProvider.local, .other] {
+            settings.provider = provider
+            settings.compatibleBaseURL = baseURL
+            settings.compatibleToken = ""
+            settings.model = ""
+            // Let the refresh triggered by changing providers finish first.
+            await Task.yield()
+            await settings.refreshAvailableModels()
+            // A scheduled refresh can supersede the explicit one while it awaits I/O.
+            for _ in 0..<100 where settings.isLoadingModels { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(settings.availableModels.map(\.id), ["llama-local", "qwen3:8b"])
+            XCTAssertEqual(settings.model, "llama-local")
+            XCTAssertTrue(settings.modelCatalogError.isEmpty, settings.modelCatalogError)
+            XCTAssertTrue(settings.canLoadModels)
+            settings.model = "my-manual-model"
+            await settings.refreshAvailableModels()
+            XCTAssertEqual(settings.model, "my-manual-model")
+            XCTAssertEqual(settings.modelPickerOptions.first?.id, "my-manual-model")
+
+            let baseKey = provider == .local ? AIClient.localBaseURLUserDefaultsKey : AIClient.openAICompatibleBaseURLUserDefaultsKey
+            defaults.set(baseURL, forKey: baseKey)
+            defaults.set(provider.rawValue, forKey: "provider")
+            defaults.set("llama-local", forKey: "model")
+            XCTAssertEqual(SelectionAssistantViewModel.providerConfiguration()?.provider, provider)
+            let result = try await AIClient().rewriteText(provider: provider, model: "llama-local", apiKey: "", text: "hello", operation: .fixGrammar)
+            XCTAssertEqual(result, "Hello")
+            let summarySource = String(repeating: "Conversation message. ", count: 500) + "SOURCE_END"
+            let summary = try await AIClient().summarize(text: summarySource, options: SummaryOptions(language: .russian))
+            XCTAssertEqual(summary.overview, "Обсуждение релиза.")
+            settings.compatibleBaseURL = ""
+            XCTAssertTrue(settings.availableModels.isEmpty)
+            XCTAssertFalse(settings.canLoadModels)
+        }
+    }
+
     func testGeminiKeyIsOnlyInHeader() throws {
         let url = try XCTUnwrap(URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"))
         let request = AIClient.geminiRequest(url: url, apiKey: " secret-key ")
@@ -59,6 +214,46 @@ final class SecurityAndSettingsTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(request.url?.absoluteString).contains("secret-key"))
         XCTAssertNil(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { ["key", "api_key", "token"].contains($0.name.lowercased()) }))
+    }
+
+    @MainActor
+    func testLocalAndHTTPSOtherSettingsPersistIndependently() throws {
+        let defaults = UserDefaults.standard
+        let keys = ["provider", "model", AIProvider.local.modelUserDefaultsKey, AIProvider.other.modelUserDefaultsKey,
+                    AIClient.localBaseURLUserDefaultsKey, AIClient.openAICompatibleBaseURLUserDefaultsKey]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
+        defer {
+            for key in keys {
+                if let value = previous[key] ?? nil { defaults.set(value, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
+            }
+        }
+        defaults.set("local", forKey: "provider")
+        defaults.set("qwen3:8b", forKey: AIProvider.local.modelUserDefaultsKey)
+        defaults.set("remote-model", forKey: AIProvider.other.modelUserDefaultsKey)
+        defaults.set("http://localhost:1234/v1", forKey: AIClient.localBaseURLUserDefaultsKey)
+        defaults.set("https://api.example.com/v1", forKey: AIClient.openAICompatibleBaseURLUserDefaultsKey)
+        let settings = AppViewModel()
+        XCTAssertEqual(settings.provider, .local)
+        XCTAssertEqual(settings.model, "qwen3:8b")
+        XCTAssertEqual(settings.compatibleBaseURL, "http://localhost:1234/v1")
+        settings.compatibleBaseURL = "http://localhost:11434/v1"
+        XCTAssertTrue(settings.saveSettings())
+
+        defaults.set("other", forKey: "provider")
+        settings.reloadFromUserDefaults()
+        XCTAssertEqual(settings.provider, .other)
+        XCTAssertEqual(settings.model, "remote-model")
+        XCTAssertEqual(settings.compatibleBaseURL, "https://api.example.com/v1")
+        XCTAssertTrue(settings.canLoadModels)
+        let request = try AIClient.compatibleModelsRequest(baseURL: settings.compatibleBaseURL, apiKey: "other-token")
+        XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/models")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer other-token")
+
+        defaults.set("local", forKey: "provider")
+        let reopened = AppViewModel()
+        XCTAssertEqual(reopened.model, "qwen3:8b")
+        XCTAssertEqual(reopened.compatibleBaseURL, "http://localhost:11434/v1")
     }
 
     func testRemovedDiagnosticHookDoesNotEvaluatePayload() {
@@ -705,7 +900,7 @@ final class SecurityAndSettingsTests: XCTestCase {
         }
         let choices: [(AIProvider, String)] = [(.openai, AIClient.Defaults.openAIModel),
             (.gemini, "gemini-1.5-pro"), (.claude, "claude-3-5-sonnet-latest"),
-            (.other, "my-local-model")]
+            (.other, "custom-https-model"), (.local, "my-local-model")]
         for (provider, model) in choices {
             for legacyOnly in [true, false] {
                 defaults.set(provider.rawValue, forKey: "provider")
