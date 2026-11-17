@@ -14,6 +14,12 @@ final class MessagePreviewModel: ObservableObject {
     @Published var aiWasRequested = false
     @Published var canInsert = true
     @Published var notice = ""
+    @Published var needsTargetSelection = false
+    @Published var targetLanguage: TranslationLanguage?
+    @Published var allowsLanguageSelection = false
+    private(set) var generatedDraft = ""
+    var hasEditedDraft: Bool { draft != generatedDraft && !draft.isEmpty }
+    var onSelectTarget: ((TranslationLanguage) -> Void)?
     private var generation = 0
     func invalidate() { generation += 1; busy = false }
     func prepare(transcript: String, useAI: Bool = true,
@@ -29,6 +35,8 @@ final class MessagePreviewModel: ObservableObject {
             // Previewing dictation must not invoke the provider, even when a
             // personal style is selected. AI improvement is a separate action.
             draft = GeneratedTextStyle.shortDashes(transcript)
+            generatedDraft = draft
+            needsTargetSelection = false
             questions = []; clarification = ""
             busy = false; draftUsesAI = false; aiWasRequested = false
             return MessageDraft(draft: draft, questions: [])
@@ -37,7 +45,10 @@ final class MessagePreviewModel: ObservableObject {
         do {
             let response = try await operation()
             guard generation == id, !Task.isCancelled else { return nil }
-            busy = false; draft = response.draft; questions = response.questions; draftUsesAI = true
+            busy = false; draft = response.draft; generatedDraft = draft
+            questions = response.questions; draftUsesAI = true
+            needsTargetSelection = response.needsTargetSelection
+            if let direction = response.direction { targetLanguage = direction.target; language = direction.label }
             return response
         } catch {
             guard generation == id, !Task.isCancelled else { return nil }
@@ -76,6 +87,9 @@ struct MessagePreviewView: View {
     private let providerAvailable: Bool?
     @State private var hasProvider = false
     @State private var tab = "draft"
+    @State private var pendingTarget: TranslationLanguage?
+    @State private var confirmsReplacement = false
+    @State private var confirmsRegeneration = false
     init(model: MessagePreviewModel, providerAvailable: Bool? = nil) {
         self.model = model; self.providerAvailable = providerAvailable
         self._hasProvider = State(initialValue: providerAvailable ?? false)
@@ -98,13 +112,22 @@ struct MessagePreviewView: View {
                 Text(styleDescription).font(.caption).foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing).fixedSize(horizontal: false, vertical: true)
             }
+            if model.allowsLanguageSelection {
+                HStack {
+                    if model.needsTargetSelection { Text("Choose a target language to continue.").font(.caption) }
+                    TemporaryTargetPicker(selection: model.targetLanguage) { language in
+                        if model.hasEditedDraft { pendingTarget = language; confirmsReplacement = true }
+                        else { model.onSelectTarget?(language) }
+                    }.disabled(model.busy)
+                }
+            }
             Picker("Content", selection: $tab) {
                 Text("Transcript").tag("transcript"); Text("Draft").tag("draft")
             }.pickerStyle(.segmented)
             if tab == "transcript" {
                 ScrollView { Text(model.transcript).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             } else {
-                TextEditor(text: $model.draft).font(.body).disabled(model.busy || !model.questions.isEmpty)
+                TextEditor(text: $model.draft).font(.body).disabled(model.busy || !model.questions.isEmpty || model.needsTargetSelection)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
             }
             if !model.questions.isEmpty {
@@ -135,25 +158,42 @@ struct MessagePreviewView: View {
             HStack {
                 if model.canInsert {
                     Button("Insert") { model.onInsert?(model.draft) }
-                        .disabled(model.busy || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.questions.isEmpty)
+                        .disabled(model.busy || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.questions.isEmpty || model.needsTargetSelection)
                 }
                 Button(tab == "transcript" || model.draft.isEmpty ? "Copy transcript" : "Copy draft") {
                     model.onCopy?(tab == "transcript" || model.draft.isEmpty ? model.transcript : model.draft)
                 }
                 if model.busy { ProgressView().controlSize(.small) }
                 Button(aiActionTitle) {
-                    let clarification = model.clarification; model.clarification = ""; model.onRegenerate?(clarification)
-                }.disabled(!hasProvider || model.busy || !model.questions.isEmpty && model.clarification.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if model.hasEditedDraft { confirmsRegeneration = true }
+                    else { regenerate() }
+                }.disabled(!hasProvider || model.busy || model.needsTargetSelection || !model.questions.isEmpty && model.clarification.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Spacer()
                 Button("Close") { model.onClose?() }
             }
             Text(privacyDescription)
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.padding(22).frame(minWidth: 560, minHeight: 440)
+        .confirmationDialog("Replace your edited draft?", isPresented: $confirmsReplacement) {
+            Button("Replace draft", role: .destructive) {
+                if let pendingTarget { model.onSelectTarget?(pendingTarget) }
+                pendingTarget = nil
+            }
+            Button("Cancel", role: .cancel) { pendingTarget = nil }
+        } message: { Text("Your transcript and meaning clarifications will be kept.") }
+        .confirmationDialog("Replace your edited draft?", isPresented: $confirmsRegeneration) {
+            Button("Replace draft", role: .destructive) { regenerate() }
+            Button("Cancel", role: .cancel) { }
+        }
         .onAppear(perform: refreshProviderAvailability)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             refreshProviderAvailability()
         }
+    }
+    private func regenerate() {
+        let clarification = model.clarification
+        model.clarification = ""
+        model.onRegenerate?(clarification)
     }
     private var styleDescription: String {
         if model.draftUsesAI { return model.style == "Off" ? "AI style: Off" : "Style: \(model.style)" }
@@ -255,6 +295,10 @@ struct RecordingOutputMenu: View {
 }
 
 struct RecordingCapsuleView: View {
+    @ObservedObject private var translationOverride = RecordingTranslationOverride.shared
+    @AppStorage(LanguageRoutingSettings.enabledKey) private var smartEnabled = false
+    @AppStorage(LanguageRoutingSettings.primaryKey) private var primary = "russian"
+    @AppStorage(LanguageRoutingSettings.secondaryKey) private var secondary = "english"
     let meter: RecordingMeterModel
     @ObservedObject var options: RecordingControlsModel
     let onStop: () -> Void
@@ -326,6 +370,10 @@ struct RecordingCapsuleView: View {
     }
     private var translationSummary: String {
         guard translationEnabled else { return "Translate: Off" }
+        if smartEnabled {
+            return translationOverride.target.map { "Auto → \($0.code.uppercased())" }
+                ?? "Auto · \((TranslationLanguage(rawValue: primary) ?? .russian).code.uppercased()) ↔ \((TranslationLanguage(rawValue: secondary) ?? .english).code.uppercased())"
+        }
         let to = TranslationLanguage(rawValue: target) ?? .english
         let from = TranslationLanguage(rawValue: source)?.flag ?? "Auto"
         return "\(from) → \(to.flag)"
@@ -345,6 +393,7 @@ struct RecordingCapsuleView: View {
 }
 
 struct RecordingLanguageOptionsView: View {
+    @AppStorage(LanguageRoutingSettings.enabledKey) private var smartEnabled = false
     @AppStorage("dictation.translation.enabled") private var enabled = false
     @AppStorage("dictation.translation.source") private var source = "auto"
     @AppStorage("dictation.translation.target") private var target = "english"
@@ -355,15 +404,25 @@ struct RecordingLanguageOptionsView: View {
             HStack {
                 Toggle("Translate after recording", isOn: $enabled).toggleStyle(.switch).controlSize(.small)
                 Spacer()
-                Button {
-                    let previous = source; source = target; target = previous; configured = true
-                } label: { Image(systemName: "arrow.left.arrow.right") }
-                    .buttonStyle(.borderless).disabled(!enabled || source == "auto")
-                    .help(source == "auto" ? "Choose an explicit source language before swapping" : "Swap translation languages")
-                    .accessibilityLabel("Swap translation languages")
+                if !smartEnabled {
+                    Button {
+                        let previous = source; source = target; target = previous; configured = true
+                    } label: { Image(systemName: "arrow.left.arrow.right") }
+                        .buttonStyle(.borderless).disabled(!enabled || source == "auto" || smartEnabled)
+                        .help(source == "auto" ? "Choose an explicit source language before swapping" : "Swap translation languages")
+                        .accessibilityLabel("Swap translation languages")
+                }
             }
-            languageRow("Translate from", selection: $source, allowsAutomatic: true).disabled(!enabled)
-            languageRow("To", selection: $target).disabled(!enabled)
+            if smartEnabled {
+                SpeechSmartTranslationControls().disabled(!enabled)
+            } else {
+                languageRow("Translate from", selection: $source, allowsAutomatic: true).disabled(!enabled)
+                languageRow("To", selection: $target).disabled(!enabled)
+            }
+            Button("Configure smart direction…") {
+                SettingsNavigation.shared.writingTab = .operations
+                AppCoordinator.shared.showSettingsWindow(section: .writing)
+            }.buttonStyle(.link).font(.caption)
             Text(enabled
                  ? "Recognition is automatic and local. Translation sends the transcript to your AI provider."
                  : "Recognition is automatic and local. With translation off, the transcript stays on this Mac.")

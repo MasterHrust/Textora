@@ -76,6 +76,7 @@ final class SettingsNavigation: ObservableObject {
 
 struct ContentView: View {
     @State private var showsFeatureGuide = false
+    @AppStorage(LanguageRoutingSettings.enabledKey) private var smartTranslationEnabled = false
     @AppStorage("overlay.smartAI.enabled") private var smartAIEnabled = true
     @AppStorage("offlineDictation.shortcutMode") private var dictationShortcutMode = "toggle"
     @ObservedObject var viewModel: AppViewModel
@@ -275,12 +276,13 @@ struct ContentView: View {
             }
             Text("Fix corrects mistakes. Shorten reduces length. Formal makes the tone professional. Humanize makes wording more natural.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Picker("Translation language", selection: $viewModel.translationLanguage) {
+            SmartTranslationSettingsView()
+            Picker("Fixed translation language", selection: $viewModel.translationLanguage) {
                 ForEach(TranslationLanguage.allCases) { Text("\($0.flag) \($0.displayName)").tag($0) }
-            }
+            }.disabled(smartTranslationEnabled)
             Divider()
             Label("My Style works with every action", systemImage: "slider.horizontal.3").font(.subheadline.weight(.semibold))
-            Text("The action decides what changes. Your style supplies writing preferences. Fix still keeps edits minimal, Formal stays professional, and translation keeps the selected target language.")
+            Text("The action decides what changes. Your style supplies writing preferences. Fix still keeps edits minimal, Formal stays professional, and translation follows your language choice or Smart direction.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button("Configure My Style…") { navigation.openMyStyle() }
         }

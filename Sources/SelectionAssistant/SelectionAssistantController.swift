@@ -85,7 +85,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
 
     var onConsentRequired: ((CGRect, String) -> Void)?
 
-    private static var panelWidth: CGFloat { SelectionToolbarView.toolPanelWidth }
+    private var panelWidth: CGFloat { SelectionToolbarView.toolPanelWidth(for: viewModel) }
     private static let panelTopReserve: CGFloat = SelectionToolbarView.tooltipTopReserve
     private static let maxPanelContentHeight: CGFloat = 170
     private static let transientSelectionLossGrace: TimeInterval = 0.65
@@ -895,7 +895,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
 
     private func resizeVisiblePanelForModelChange() {
         if let panel = panel as? ClarificationSelectionPanel {
-            panel.acceptsClarificationInput = viewModel.status == .meaningUnclear
+            panel.acceptsClarificationInput = viewModel.status == .meaningUnclear || viewModel.showsTranslationSetup
             if !panel.acceptsClarificationInput && panel.isKeyWindow { panel.resignKey() }
         }
         guard panel?.isVisible == true else { return }
@@ -950,7 +950,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
         let canApplyResult = !viewModel.hasTranslationContent
             && viewModel.presentationMode != .hotKeyTranslate && viewModel.canApply
         let shouldRegister = !preservesStyleEditingContext && panel?.isVisible == true
-            && canApplyResult
+            && !viewModel.showsTranslationSetup && canApplyResult
         guard shouldRegister else {
             unregisterReturnHotKeys()
             return
@@ -1133,15 +1133,7 @@ final class SelectionAssistantController: NSObject, NSWindowDelegate {
                 height: SelectionToolbarView.hotKeyPanelHeight(for: viewModel)
             )
         }
-        let contentHeight: CGFloat
-        if viewModel.status == .meaningUnclear && !viewModel.isTranslationMode {
-            contentHeight = 346
-        } else if viewModel.isLanguagePickerExpanded {
-            contentHeight = 170
-        } else {
-            contentHeight = viewModel.showsTranslationPanel ? 164 : 50
-        }
-        return CGSize(width: Self.panelWidth, height: contentHeight + 28 + Self.panelTopReserve)
+        return CGSize(width: panelWidth, height: SelectionToolbarView.standardPanelHeight(for: viewModel) + Self.panelTopReserve)
     }
 
     private var currentPanelTopReserve: CGFloat {

@@ -106,6 +106,7 @@ final class SelectionAssistantViewModel: ObservableObject {
         case idle
         case translating
         case ready
+        case needsTargetSelection
         case error(String)
     }
 
@@ -209,7 +210,7 @@ final class SelectionAssistantViewModel: ObservableObject {
             guard oldValue != translationLanguage else { return }
             translationTask?.cancel()
             translationRequestID += 1
-            SelectionAssistantSettings.setTranslationLanguage(translationLanguage)
+            if !routingSettings.enabled { SelectionAssistantSettings.setTranslationLanguage(translationLanguage) }
             translatedText = ""
             translationStatus = .idle
             resultNotice = ""
@@ -221,6 +222,59 @@ final class SelectionAssistantViewModel: ObservableObject {
     @Published private(set) var originalText: String = ""
     @Published private(set) var rewrittenText: String = ""
     @Published private(set) var translatedText: String = ""
+    @Published private(set) var translationDirection: LanguageDirection?
+    @Published private(set) var routingSettings = LanguageRoutingSettings.load()
+    @Published private(set) var showsTranslationSetup = false
+    private let routingDefaults: UserDefaults
+    private var translationOverride: TranslationLanguage?
+    var usesAutomaticDirection: Bool { routingSettings.enabled && translationOverride == nil }
+    var translationLanguageLabel: String {
+        if let translationDirection { return translationDirection.label }
+        return usesAutomaticDirection ? "Auto" : translationLanguage.displayName
+    }
+    private var routedPolicy: LanguagePolicy {
+        if let translationOverride { return .target(translationOverride) }
+        if let translationDirection { return .target(translationDirection.target) }
+        return routingSettings.policy
+    }
+    private func resetTranslationRouting() {
+        showsTranslationSetup = false
+        routingSettings = .load(routingDefaults)
+        translationOverride = nil
+        translationDirection = nil
+    }
+    func chooseAutomaticTranslation() {
+        guard !isApplying else { return }
+        if routingSettings.enabled { selectAutomaticTranslation() }
+        else { showTranslationSetup() }
+    }
+    func showTranslationSetup() {
+        guard !isApplying else { return }
+        showsTranslationSetup = true
+        isLanguagePickerExpanded = false
+    }
+    func cancelTranslationSetup() { showsTranslationSetup = false }
+    func configureAutomaticTranslation(primary: TranslationLanguage, secondary: TranslationLanguage) {
+        guard !isApplying else { return }
+        let settings = LanguageRoutingSettings(enabled: true, primary: primary, secondary: secondary)
+        guard settings.save(routingDefaults) else { return }
+        routingSettings = settings
+        showsTranslationSetup = false
+        selectAutomaticTranslation()
+    }
+    func selectAutomaticTranslation() {
+        guard routingSettings.enabled, !isApplying else { return }
+        translationTask?.cancel()
+        translationRequestID += 1
+        translationStatus = .idle
+        translatedText = ""
+        translationOverride = nil
+        translationDirection = nil
+        showsTranslationSetup = false
+        isLanguagePickerExpanded = false
+        if isTranslationMode { translate() }
+    }
+
     @Published private(set) var resultNotice = ""
     @Published var isLanguagePickerExpanded = false
     @Published private(set) var presentationMode: PresentationMode = .standard
@@ -233,6 +287,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     private var styleRefreshAllowsCopyOnly = false
     private let pasteboard: NSPasteboard
     private let translator: (@MainActor (String, TranslationLanguage) async throws -> String)?
+    private let routedTranslator: (@MainActor (String, LanguagePolicy) async throws -> LanguageRoutingResult<String>)?
     private var currentContext: TextAccessService.FocusedTextContext?
     private var currentFingerprint: String?
     private var rewriteTask: Task<Void, Never>?
@@ -269,17 +324,22 @@ final class SelectionAssistantViewModel: ObservableObject {
         guard !text.isEmpty, let context = currentContext else { return }
         history.record(OperationResult(id: historyID, kind: isTranslationMode ? .translate : .rewrite,
             source: originalText, result: text, application: OriginApplication.name(context.targetBundleID),
-            language: isTranslationMode ? translationLanguage.displayName : nil, style: requestStyle?.name, status: status), token: historyToken)
+            language: isTranslationMode ? (translationDirection?.target ?? translationLanguage).displayName : nil, style: requestStyle?.name, status: status), token: historyToken)
     }
 
     init(pasteboard: NSPasteboard = .general,
          translator: (@MainActor (String, TranslationLanguage) async throws -> String)? = nil,
+         routedTranslator: (@MainActor (String, LanguagePolicy) async throws -> LanguageRoutingResult<String>)? = nil,
          styleStore: PersonalStyleStore? = nil,
-         history: RecentResults? = nil) {
+         history: RecentResults? = nil,
+         routingDefaults: UserDefaults = .standard) {
+        self.routingDefaults = routingDefaults
+        routingSettings = .load(routingDefaults)
         self.history = history ?? .shared
         self.styleStore = styleStore ?? .shared
         self.pasteboard = pasteboard
         self.translator = translator
+        self.routedTranslator = routedTranslator
         SelectionAssistantSettings.registerDefaults()
         operation = SelectionAssistantSettings.selectedOperation()
         if UserDefaults.standard.object(forKey: SelectionAssistantSettings.Keys.translationLanguage) != nil {
@@ -296,6 +356,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     var canApply: Bool {
+        guard !showsTranslationSetup else { return false }
         guard !applicationNeedsSelection else { return false }
         guard !isApplyingTranslation else { return false }
         guard case .ready = status else { return false }
@@ -304,16 +365,25 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     var canTranslate: Bool {
-        !isApplying && translationStatus != .translating && currentContext != nil && !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !showsTranslationSetup && !isApplying && translationStatus != .translating && translationStatus != .needsTargetSelection && currentContext != nil && !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var canUseTranslation: Bool {
-        translationStatus == .ready && !translatedText.isEmpty && !isApplying
+        !showsTranslationSetup && translationStatus == .ready && !translatedText.isEmpty && !isApplying
     }
 
     func selectTranslationLanguage(_ language: TranslationLanguage) {
         guard !isApplying else { return }
-        let changed = translationLanguage != language
+        let changed = translationLanguage != language || usesAutomaticDirection
+        if routingSettings.enabled {
+            if translationOverride == language, translationStatus == .ready { isLanguagePickerExpanded = false; return }
+            translationTask?.cancel()
+            translationRequestID += 1
+            translationStatus = .idle
+            translatedText = ""
+            translationOverride = language
+            translationDirection = nil
+        }
         translationLanguage = language
         isLanguagePickerExpanded = false
         // Changing the language of an existing translation is itself an
@@ -330,7 +400,7 @@ final class SelectionAssistantViewModel: ObservableObject {
         switch translationStatus {
         case .idle:
             return false
-        case .translating, .ready, .error:
+        case .translating, .ready, .needsTargetSelection, .error:
             return true
         }
     }
@@ -340,6 +410,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     func prepareForSelectionMove() {
+        resetTranslationRouting()
         isTranslationMode = false
         resetMeaning()
         applicationNeedsSelection = false
@@ -363,6 +434,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     func clear() {
+        resetTranslationRouting()
         resetMeaning()
         applicationNeedsSelection = false
         // Translation is an explicit action for one selection, not a sticky workflow.
@@ -391,6 +463,7 @@ final class SelectionAssistantViewModel: ObservableObject {
     }
 
     func prepareHotKeyPresentation(_ action: TextoraHotKeyAction) {
+        resetTranslationRouting()
         if action == .translate { enterTranslationMode() }
         else { isTranslationMode = false }
         selectingRecommendation = true
@@ -415,6 +488,7 @@ final class SelectionAssistantViewModel: ObservableObject {
         // Preserve translation only for an explicit HotKey Translate invocation.
         // Repeated notifications above retain the current selection's preview.
         if presentationMode != .hotKeyTranslate { isTranslationMode = false }
+        if fingerprint != currentFingerprint { resetTranslationRouting() }
         currentContext = context
         styleRefreshAllowsCopyOnly = false
         historyID = UUID()
@@ -567,6 +641,8 @@ final class SelectionAssistantViewModel: ObservableObject {
 
         let text = originalText
         let language = translationLanguage
+        let policy = routingSettings.enabled ? routedPolicy : LanguagePolicy.target(language)
+        let usesRouting = routingSettings.enabled
         requestStyle = styleStore.profile(for: sourceBundleID)
         let style = requestStyle
         historyToken = history.consentToken
@@ -578,7 +654,21 @@ final class SelectionAssistantViewModel: ObservableObject {
         translationTask = Task { @MainActor in
             do {
                 let out: String
-                if let translator { out = try await translator(text, language) }
+                if usesRouting {
+                    let response: LanguageRoutingResult<String>
+                    if let routedTranslator { response = try await routedTranslator(text, policy) }
+                    else { response = try await aiClient.translateRoutedText(text: text, policy: policy, style: style) }
+                    guard id == translationRequestID, !Task.isCancelled else { return }
+                    switch response {
+                    case .needsTargetSelection:
+                        translationStatus = .needsTargetSelection
+                        isLanguagePickerExpanded = false
+                        return
+                    case .ready(let translated, let direction):
+                        translationDirection = direction
+                        out = translated
+                    }
+                } else if let translator { out = try await translator(text, language) }
                 else {
                     guard let config = Self.providerConfiguration() else { throw FeatureError.noProvider }
                     out = try await aiClient.translateText(provider: config.provider, model: config.model, apiKey: config.key,

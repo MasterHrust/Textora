@@ -18,12 +18,23 @@ struct SelectionToolbarView: View {
         }
         return max(630, ceil(labels + CGFloat(max(0, RewriteOperation.allCases.count - 1)) * 4 + 365))
     }
-    private var panelWidth: CGFloat { Self.toolPanelWidth }
+    static func toolPanelWidth(for viewModel: SelectionAssistantViewModel) -> CGFloat {
+        toolPanelWidth + (viewModel.routingSettings.enabled ? 55 : 0)
+    }
+    private var panelWidth: CGFloat { Self.toolPanelWidth(for: viewModel) }
     static let hotKeyPanelWidth: CGFloat = 510
     static let hotKeyBodyFontSize: CGFloat = TextoraPanelStyle.bodyFontSize
     static let tooltipTopReserve: CGFloat = 0
 
+    static func standardPanelHeight(for viewModel: SelectionAssistantViewModel) -> CGFloat {
+        if viewModel.showsTranslationSetup { return 440 }
+        if viewModel.status == .meaningUnclear && !viewModel.isTranslationMode { return 374 }
+        if viewModel.isLanguagePickerExpanded { return 198 }
+        return viewModel.hasTranslationContent || viewModel.hasRewritePreview ? 192 : 78
+    }
+
     static func hotKeyPanelHeight(for viewModel: SelectionAssistantViewModel) -> CGFloat {
+        if viewModel.showsTranslationSetup { return 440 }
         if viewModel.status == .meaningUnclear { return 538 }
         let resultText = viewModel.presentationMode == .hotKeyTranslate
             ? viewModel.translatedText
@@ -80,7 +91,9 @@ struct SelectionToolbarView: View {
                 topRow
                 StyleQuickControls(bundleID: viewModel.sourceBundleID).frame(height: 22)
 
-                if viewModel.isLanguagePickerExpanded {
+                if viewModel.showsTranslationSetup {
+                    translationSetup
+                } else if viewModel.isLanguagePickerExpanded {
                     compactLanguageDropdown
                 } else if viewModel.hasTranslationContent {
                     translationPanel
@@ -111,12 +124,14 @@ struct SelectionToolbarView: View {
                     .frame(height: 1)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    hotKeyOriginalCard
-                        .frame(height: hotKeyOriginalCardHeight)
-
-                    hotKeyResultCard
-                        .frame(height: hotKeyResultCardHeight)
-
+                    if viewModel.showsTranslationSetup {
+                        translationSetup
+                    } else {
+                        hotKeyOriginalCard
+                            .frame(height: hotKeyOriginalCardHeight)
+                        hotKeyResultCard
+                            .frame(height: hotKeyResultCardHeight)
+                    }
                 }
                 .padding(14)
             }
@@ -195,11 +210,21 @@ struct SelectionToolbarView: View {
         } label: {
             HStack(spacing: 7) {
                 if viewModel.presentationMode == .hotKeyTranslate {
-                    Text(viewModel.translationLanguage.flag)
-                        .font(.system(size: 15))
-                        .frame(width: 18)
-                    Text(viewModel.translationLanguage.displayName)
+                    if viewModel.usesAutomaticDirection {
+                        Image(systemName: AutoTranslationStyle.symbol)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AutoTranslationStyle.accent)
+                            .frame(width: 14)
+                    } else {
+                        Text(viewModel.translationLanguage.flag)
+                            .font(.system(size: 15))
+                            .frame(width: 18)
+                    }
+                    Text(viewModel.translationLanguageLabel)
                         .font(.system(size: 12.5, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .layoutPriority(1)
                 } else {
                     Image(systemName: "sparkles")
                         .font(.system(size: 11, weight: .bold))
@@ -216,9 +241,9 @@ struct SelectionToolbarView: View {
             }
             .foregroundStyle(.white.opacity(0.94))
             .padding(.horizontal, 12)
-            .frame(width: 138, height: 34)
+            .frame(width: viewModel.usesAutomaticDirection ? 154 : 138, height: 34)
             .background(hotKeyBadgeBackground)
-            .overlay(Capsule().stroke(Color.white.opacity(0.20), lineWidth: 1))
+            .overlay(Capsule().stroke(viewModel.usesAutomaticDirection ? AutoTranslationStyle.accent.opacity(0.65) : Color.white.opacity(0.20), lineWidth: 1))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -230,11 +255,21 @@ struct SelectionToolbarView: View {
         ScrollView {
             VStack(spacing: 3) {
                 if viewModel.presentationMode == .hotKeyTranslate {
+                    AutoTranslationOption(isSelected: viewModel.usesAutomaticDirection) {
+                        isHotKeyPickerExpanded = false
+                        viewModel.chooseAutomaticTranslation()
+                    }
+                    if viewModel.routingSettings.enabled {
+                        hotKeyPickerRow(systemImage: "slider.horizontal.3", title: "Auto settings…", isSelected: false) {
+                            isHotKeyPickerExpanded = false
+                            viewModel.showTranslationSetup()
+                        }
+                    }
                     ForEach(TranslationLanguage.allCases) { language in
                         hotKeyPickerRow(
                             icon: language.flag,
                             title: language.displayName,
-                            isSelected: language == viewModel.translationLanguage
+                            isSelected: !viewModel.usesAutomaticDirection && language == viewModel.translationLanguage
                         ) {
                             isHotKeyPickerExpanded = false
                             viewModel.selectTranslationLanguage(language)
@@ -255,7 +290,7 @@ struct SelectionToolbarView: View {
             }
             .padding(5)
         }
-        .frame(width: 168)
+        .frame(width: viewModel.presentationMode == .hotKeyTranslate ? 212 : 168)
         .frame(maxHeight: viewModel.presentationMode == .hotKeyTranslate ? 222 : 166)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -269,16 +304,20 @@ struct SelectionToolbarView: View {
     }
 
     private func hotKeyPickerRow(
-        icon: String,
+        icon: String = "",
+        systemImage: String? = nil,
         title: String,
         isSelected: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Text(icon)
-                    .font(.system(size: 14, weight: .bold))
-                    .frame(width: 20)
+                Group {
+                    if let systemImage { Image(systemName: systemImage) }
+                    else { Text(icon) }
+                }
+                .font(.system(size: 14, weight: .bold))
+                .frame(width: 20)
                 Text(title)
                     .font(.system(size: 12.5, weight: isSelected ? .bold : .medium))
                     .lineLimit(1)
@@ -346,6 +385,7 @@ struct SelectionToolbarView: View {
         switch viewModel.translationStatus {
         case .idle: return "Translation"
         case .translating: return "Translation · Translating…"
+        case .needsTargetSelection: return "Translation · Choose target language"
         case .error: return "Translation · Could not translate"
         case .ready:
             return viewModel.applicationNeedsSelection ? "Translation · Click to copy" : "Translation · Click to insert or copy"
@@ -370,6 +410,8 @@ struct SelectionToolbarView: View {
                         hotKeyProgress("Translating...")
                     case .ready:
                         hotKeyResultText(AttributedString(viewModel.translatedText))
+                    case .needsTargetSelection:
+                        targetSelectionView
                     case .error(let message):
                         hotKeyError(message)
                     }
@@ -722,13 +764,18 @@ struct SelectionToolbarView: View {
             viewModel.isLanguagePickerExpanded.toggle()
         } label: {
             HStack(spacing: 4) {
-                Text(viewModel.translationLanguage.flag)
-                    .font(.system(size: 17))
+                if viewModel.usesAutomaticDirection {
+                    Image(systemName: AutoTranslationStyle.symbol)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AutoTranslationStyle.accent)
+                }
+                Text(viewModel.routingSettings.enabled ? viewModel.translationLanguageLabel : viewModel.translationLanguage.flag)
+                    .font(.system(size: viewModel.routingSettings.enabled ? 11 : 17))
                 Image(systemName: viewModel.isLanguagePickerExpanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .heavy))
                     .foregroundStyle(.white.opacity(0.68))
             }
-            .frame(width: 50, height: 31)
+            .frame(width: viewModel.routingSettings.enabled ? 105 : 50, height: 31)
             .background(Capsule().fill(Color.white.opacity(viewModel.isLanguagePickerExpanded ? 0.16 : 0.09)))
             .overlay(Capsule().stroke(Color.white.opacity(viewModel.isLanguagePickerExpanded ? 0.22 : 0.12), lineWidth: 1))
         }
@@ -736,43 +783,68 @@ struct SelectionToolbarView: View {
     }
 
     private var compactLanguageDropdown: some View {
-        let columns = Array(repeating: GridItem(.fixed(36), spacing: 6), count: 8)
-        return LazyVGrid(columns: columns, alignment: .trailing, spacing: 6) {
-            ForEach(TranslationLanguage.allCases) { language in
-                Button {
-                    viewModel.selectTranslationLanguage(language)
-                } label: {
-                    Text(language.flag)
-                        .font(.system(size: 19))
-                        .frame(width: 36, height: 31)
-                        .background(
-                            Capsule()
-                                .fill(language == viewModel.translationLanguage ? Color.white.opacity(0.17) : Color.white.opacity(0.055))
-                        )
-                        .overlay(
-                            Capsule()
-                                .stroke(language == viewModel.translationLanguage ? Color(red: 0.25, green: 0.69, blue: 1.0).opacity(0.70) : Color.white.opacity(0.08), lineWidth: 1)
-                        )
+        let columns = Array(repeating: GridItem(.fixed(36), spacing: 6), count: 9)
+        return HStack(alignment: .top, spacing: 10) {
+            AutoTranslationOption(isSelected: viewModel.usesAutomaticDirection, compact: true) {
+                viewModel.chooseAutomaticTranslation()
+            }.frame(width: 94).help("Smart translation direction")
+            LazyVGrid(columns: columns, alignment: .trailing, spacing: 6) {
+                ForEach(TranslationLanguage.allCases) { language in
+                    Button {
+                        viewModel.selectTranslationLanguage(language)
+                    } label: {
+                        Text(language.flag)
+                            .font(.system(size: 19))
+                            .frame(width: 36, height: 27)
+                            .background(
+                                Capsule()
+                                    .fill(!viewModel.usesAutomaticDirection && language == viewModel.translationLanguage ? Color.white.opacity(0.17) : Color.white.opacity(0.055))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(!viewModel.usesAutomaticDirection && language == viewModel.translationLanguage ? Color(red: 0.25, green: 0.69, blue: 1.0).opacity(0.70) : Color.white.opacity(0.08), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(language.displayName)
+                    .disabled(viewModel.isApplying)
                 }
-                .buttonStyle(.plain)
-                .help(language.displayName)
-                .disabled(viewModel.isApplying)
+                if viewModel.routingSettings.enabled {
+                    Button { viewModel.showTranslationSetup() } label: { Image(systemName: "slider.horizontal.3") }
+                        .buttonStyle(.plain).frame(width: 36, height: 27).help("Auto translation settings…")
+                }
             }
         }
         .padding(6)
         .background(
-            Capsule()
+            RoundedRectangle(cornerRadius: 14)
                 .fill(Color.black.opacity(0.24))
         )
-        .overlay(Capsule().stroke(Color.white.opacity(0.10), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.10), lineWidth: 1))
         .frame(maxWidth: .infinity, alignment: .trailing)
         .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private var translationSetup: some View {
+        SmartTranslationSetupView(settings: viewModel.routingSettings,
+            onCancel: { viewModel.cancelTranslationSetup() },
+            onEnable: { viewModel.configureAutomaticTranslation(primary: $0, secondary: $1) })
+    }
+
+    private var targetSelectionView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("The source language is unclear. Choose a target to continue.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            TemporaryTargetPicker { viewModel.selectTranslationLanguage($0) }
+        }
     }
 
     private var translationPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text(viewModel.translationLanguage.flag)
+                if !viewModel.usesAutomaticDirection {
+                    Text(viewModel.translationLanguage.flag)
+                }
                 Text(translationResultTitle)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.white.opacity(0.58))
@@ -808,6 +880,8 @@ struct SelectionToolbarView: View {
                     .buttonStyle(.plain)
                     .disabled(!viewModel.canUseTranslation)
                     .help("Insert translation or copy if insertion is unavailable")
+                case .needsTargetSelection:
+                    targetSelectionView
                 case .error(let message):
                     Text(message)
                         .font(.system(size: 12, weight: .medium))
@@ -1055,18 +1129,7 @@ struct SelectionToolbarView: View {
     }
 
     private var panelHeight: CGFloat {
-        if viewModel.status == .meaningUnclear && !viewModel.isTranslationMode { return 374 }
-        let baseHeight: CGFloat
-        if viewModel.isLanguagePickerExpanded {
-            baseHeight = 170
-        } else if viewModel.hasTranslationContent {
-            baseHeight = 164
-        } else if viewModel.hasRewritePreview {
-            baseHeight = 164
-        } else {
-            baseHeight = 50
-        }
-        return baseHeight + 28
+        Self.standardPanelHeight(for: viewModel)
     }
 
     @ViewBuilder
@@ -1107,7 +1170,7 @@ struct SelectionToolbarView: View {
         case .ready:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 12, weight: .heavy))
-        case .error:
+        case .error, .needsTargetSelection:
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 12, weight: .heavy))
         case .idle:

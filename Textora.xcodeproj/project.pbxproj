@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10000000000000000000004 /* LanguageRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* LanguageRoutingTests.swift */; };
+		A10000000000000000000002 /* LanguageRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* LanguageRouting.swift */; };
 		026AE038C3CC7104C457F4BC /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */; };
 		035E2CB3430F63EBA68C1FFE /* SpeechAudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E19860FE1B96962A6AC6EC34 /* SpeechAudioRecorder.swift */; };
 		039C43BA9AC1B00DE7A89113 /* THIRD-PARTY-NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = 7B35A51BB5E68FD696502693 /* THIRD-PARTY-NOTICES.md */; };
@@ -70,6 +72,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A10000000000000000000003 /* LanguageRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguageRoutingTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000001 /* LanguageRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanguageRouting.swift; sourceTree = "<group>"; };
 		03FB338E9DBEE2E791F55CB6 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		05E7BCB009A34C9CA9CF53FD /* Summary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Summary.swift; sourceTree = "<group>"; };
 		0D12E30ABC5DF297BEBE656F /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
@@ -151,6 +155,7 @@
 		AB3DBD3B80C8E289B18E6D36 /* TextoraTests */ = {
 			isa = PBXGroup;
 			children = (
+				A10000000000000000000003 /* LanguageRoutingTests.swift */,
 				348E6C817C7C781E49A2C9A8 /* GrammarlyRewritePlannerTests.swift */,
 				953E2F2FF62B7B3BAA58D9A8 /* InteractionRevisionTests.swift */,
 				9D7DCDBF0AFDDCEFB0A4BBDD /* PersonalizationTests.swift */,
@@ -164,6 +169,7 @@
 		C380DCB33F1C3218585E9CC8 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				A10000000000000000000001 /* LanguageRouting.swift */,
 				27E3069E20EC43A2400E2C1B /* AccessibilityWizardView.swift */,
 				FDFA3B38183BC8A18BB52F2B /* AIClient.swift */,
 				1799062CCCEB243AF1993649 /* MessagePreview.swift */,
@@ -354,6 +360,7 @@
 				176107AE988B1737C2C673C1 /* GrammarlyRewritePlanner.swift in Sources */,
 				3B61B4CC47354DFD3785A7B8 /* GrammarlyRewritePlannerTests.swift in Sources */,
 				EED699228ADEE01909698B23 /* InteractionRevisionTests.swift in Sources */,
+				A10000000000000000000004 /* LanguageRoutingTests.swift in Sources */,
 				139CF1B43D781511C58AC099 /* PersonalizationTests.swift in Sources */,
 				F731FD68419082BFC259436A /* OfflineSpeechTests.swift in Sources */,
 				B034A1D8121367E6BFDC6FAA /* SecurityAndSettingsTests.swift in Sources */,
@@ -366,6 +373,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				324FFF56680CC61A53601BB0 /* AIClient.swift in Sources */,
+				A10000000000000000000002 /* LanguageRouting.swift in Sources */,
 				3055759821C05768AE015DBC /* MessagePreview.swift in Sources */,
 				63CF31A9E0754EF29A30CBB1 /* Summary.swift in Sources */,
 				60F68E0F6D60413DA66C75F3 /* LLMDebug.swift in Sources */,

@@ -26,6 +26,11 @@ final class DictationOverlayModel: ObservableObject {
     @Published var canRetry = true
     @Published var resultMessage = "Textora could not insert it into the original field."
     @Published var retryTitle = "Retry Insert"
+    @Published var canSelectTarget = false
+    @Published var needsTargetSelection = false
+    @Published var directionLabel = ""
+    @Published var targetLanguage: TranslationLanguage?
+    var onSelectTarget: ((TranslationLanguage) -> Void)?
     var onRetry: (() -> Void)?
     var onCopy: (() -> Void)?
     var onClose: (() -> Void)?
@@ -116,6 +121,14 @@ final class DictationPanelController: NSObject, NSWindowDelegate {
         model.retryTitle = retryTitle
         model.canRetry = canRetry
     }
+    func setTranslationState(enabled: Bool, direction: LanguageDirection? = nil, needsTarget: Bool = false) {
+        model.canSelectTarget = enabled
+        model.needsTargetSelection = needsTarget
+        model.targetLanguage = direction?.target
+        model.directionLabel = direction?.label ?? ""
+        if needsTarget { model.canRetry = false }
+    }
+    func configureTargetSelection(_ action: @escaping (TranslationLanguage) -> Void) { model.onSelectTarget = action }
     func updateElapsed(_ value: TimeInterval) { model.elapsed = value }
 
     func configureActions(
@@ -235,13 +248,20 @@ struct DictationOverlayView: View {
                 Button { model.onClose?() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.borderless)
             }
+            if model.canSelectTarget {
+                HStack {
+                    Text(model.needsTargetSelection ? "Choose a target to continue" : model.directionLabel).font(.caption)
+                    Spacer()
+                    TemporaryTargetPicker(selection: model.targetLanguage) { model.onSelectTarget?($0) }
+                }
+            }
             ScrollView {
                 Text(text)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
             }
-            .frame(maxHeight: 210)
+            .frame(maxHeight: model.canSelectTarget ? 155 : 210)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
             HStack {
                 Button("Close") { model.onClose?() }

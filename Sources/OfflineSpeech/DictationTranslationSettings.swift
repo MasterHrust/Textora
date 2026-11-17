@@ -5,6 +5,7 @@ struct DictationTranslationSettings: Equatable {
     var source: TranslationLanguage
     var target: TranslationLanguage
     var automaticSource = false
+    var routingPolicy: LanguagePolicy? = nil
     var sourceLanguageName: String? { automaticSource ? nil : source.displayName }
 
     static func load(_ defaults: UserDefaults = .standard) -> Self {
@@ -12,7 +13,8 @@ struct DictationTranslationSettings: Equatable {
         return Self(enabled: defaults.bool(forKey: "dictation.translation.enabled"),
              source: TranslationLanguage(rawValue: source) ?? .russian,
              target: TranslationLanguage(rawValue: defaults.string(forKey: "dictation.translation.target") ?? "english") ?? .english,
-             automaticSource: TranslationLanguage(rawValue: source) == nil)
+             automaticSource: TranslationLanguage(rawValue: source) == nil,
+             routingPolicy: LanguageRoutingSettings.load(defaults).enabled ? LanguageRoutingSettings.load(defaults).policy : nil)
     }
 }
 
@@ -21,9 +23,11 @@ struct DictationSessionOptions: Equatable {
     let outputMode: DictationOutputMode
     let translation: DictationTranslationSettings
 
-    static func load(_ defaults: UserDefaults = .standard) -> Self {
-        Self(outputMode: DictationOutputMode(rawValue: defaults.string(forKey: "dictation.outputMode") ?? "") ?? .text,
-             translation: .load(defaults))
+    static func load(_ defaults: UserDefaults = .standard, temporaryTarget: TranslationLanguage? = nil) -> Self {
+        var translation = DictationTranslationSettings.load(defaults)
+        if translation.routingPolicy != nil, let temporaryTarget { translation.routingPolicy = .target(temporaryTarget) }
+        return Self(outputMode: DictationOutputMode(rawValue: defaults.string(forKey: "dictation.outputMode") ?? "") ?? .text,
+             translation: translation)
     }
 }
 
@@ -34,25 +38,33 @@ struct DictationTranslationSettingsView: View {
     @AppStorage("dictation.translation.source") private var source = "auto"
     @AppStorage("dictation.translation.target") private var target = "english"
     @AppStorage("dictation.translation.configured") private var configured = false
+    @AppStorage(LanguageRoutingSettings.enabledKey) private var smartEnabled = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             DictationOutputSettingsView(styleStore: styleStore)
             Divider()
             Toggle("Translate dictated text", isOn: $enabled)
-            Group {
-                languageRow("From", selection: $source, allowsAutomatic: true)
-                languageRow("To", selection: $target)
-                Button {
-                    let previousSource = source
-                    source = target
-                    target = previousSource
-                    configured = true
-                } label: {
-                    Label("Swap languages", systemImage: "arrow.left.arrow.right")
+            if smartEnabled {
+                SpeechSmartTranslationControls().disabled(!enabled)
+            } else {
+                Group {
+                    languageRow("From", selection: $source, allowsAutomatic: true)
+                    languageRow("To", selection: $target)
+                    Button {
+                        let previousSource = source
+                        source = target
+                        target = previousSource
+                        configured = true
+                    } label: {
+                        Label("Swap languages", systemImage: "arrow.left.arrow.right")
+                    }
+                    .disabled(source == "auto")
                 }
-                .disabled(source == "auto")
+                .disabled(!enabled)
             }
-            .disabled(!enabled)
+            DisclosureGroup("Smart translation direction") {
+                SmartTranslationSettingsView().padding(.top, 6)
+            }.font(.caption)
             Text("Shared by Toolbox and Hotkeys. Translation sends the transcript to your AI provider. Audio stays on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -80,6 +92,9 @@ struct DictationTranslationControl: View {
     @AppStorage("dictation.translation.source") private var source = "auto"
     @AppStorage("dictation.translation.target") private var target = "english"
     @AppStorage("dictation.translation.configured") private var configured = false
+    @AppStorage(LanguageRoutingSettings.enabledKey) private var smartEnabled = false
+    @AppStorage(LanguageRoutingSettings.primaryKey) private var primary = "russian"
+    @AppStorage(LanguageRoutingSettings.secondaryKey) private var secondary = "english"
     @Binding var isPresented: Bool
     var body: some View {
         HStack(spacing: 10) {
@@ -92,42 +107,52 @@ struct DictationTranslationControl: View {
             .help("Translate dictated text")
             .accessibilityLabel("Translate dictated text")
             .modifier(MicrophoneTipAnchor(target: .translation, active: $tip))
-            Button {
-                isPresented = true
-            } label: {
-                Text(source == "auto" ? "🌐" : (TranslationLanguage(rawValue: source) ?? .russian).flag)
-                    .font(.system(size: 16))
+            if smartEnabled {
+                Button { isPresented = true } label: { Text("Auto · \((TranslationLanguage(rawValue: primary) ?? .russian).code.uppercased()) ↔ \((TranslationLanguage(rawValue: secondary) ?? .english).code.uppercased())").font(.caption) }
+                    .help("Smart translation direction")
+                    .modifier(MicrophoneTipAnchor(target: .languages, active: $tip))
+            } else {
+                Button {
+                    isPresented = true
+                } label: {
+                    Text(source == "auto" ? "🌐" : (TranslationLanguage(rawValue: source) ?? .russian).flag)
+                        .font(.system(size: 16))
+                }
+                .help("Dictation translation languages")
+                .modifier(MicrophoneTipAnchor(target: .languages, active: $tip))
+                Button {
+                    let previousSource = source
+                    source = target
+                    target = previousSource
+                    configured = true
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                }
+                .help("Swap languages")
+                .disabled(source == "auto")
+                .accessibilityLabel("Swap languages")
+                .modifier(MicrophoneTipAnchor(target: .swap, active: $tip))
+                Button { isPresented = true } label: {
+                    Text((TranslationLanguage(rawValue: target) ?? .english).flag)
+                        .font(.system(size: 16))
+                }
+                .help("Target language and translation settings")
             }
-            .help("Dictation translation languages")
-            .modifier(MicrophoneTipAnchor(target: .languages, active: $tip))
-            .popover(isPresented: $isPresented) {
-                DictationTranslationSettingsView().padding().frame(width: 310)
-                    .transaction { $0.animation = nil }
-            }
-            Button {
-                let previousSource = source
-                source = target
-                target = previousSource
-                configured = true
-            } label: {
-                Image(systemName: "arrow.left.arrow.right")
-            }
-            .help("Swap languages")
-            .disabled(source == "auto")
-            .accessibilityLabel("Swap languages")
-            .modifier(MicrophoneTipAnchor(target: .swap, active: $tip))
-            Button { isPresented = true } label: {
-                Text((TranslationLanguage(rawValue: target) ?? .english).flag)
-                    .font(.system(size: 16))
-            }
-            .help("Target language and translation settings")
         }.buttonStyle(.borderless)
+        .popover(isPresented: $isPresented) {
+            DictationTranslationSettingsView().padding().frame(width: 330)
+                .transaction { $0.animation = nil }
+        }
     }
 }
 
 enum MicrophoneTip: Int, CaseIterable {
     case microphone, translation, languages, swap, drag
-    var next: Self? { Self(rawValue: rawValue + 1) }
+    var next: Self? { next(smartDirection: false) }
+    func next(smartDirection: Bool) -> Self? {
+        if self == .languages, smartDirection { return .drag }
+        return Self(rawValue: rawValue + 1)
+    }
     var title: String {
         switch self {
         case .microphone: return "Record your voice"
@@ -141,7 +166,7 @@ enum MicrophoneTip: Int, CaseIterable {
         switch self {
         case .microphone: return "Click to start recording. Click again to stop and insert the transcript. Speech recognition stays on this Mac."
         case .translation: return "The wand turns speech translation on or off. When enabled, only the recognized text is sent to your AI provider."
-        case .languages: return "Click a flag to choose the source and target languages for speech translation."
+        case .languages: return "Open the language controls to choose a fixed target or enable Smart translation direction."
         case .swap: return "Click these arrows to swap the source and target languages instantly."
         case .drag: return "Drag this handle to reposition the microphone. The extra controls retract 2 seconds after you move away."
         }
@@ -198,7 +223,7 @@ final class MicrophoneTipPresenter {
                 active.wrappedValue = nil
             }
             let content = MicrophoneTipContent(tip: tip, onSkip: finish, onNext: {
-                if let next = tip.next { active.wrappedValue = next }
+                if let next = tip.next(smartDirection: LanguageRoutingSettings.load().enabled) { active.wrappedValue = next }
                 else { finish() }
             })
             if let host = self.host { host.rootView = content }
@@ -313,5 +338,34 @@ struct TextoraFeatureGuide: View {
                 }.buttonStyle(.borderedProminent)
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+
+@MainActor
+final class RecordingTranslationOverride: ObservableObject {
+    static let shared = RecordingTranslationOverride()
+    @Published var target: TranslationLanguage?
+    func consume() -> TranslationLanguage? {
+        defer { target = nil }
+        return target
+    }
+}
+
+struct SpeechSmartTranslationControls: View {
+    @ObservedObject private var override = RecordingTranslationOverride.shared
+    @AppStorage(LanguageRoutingSettings.primaryKey) private var primary = TranslationLanguage.russian.rawValue
+    @AppStorage(LanguageRoutingSettings.secondaryKey) private var secondary = TranslationLanguage.english.rawValue
+    var body: some View {
+        HStack {
+            Text(override.target == nil ? "Auto · \((TranslationLanguage(rawValue: primary) ?? .russian).code.uppercased()) ↔ \((TranslationLanguage(rawValue: secondary) ?? .english).code.uppercased())" : "This recording")
+            Spacer()
+            Menu {
+                Button("Auto") { override.target = nil }
+                ForEach(TranslationLanguage.allCases) { language in
+                    Button(language.displayName) { override.target = language }
+                }
+            } label: { Text(override.target?.displayName ?? "Auto") }
+        }.font(.caption)
     }
 }

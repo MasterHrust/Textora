@@ -1,17 +1,20 @@
-# Textora 1.4.2
+# Textora 1.4.3
 
-Inspect AI requests, send feature ideas directly to the developer, and enjoy more reliable settings and local history.
+Let Auto choose your translation direction, with shared language preferences for selected text and speech.
 
-## Advanced Debug
-- Open Settings > Advanced Debug and enable LLM request logging to investigate slow requests or errors with any AI provider, including Local and Other.
-- Inspect the provider, model, endpoint, HTTP status, request and response bodies, and the time needed to receive the complete response. Rewrite, Translate, Summary and model refresh requests share the same journal.
-- API keys and credentials are masked before logs are displayed or copied. Logging starts disabled and keeps the latest 50 requests in memory for the current session. Clear the journal or turn logging off to remove its entries.
+## Auto Translation
+- Choose Auto in the translation language list and set your primary and second languages directly in the panel.
+- Only your primary language translates into the second language. Every other language translates into your primary language. For example: Russian to English, and English, Greek or any other language to Russian.
+- The same preferences work in Toolbox, Hotkeys, and speech translation in both Text and Message modes. Audio stays on your Mac; speech translation sends only the recognized text to your AI provider.
+- Auto is optional. Your existing translation settings stay active until you enable it.
 
-## Improvements
-- Feature Request replaces Support Project in the menu bar and Settings > About & Updates. It opens an email to indepcode@proton.me with the subject Textora Feature Request.
-- Added the developer credit: Developed by Roman Shytskou.
-- Automatic update checks now run every 5 hours while Textora is running, when automatic checking is enabled.
+## More Control
+- In Auto mode, a manually selected target applies only to the current selection or recording. The next operation returns to Auto.
+- If the source language is unclear, choose a target to continue. Your original text is preserved, and speech translation waits for your choice before inserting anything.
+- Message keeps your meaning clarifications when changing the target language and asks before replacing an edited draft.
+- Summary has its own Auto option and continues to use the original language by default.
 
-## Fixed
-- Reduced repeated Keychain permission prompts when saving Rewrite, Translate, Summary and copied results to local history. A successfully loaded encryption key is reused for the current app session.
-- Edited API tokens are saved even when you switch AI providers before automatic saving finishes. Failed saves can be retried without losing tokens already saved successfully.
+## Translation Interface
+- Auto is easier to find with a highlighted option and a compact globe icon. Once resolved, the panel shows the actual direction, such as RU → EN.
+- Edit Auto preferences from the translation panel without opening Settings. Cancelling leaves your preferences and current result unchanged.
+- Speech translation uses the language preferences selected when you stop recording, keeping retries and regenerated results on the chosen target.

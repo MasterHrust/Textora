@@ -21,6 +21,14 @@ private final class FontTestNavigationDelegate: NSObject, WKNavigationDelegate {
 }
 
 final class SecurityAndSettingsTests: XCTestCase {
+    // Legacy translation scenarios must ignore the running app's Auto preference.
+    private func legacyRoutingDefaults() -> UserDefaults {
+        let name = "TextoraTests.LegacyRouting.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
     @MainActor
     func testAutomaticUpdatesUseAFiveHourInterval() throws {
         XCTAssertEqual(AppUpdateManager.automaticCheckInterval, 18_000)
@@ -1000,8 +1008,8 @@ final class SecurityAndSettingsTests: XCTestCase {
             for: .rewrite
         )
 
-        let first = SelectionAssistantViewModel()
-        let second = SelectionAssistantViewModel()
+        let first = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
+        let second = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         XCTAssertEqual(first.translationLanguage, .russian)
         XCTAssertEqual(second.translationLanguage, .russian)
         XCTAssertEqual(first.operation, .makeProfessional)

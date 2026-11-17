@@ -133,6 +133,8 @@ enum FeatureSettings {
 struct MessageDraft: Equatable {
     let draft: String
     let questions: [String]
+    var direction: LanguageDirection? = nil
+    var needsTargetSelection = false
 }
 
 @MainActor

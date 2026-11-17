@@ -89,6 +89,8 @@ final class OfflineDictationController {
     private var rawTranscript: String?
     private var untranslatedText: String?
     private var needsTranslationRetry = false
+    private var translationDirection: LanguageDirection?
+    private var awaitingTranslationTarget = false
     private(set) var isBusy = false
 
     var onNeedsAccessibility: (() -> Void)?
@@ -117,6 +119,8 @@ final class OfflineDictationController {
             close: { [weak self] in self?.closeAndClear() },
             stop: { [weak self] in self?.stopFromUI() }
         )
+        panel.configureTargetSelection { [weak self] in self?.changeTranslationTarget($0) }
+        messagePreview.model.onSelectTarget = { [weak self] in self?.changeTranslationTarget($0) }
         messagePreview.model.onClose = { [weak self] in self?.closeAndClear() }
         messagePreview.model.onRegenerate = { [weak self] clarification in
             guard let self, let transcript = self.rawTranscript ?? self.untranslatedText else { return }
@@ -213,6 +217,12 @@ final class OfflineDictationController {
         historyToken = RecentResults.shared.consentToken
         messageClarification = ""
         translationSettings = .load()
+        translationDirection = nil
+        awaitingTranslationTarget = false
+        panel.setTranslationState(enabled: false)
+        messagePreview.model.needsTargetSelection = false
+        messagePreview.model.targetLanguage = nil
+        messagePreview.model.allowsLanguageSelection = false
         rawTranscript = nil
         untranslatedText = nil
         needsTranslationRetry = false
@@ -336,7 +346,7 @@ final class OfflineDictationController {
 
     private func finishRecording() {
         guard isPressed else { return }
-        guard let options = recordingSession.stop(options: .load()) else {
+        guard let options = recordingSession.stop(options: .load(temporaryTarget: RecordingTranslationOverride.shared.consume())) else {
             transcriptionTask?.cancel()
             recorder.cancel()
             target = nil
@@ -355,6 +365,7 @@ final class OfflineDictationController {
         invalidateTemporaryMessages()
         sessionOutput = options.outputMode
         translationSettings = options.translation
+        panel.setTranslationState(enabled: translationSettings.enabled && translationSettings.routingPolicy != nil)
         sessionStyle = PersonalStyleStore.shared.profile(for: origin?.bundleID)
         let target = target
         if triggerSource == .miniMicrophone {
@@ -417,6 +428,14 @@ final class OfflineDictationController {
                     }
                     self.panel.show(state: .result(output), language: self.language, anchor: target.anchor)
                 }
+            } catch LanguageRoutingError.needsTargetSelection {
+                guard self.sessionID == id, !Task.isCancelled, let original = self.untranslatedText else { return }
+                self.awaitingTranslationTarget = true
+                self.pendingTranscript = original
+                self.onMiniMicrophoneStateChanged?(.hidden)
+                self.panel.show(state: .result(original), language: self.language, anchor: self.resultAnchor)
+                self.panel.setResultMessage("The source language is unclear. Choose a target language.", retryTitle: "Retry Translation", canRetry: false)
+                self.panel.setTranslationState(enabled: true, needsTarget: true)
             } catch {
                 guard self.sessionID == id, !Task.isCancelled else { return }
                 if let original = self.untranslatedText {
@@ -436,9 +455,10 @@ final class OfflineDictationController {
 
     private func remember(_ output: String, kind: OperationResult.Kind, status: String = "Ready") {
         let appliedStyle = kind == .message ? messagePreview.model.draftUsesAI : translationSettings.enabled
+        let hasTranslatedOutput = translationSettings.enabled && !["Translation failed", "Meaning clarification needed", "Message preparation failed"].contains(status)
         RecentResults.shared.record(OperationResult(id: sessionID, kind: kind, source: rawTranscript ?? untranslatedText ?? output,
             result: output, application: OriginApplication.name(origin?.bundleID),
-            language: translationSettings.enabled ? translationSettings.target.displayName : nil,
+            language: hasTranslatedOutput ? (translationDirection?.target ?? translationSettings.routingPolicy?.fixedTarget ?? translationSettings.target).displayName : nil,
             style: appliedStyle ? sessionStyle?.name : nil, status: status), token: historyToken)
     }
 
@@ -449,15 +469,30 @@ final class OfflineDictationController {
         panel.hide()
         onMiniMicrophoneStateChanged?(.hidden)
         messagePreview.model.canInsert = target != nil
-        messagePreview.show(transcript: transcript, style: sessionStyle?.name,
-                            language: translationSettings.enabled ? translationSettings.target.displayName : nil)
+        messagePreview.model.allowsLanguageSelection = translationSettings.enabled && translationSettings.routingPolicy != nil
+        let languageLabel: String?
+        if translationSettings.enabled, translationSettings.routingPolicy != nil {
+            languageLabel = translationDirection?.label ?? translationSettings.routingPolicy?.fixedTarget?.displayName ?? "Auto"
+        } else { languageLabel = translationSettings.enabled ? translationSettings.target.displayName : nil }
+        messagePreview.show(transcript: transcript, style: sessionStyle?.name, language: languageLabel)
+        if let translationDirection { messagePreview.model.language = translationDirection.label }
         let response = await messagePreview.model.prepare(transcript: transcript, useAI: useAI) {
-            try await AIClient().composeMessage(transcript: transcript, style: sessionStyle,
-                targetLanguage: translationSettings.enabled ? translationSettings.target.displayName : nil,
+            if translationSettings.enabled, let policy = translationSettings.routingPolicy {
+                return try await AIClient().composeRoutedMessage(transcript: transcript, style: sessionStyle,
+                    policy: policy, clarification: messageClarification)
+            }
+            return try await AIClient().composeMessage(transcript: transcript, style: sessionStyle,
+                targetLanguage: translationSettings.enabled ? (translationDirection?.target ?? translationSettings.routingPolicy?.fixedTarget ?? translationSettings.target).displayName : nil,
                 clarification: messageClarification)
         }
         guard sessionID == session, generation == messageGeneration, !Task.isCancelled else { return }
         if let response {
+            if let direction = response.direction {
+                awaitingTranslationTarget = false
+                translationDirection = direction
+                translationSettings.routingPolicy = .target(direction.target)
+            }
+            if response.needsTargetSelection { return }
             if !response.draft.isEmpty {
                 pendingTranscript = response.draft
                 remember(response.draft, kind: .message, status: useAI ? "AI draft" : "Local draft")
@@ -471,8 +506,24 @@ final class OfflineDictationController {
         guard let config = SelectionAssistantViewModel.providerConfiguration() else {
             throw NSError(domain: "Textora", code: 43, userInfo: [NSLocalizedDescriptionKey: "Configure an AI provider and model in Settings."])
         }
-        let result = try await AIClient().translateText(provider: config.provider, model: config.model, apiKey: config.key,
-            text: text, targetLanguage: translationSettings.target.displayName, sourceLanguage: translationSettings.sourceLanguageName, style: sessionStyle)
+        let result: String
+        if let policy = translationSettings.routingPolicy {
+            let id = sessionID
+            let response = try await AIClient().translateRoutedText(text: text, policy: policy, style: sessionStyle)
+            guard sessionID == id, !Task.isCancelled else { throw CancellationError() }
+            switch response {
+            case .needsTargetSelection: throw LanguageRoutingError.needsTargetSelection
+            case .ready(let value, let direction):
+                result = value
+                awaitingTranslationTarget = false
+                translationDirection = direction
+                translationSettings.routingPolicy = .target(direction.target)
+                panel.setTranslationState(enabled: true, direction: direction)
+            }
+        } else {
+            result = try await AIClient().translateText(provider: config.provider, model: config.model, apiKey: config.key,
+                text: text, targetLanguage: translationSettings.target.displayName, sourceLanguage: translationSettings.sourceLanguageName, style: sessionStyle)
+        }
         guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NSError(domain: "Textora", code: 44, userInfo: [NSLocalizedDescriptionKey: "Empty translation."])
         }
@@ -492,6 +543,29 @@ final class OfflineDictationController {
         panel.setResultMessage("Ready to copy. Place the cursor in your chosen field and paste with ⌘V.", retryTitle: "Retry Insert", canRetry: false)
     }
 
+    private func changeTranslationTarget(_ language: TranslationLanguage) {
+        guard translationSettings.enabled, translationSettings.routingPolicy != nil else { return }
+        transcriptionTask?.cancel()
+        translationSettings.routingPolicy = .target(language)
+        awaitingTranslationTarget = false
+        translationDirection = nil
+        panel.setTranslationState(enabled: true, direction: LanguageDirection(source: nil, target: language))
+        if sessionOutput == .message, let transcript = rawTranscript {
+            let clarification = messagePreview.model.clarification
+            if !clarification.isEmpty { messageClarification += "\n" + clarification }
+            messagePreview.model.clarification = ""
+            messagePreview.model.targetLanguage = language
+            messagePreview.model.draft = ""
+            messagePreview.model.questions = []
+            messagePreview.model.needsTargetSelection = false
+            let id = sessionID
+            transcriptionTask = Task { await self.prepareMessage(transcript, session: id, useAI: true) }
+        } else {
+            needsTranslationRetry = true
+            retryResult()
+        }
+    }
+
     private func retryResult() {
         transcriptionTask?.cancel()
         let id = sessionID
@@ -506,6 +580,13 @@ final class OfflineDictationController {
                     self.remember(result, kind: .dictation)
                     if self.target == nil { self.showCopyOnlyResult(result); return }
                     self.panel.show(state: .result(result), language: self.language, anchor: self.resultAnchor)
+                } catch LanguageRoutingError.needsTargetSelection {
+                    guard self.sessionID == id, !Task.isCancelled else { return }
+                    self.awaitingTranslationTarget = true
+                    self.panel.show(state: .result(original), language: self.language, anchor: self.resultAnchor)
+                    self.panel.setResultMessage("Choose a target language to continue.", retryTitle: "Retry Translation", canRetry: false)
+                    self.panel.setTranslationState(enabled: true, needsTarget: true)
+                    return
                 } catch {
                     guard self.sessionID == id, !Task.isCancelled else { return }
                     self.panel.show(state: .result(original), language: self.language, anchor: self.resultAnchor)
@@ -518,7 +599,7 @@ final class OfflineDictationController {
     }
 
     private func retryInsert() async {
-        guard let text = pendingTranscript, let target else { return }
+        guard !awaitingTranslationTarget, !needsTranslationRetry, let text = pendingTranscript, let target else { return }
         let id = sessionID
         if await SelectionTextWorker.shared.insertDictation(text, into: target, reactivate: canReactivateOriginalApp) {
             guard sessionID == id, !Task.isCancelled else { return }
@@ -573,6 +654,7 @@ final class OfflineDictationController {
 
     private func setBusy(_ value: Bool) {
         if !value {
+            RecordingTranslationOverride.shared.target = nil
             recordingSession.cancel()
             stopTimerAndMonitors()
         }

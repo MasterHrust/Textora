@@ -20,6 +20,8 @@ This repository does not include a Textora backend proxy.
 - Select text in native macOS apps, browsers, Electron apps, mail clients, chats, and editors.
 - Choose `Fix`, `Shorten`, `Formal`, or `Humanize`, or let SmartAI recommend the best rewrite mode.
 - Translate selected text into your configured target language.
+- Optional Smart translation direction uses one primary and one second language across selected text and speech: primary → second, every other source → primary. Choose Auto in the translation language list to set it up directly in the result panel, or use Settings > Writing > Rewrite & Translate. Existing settings stay active until you opt in.
+- Target changes in Smart mode apply only to the current selection or recording. If the source language is ambiguous, choose a target before translation continues; nothing is inserted automatically while the choice is pending. Summary has its own optional Smart direction choice and still defaults to the original language.
 - Apply the result in place or copy it when direct replacement is unavailable.
 - Preserve surrounding rich-text formatting where the target app supports it.
 

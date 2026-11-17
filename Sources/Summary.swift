@@ -9,15 +9,19 @@ struct SummaryOptions: Equatable {
     }
     var detail: Detail = .brief
     var language: TranslationLanguage?
+    var smartDirection = false
+    // Immutable per-request snapshot, never persisted.
+    var routingPolicy: LanguagePolicy? = nil
 
     static func load(_ defaults: UserDefaults) -> Self {
         Self(detail: Detail(rawValue: defaults.string(forKey: "summary.detail") ?? "") ?? .brief,
-             language: defaults.string(forKey: "summary.language").flatMap(TranslationLanguage.init(rawValue:)))
+             language: defaults.string(forKey: "summary.language").flatMap(TranslationLanguage.init(rawValue:)),
+             smartDirection: defaults.string(forKey: "summary.language") == "smart")
     }
 
     func save(_ defaults: UserDefaults) {
         defaults.set(detail.rawValue, forKey: "summary.detail")
-        defaults.set(language?.rawValue ?? "original", forKey: "summary.language")
+        defaults.set(smartDirection ? "smart" : (language?.rawValue ?? "original"), forKey: "summary.language")
     }
 }
 
@@ -28,6 +32,9 @@ struct TextSummary: Codable, Equatable {
     }
     let overview: String
     let sections: [Section]
+    var direction: LanguageDirection? = nil
+    var needsTargetSelection = false
+    private enum CodingKeys: String, CodingKey { case overview, sections }
 
     var plainText: String {
         ([overview] + sections.map { section in
@@ -48,8 +55,40 @@ final class SummaryViewModel: ObservableObject {
         didSet {
             guard oldValue != options else { return }
             options.save(defaults)
+            if oldValue.language != options.language || oldValue.smartDirection != options.smartDirection {
+                temporaryTarget = nil
+                direction = nil
+            }
             if !source.isEmpty { generate() }
         }
+    }
+
+    @Published private(set) var needsTargetSelection = false
+    @Published private(set) var direction: LanguageDirection?
+    @Published private(set) var temporaryTarget: TranslationLanguage?
+    private var routingSettings = LanguageRoutingSettings.load()
+    var languageLabel: String {
+        if let direction { return direction.label }
+        if let temporaryTarget { return temporaryTarget.displayName }
+        return options.smartDirection ? "Auto" : (options.language?.displayName ?? "Original language")
+    }
+    func selectLanguage(_ language: TranslationLanguage?) {
+        if options.smartDirection, let language {
+            temporaryTarget = language
+            direction = nil
+            generate()
+        } else {
+            var next = options
+            next.smartDirection = false
+            next.language = language
+            options = next
+        }
+    }
+    func selectSmartDirection() {
+        temporaryTarget = nil
+        direction = nil
+        if options.smartDirection { generate() }
+        else { var next = options; next.smartDirection = true; next.language = nil; options = next }
     }
 
     private let defaults: UserDefaults
@@ -71,10 +110,15 @@ final class SummaryViewModel: ObservableObject {
         self.pasteboard = pasteboard
         self.summarize = summarize
         options = SummaryOptions.load(defaults)
+        routingSettings = .load(defaults)
     }
 
     func start(source: String, application: String?) {
         cancel()
+        routingSettings = .load(defaults)
+        temporaryTarget = nil
+        direction = nil
+        needsTargetSelection = false
         self.source = source
         self.application = application
         sessionID = UUID()
@@ -93,8 +137,16 @@ final class SummaryViewModel: ObservableObject {
         cancel()
         let id = generation
         let text = source
-        let requestedOptions = options
+        var requestedOptions = options
+        if options.smartDirection {
+            guard routingSettings.primary != routingSettings.secondary else {
+                error = "Choose two different languages in Smart translation settings."
+                return
+            }
+            requestedOptions.routingPolicy = (temporaryTarget ?? direction?.target).map(LanguagePolicy.target) ?? routingSettings.policy
+        }
         result = nil
+        needsTargetSelection = false
         error = ""
         notice = ""
         busy = true
@@ -102,7 +154,9 @@ final class SummaryViewModel: ObservableObject {
             do {
                 let summary = try await summarize(text, requestedOptions)
                 guard let self, self.generation == id, !Task.isCancelled else { return }
-                self.result = summary
+                self.needsTargetSelection = summary.needsTargetSelection
+                self.direction = summary.direction
+                self.result = summary.needsTargetSelection ? nil : summary
                 self.busy = false
                 self.remember(status: "Ready")
             } catch is CancellationError {
@@ -135,7 +189,7 @@ final class SummaryViewModel: ObservableObject {
     private func remember(status: String) {
         guard let result else { return }
         history.record(OperationResult(id: sessionID, kind: .summary, source: source, result: result.plainText,
-            application: application, language: options.language?.displayName, status: status), token: historyToken)
+            application: application, language: (direction?.target ?? options.language)?.displayName, status: status), token: historyToken)
     }
 }
 
@@ -280,7 +334,7 @@ struct SummaryView: View {
             Button { showsLanguages.toggle() } label: {
                 HStack(spacing: 7) {
                     languageIcon(model.options.language)
-                    Text(model.options.language?.displayName ?? "Original language")
+                    Text(model.languageLabel)
                         .font(.system(size: 12.5, weight: .bold)).lineLimit(1)
                     Image(systemName: showsLanguages ? "chevron.up" : "chevron.down")
                         .font(.system(size: 9, weight: .heavy)).foregroundStyle(TextoraPanelStyle.secondaryText)
@@ -292,7 +346,7 @@ struct SummaryView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Summary language")
-            .accessibilityValue(model.options.language?.displayName ?? "Original language")
+            .accessibilityValue(model.languageLabel)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
@@ -301,6 +355,12 @@ struct SummaryView: View {
         ScrollView {
             VStack(spacing: 3) {
                 languageRow(nil)
+                Button { showsLanguages = false; model.selectSmartDirection() } label: {
+                    Label("Auto · Smart direction", systemImage: "arrow.left.arrow.right")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 9).frame(height: 31)
+                }.buttonStyle(.plain)
                 ForEach(TranslationLanguage.allCases) { language in languageRow(language) }
             }.padding(5)
         }
@@ -321,10 +381,10 @@ struct SummaryView: View {
     }
 
     private func languageRow(_ language: TranslationLanguage?) -> some View {
-        let selected = model.options.language == language
+        let selected = model.options.smartDirection ? (language != nil && model.temporaryTarget == language) : model.options.language == language
         return Button {
             showsLanguages = false
-            model.options.language = language
+            model.selectLanguage(language)
         } label: {
             HStack(spacing: 8) {
                 languageIcon(language)
@@ -342,7 +402,12 @@ struct SummaryView: View {
 
     @ViewBuilder
     private var summaryContent: some View {
-        if model.busy {
+        if model.needsTargetSelection {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("The source language is unclear. Choose a target language to continue.")
+                TemporaryTargetPicker { model.selectLanguage($0) }
+            }.foregroundStyle(.white.opacity(0.85)).padding(12)
+        } else if model.busy {
             card {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small).tint(.white.opacity(0.68))
@@ -428,7 +493,7 @@ struct SummaryView: View {
                     Label(model.error.isEmpty ? "Regenerate" : "Retry", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(SummaryActionButtonStyle())
-                .disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.needsTargetSelection)
             }
             Button { model.copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
                 .buttonStyle(SummaryActionButtonStyle(prominent: true))

@@ -7,6 +7,14 @@ import XCTest
 @testable import Textora
 
 final class PersonalizationTests: XCTestCase {
+    // Legacy translation scenarios must ignore the running app's Auto preference.
+    private func legacyRoutingDefaults() -> UserDefaults {
+        let name = "TextoraTests.LegacyRouting.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
     private func temporaryURL() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("TextoraFeatureTests-\(UUID().uuidString)/history.encrypted")
     }
@@ -546,7 +554,7 @@ final class PersonalizationTests: XCTestCase {
                 return try await withCheckedThrowingContinuation { old = $0 }
             }
             return "New styled translation"
-        }, styleStore: store)
+        }, styleStore: store, routingDefaults: legacyRoutingDefaults())
         let context = TextAccessService.FocusedTextContext(text: "Original", frame: .zero, usesSelection: true,
             selectedRange: CFRange(location: 0, length: 8), targetElement: AXUIElementCreateSystemWide(), targetAppPID: 999, targetBundleID: "test")
         model.setSelectionContext(context, automaticallyCheck: false)
@@ -570,7 +578,7 @@ final class PersonalizationTests: XCTestCase {
         let history = RecentResults(defaults: suite(), repository: ResultHistoryStore(url: url, key: { _ in key }))
         history.policy.enabled = true
         let pasteboard = NSPasteboard.withUniqueName(); defer { pasteboard.releaseGlobally() }
-        let model = SelectionAssistantViewModel(pasteboard: pasteboard, styleStore: PersonalStyleStore(defaults: suite()), history: history)
+        let model = SelectionAssistantViewModel(pasteboard: pasteboard, styleStore: PersonalStyleStore(defaults: suite()), history: history, routingDefaults: legacyRoutingDefaults())
         let context = TextAccessService.FocusedTextContext(text: "Original", frame: .zero, usesSelection: true,
             selectedRange: CFRange(location: 0, length: 8), targetElement: AXUIElementCreateSystemWide(), targetAppPID: 999, targetBundleID: "test")
         model.setSelectionContext(context, automaticallyCheck: false)
@@ -839,7 +847,7 @@ final class PersonalizationTests: XCTestCase {
             XCTFail("A disabled history must not request a key")
             throw FeatureError.unavailableKeychain
         }))
-        let model = SelectionAssistantViewModel(styleStore: store, history: history)
+        let model = SelectionAssistantViewModel(styleStore: store, history: history, routingDefaults: legacyRoutingDefaults())
         let context = TextAccessService.FocusedTextContext(text: "Original", frame: .zero, usesSelection: true,
             selectedRange: CFRange(location: 0, length: 8), targetElement: AXUIElementCreateSystemWide(), targetAppPID: 999, targetBundleID: "test")
         model.setSelectionContext(context, automaticallyCheck: false)
@@ -867,7 +875,7 @@ final class PersonalizationTests: XCTestCase {
         }))
         var calls = 0
         let ready = expectation(description: "Translation ready")
-        let model = SelectionAssistantViewModel(translator: { _, _ in calls += 1; return "Translated" }, styleStore: store, history: history)
+        let model = SelectionAssistantViewModel(translator: { _, _ in calls += 1; return "Translated" }, styleStore: store, history: history, routingDefaults: legacyRoutingDefaults())
         let context = TextAccessService.FocusedTextContext(text: "Original", frame: .zero, usesSelection: true,
             selectedRange: CFRange(location: 0, length: 8), targetElement: AXUIElementCreateSystemWide(), targetAppPID: 999, targetBundleID: "slack")
         model.setSelectionContext(context, automaticallyCheck: false)

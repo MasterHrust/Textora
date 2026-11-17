@@ -12,6 +12,14 @@ private actor ReviewGate {
 }
 
 final class InteractionRevisionTests: XCTestCase {
+    // Legacy translation scenarios must ignore the running app's Auto preference.
+    private func legacyRoutingDefaults() -> UserDefaults {
+        let name = "TextoraTests.LegacyRouting.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
     @MainActor
     func testFloatingHelpersOnlyAcceptKeyboardFocusWhenRecordingControlsOptIn() {
         let panel = DraggableFloatingPanel(contentRect: .zero,
@@ -170,7 +178,7 @@ final class InteractionRevisionTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "TextoraStyleSuspension.\(UUID().uuidString)")!
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
-        let model = SelectionAssistantViewModel(pasteboard: board, styleStore: PersonalStyleStore(defaults: defaults))
+        let model = SelectionAssistantViewModel(pasteboard: board, styleStore: PersonalStyleStore(defaults: defaults), routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Original message"), automaticallyCheck: false)
         model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected message")], generation: model.requestID)
         XCTAssertTrue(model.canApply)
@@ -261,7 +269,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testMeaningPreviewIdentifiesUnansweredQuestionsAfterChoosingHungerGamesInterpretation() throws {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Hi Rob, Sorry, I was on the Hunger Games it tooks more time"), automaticallyCheck: false)
         let questions = [
             MeaningQuestion(question: "What were you doing with The Hunger Games?",
@@ -408,7 +416,7 @@ final class InteractionRevisionTests: XCTestCase {
         defer { pasteboard.releaseGlobally() }
         for translating in [false, true] {
             for reason in TextAccessService.ApplyFailureReason.allCases {
-                let model = SelectionAssistantViewModel(pasteboard: pasteboard)
+                let model = SelectionAssistantViewModel(pasteboard: pasteboard, routingDefaults: legacyRoutingDefaults())
                 model.setSelectionContext(context("Original"), automaticallyCheck: false)
                 if translating {
                     model.prepareHotKeyPresentation(.translate)
@@ -429,7 +437,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testCustomMeaningReplacesIncompatibleOptions() throws {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("We are helping with Alexey, as are the others in the Onboarding session."), automaticallyCheck: false)
         let question = MeaningQuestion(question: "Who is helping?", options: ["Helping Alexey directly", "A task involving Alexey"])
         model.acceptReview([OverlaySuggestion(operation: model.operation, text: "", meaningQuestions: [question])], generation: model.requestID)
@@ -491,7 +499,7 @@ final class InteractionRevisionTests: XCTestCase {
         let raw = #"{"fix":"We are helping Alexey.","formal":"Changed","shorten":"Changed","humanize":"Changed","recommended":"fix","questions":[{"question":"Who is helping?","options":["Together with Alexey","Helping Alexey"]},{"question":"What are the others doing?","options":["Also helping","Attending onboarding instead"]}]}"#
         let results = try AIClient().decodeCompleteReview(raw, original: original, requireMeaningAssessment: true)
         XCTAssertTrue(results.allSatisfy { $0.text == original && !$0.isRecommended })
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context(original), automaticallyCheck: false)
         let generation = model.requestID
         model.acceptReview(results, generation: generation)
@@ -525,7 +533,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testTranslationAndClosingDiscardMeaningQuestions() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Ambiguous text"), automaticallyCheck: false)
         let results = [OverlaySuggestion(operation: model.operation, text: "Ambiguous text", meaningQuestions: [MeaningQuestion(question: "Who?", options: ["One", "Two"])])]
         model.acceptReview(results, generation: model.requestID)
@@ -563,19 +571,19 @@ final class InteractionRevisionTests: XCTestCase {
             else { UserDefaults.standard.removeObject(forKey: key) }
         }
         SelectionAssistantSettings.setSelectedOperation(.makeProfessional)
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         model.acceptReview([OverlaySuggestion(operation: .humanize, text: "Corrected", isRecommended: true)], generation: model.requestID)
         XCTAssertEqual(model.operation, .humanize)
         XCTAssertEqual(SelectionAssistantSettings.selectedOperation(), .makeProfessional)
-        XCTAssertEqual(SelectionAssistantViewModel().operation, .makeProfessional)
+        XCTAssertEqual(SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults()).operation, .makeProfessional)
         model.operation = .shorten
         XCTAssertEqual(SelectionAssistantSettings.selectedOperation(), .shorten)
     }
 
     @MainActor
     func testRejectedApplicationRequiresFreshSelectionBeforeRetry() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected")], generation: model.requestID)
         XCTAssertTrue(model.canApply)
@@ -589,7 +597,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testRejectedApplicationRecoversWhenSameTextIsSelectedAgain() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected")], generation: model.requestID)
         model.completeApplication(.failed, onFinished: { XCTFail("A rejected write must keep the result") })
@@ -602,7 +610,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testRejectedApplicationDiscardsStaleModeErrorsAndLateReviews() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         let generation = model.requestID
         model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected")], generation: generation)
@@ -644,7 +652,7 @@ final class InteractionRevisionTests: XCTestCase {
     func testAcceptedApplicationClosesRewriteAndTranslationWithoutWarning() {
         for action in [TextoraHotKeyAction.rewrite, .translate] {
             for result in [TextAccessService.ApplyResult.success, .dispatched] {
-                let model = SelectionAssistantViewModel()
+                let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
                 model.setSelectionContext(context("Original"), automaticallyCheck: false)
                 model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected")], generation: model.requestID)
                 model.prepareHotKeyPresentation(action)
@@ -668,7 +676,7 @@ final class InteractionRevisionTests: XCTestCase {
         for result in [TextAccessService.ApplyResult.failed, .unsupportedTarget, .clipboardArmed] {
             pasteboard.clearContents()
             pasteboard.setString("Previous clipboard", forType: .string)
-            let model = SelectionAssistantViewModel(pasteboard: pasteboard)
+            let model = SelectionAssistantViewModel(pasteboard: pasteboard, routingDefaults: legacyRoutingDefaults())
             model.setSelectionContext(context("Original"), automaticallyCheck: false)
             model.acceptReview([OverlaySuggestion(operation: model.operation, text: "Corrected")], generation: model.requestID)
             XCTAssertEqual(pasteboard.string(forType: .string), "Previous clipboard")
@@ -694,7 +702,7 @@ final class InteractionRevisionTests: XCTestCase {
         for result in [TextAccessService.ApplyResult.failed, .unsupportedTarget, .clipboardArmed] {
             pasteboard.clearContents()
             pasteboard.setString("Previous clipboard", forType: .string)
-            let model = SelectionAssistantViewModel(pasteboard: pasteboard)
+            let model = SelectionAssistantViewModel(pasteboard: pasteboard, routingDefaults: legacyRoutingDefaults())
             model.prepareHotKeyPresentation(.translate)
             model.setSelectionContext(context("Good morning"), automaticallyCheck: false, preservePresentation: true)
             model.acceptTranslation("Доброе утро")
@@ -736,10 +744,10 @@ final class InteractionRevisionTests: XCTestCase {
         for hotKey in [false, true] {
             for failure in [TextAccessService.ApplyResult.failed, .unsupportedTarget, .clipboardArmed] {
                 var requests: [(String, TranslationLanguage)] = []
-                let model = SelectionAssistantViewModel(pasteboard: pasteboard) { text, language in
+                let model = SelectionAssistantViewModel(pasteboard: pasteboard, translator: { text, language in
                     requests.append((text, language))
                     return language == .russian ? "Доброе утро" : "Bonjour"
-                }
+                }, routingDefaults: legacyRoutingDefaults())
                 if hotKey { model.prepareHotKeyPresentation(.translate) }
                 model.translationLanguage = .russian
                 model.setSelectionContext(context("Good morning"), automaticallyCheck: false, preservePresentation: hotKey)
@@ -783,10 +791,10 @@ final class InteractionRevisionTests: XCTestCase {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         var requests = 0
-        let model = SelectionAssistantViewModel(pasteboard: pasteboard) { text, language in
+        let model = SelectionAssistantViewModel(pasteboard: pasteboard, translator: { text, language in
             requests += 1
             return "\(language.rawValue): \(text)"
-        }
+        }, routingDefaults: legacyRoutingDefaults())
         model.translationLanguage = .english
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         model.selectTranslationLanguage(.russian)
@@ -811,14 +819,14 @@ final class InteractionRevisionTests: XCTestCase {
         let firstStarted = expectation(description: "Russian request started")
         let secondStarted = expectation(description: "French request started")
         let firstCompleted = expectation(description: "Cancelled request returned late")
-        let model = SelectionAssistantViewModel { _, language in
+        let model = SelectionAssistantViewModel(translator: { _, language in
             let result: String = try await withCheckedThrowingContinuation { continuation in
                 pending[language] = continuation
                 (language == .russian ? firstStarted : secondStarted).fulfill()
             }
             if language == .russian { firstCompleted.fulfill() }
             return result
-        }
+        }, routingDefaults: legacyRoutingDefaults())
         model.translationLanguage = .russian
         model.setSelectionContext(context("Original"), automaticallyCheck: false)
         model.translate()
@@ -839,10 +847,10 @@ final class InteractionRevisionTests: XCTestCase {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         var shouldFail = true
-        let model = SelectionAssistantViewModel(pasteboard: pasteboard) { _, _ in
+        let model = SelectionAssistantViewModel(pasteboard: pasteboard, translator: { _, _ in
             if shouldFail { throw NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: "Translation unavailable"]) }
             return "Bonjour"
-        }
+        }, routingDefaults: legacyRoutingDefaults())
         model.prepareHotKeyPresentation(.translate)
         model.translationLanguage = .russian
         model.setSelectionContext(context("Original"), automaticallyCheck: false, preservePresentation: true)
@@ -901,7 +909,7 @@ final class InteractionRevisionTests: XCTestCase {
             if let previous { defaults.set(previous, forKey: SelectionAssistantSettings.Keys.operation) }
             else { defaults.removeObject(forKey: SelectionAssistantSettings.Keys.operation) }
         }
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("Translate this sentence"), automaticallyCheck: false)
         let oldGeneration = model.requestID
         model.prepareHotKeyPresentation(.translate)
@@ -924,7 +932,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testNewToolPanelSelectionAlwaysReturnsToRewrite() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.prepareHotKeyPresentation(.translate)
         model.setSelectionContext(context("Old selection"), automaticallyCheck: false, preservePresentation: true)
         XCTAssertTrue(model.isTranslationMode)
@@ -947,7 +955,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testExplicitTranslateHotKeyDoesNotStartRewriteOnSelection() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.prepareHotKeyPresentation(.translate)
         model.setSelectionContext(context("123"), preservePresentation: true)
         XCTAssertTrue(model.isTranslationMode)
@@ -959,6 +967,8 @@ final class InteractionRevisionTests: XCTestCase {
     func testMicrophoneTipsAreLocalToEachControl() {
         let steps = MicrophoneTip.allCases
         XCTAssertEqual(steps, [.microphone, .translation, .languages, .swap, .drag])
+        XCTAssertEqual(MicrophoneTip.languages.next(smartDirection: true), .drag)
+        XCTAssertEqual(MicrophoneTip.languages.next(smartDirection: false), .swap)
         for (index, tip) in steps.enumerated() {
             XCTAssertFalse(tip.message.contains("Toolbox"))
             XCTAssertFalse(tip.message.contains("Rewrite"))
@@ -1170,7 +1180,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testLateReviewCannotOverwriteNewContextOrClosedPanel() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("First"), automaticallyCheck: false)
         let old = model.requestID
         model.setSelectionContext(context("Second"), automaticallyCheck: false)
@@ -1192,7 +1202,7 @@ final class InteractionRevisionTests: XCTestCase {
             if let oldOperation { defaults.set(oldOperation, forKey: SelectionAssistantSettings.Keys.operation) }
             else { defaults.removeObject(forKey: SelectionAssistantSettings.Keys.operation) }
         }
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         let original = "I would like to kindly ask you to send the report tomorrow."
         model.setSelectionContext(context(original), automaticallyCheck: false)
         model.acceptReview(RewriteOperation.allCases.map {
@@ -1327,7 +1337,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testFormattedNumbersProduceActionablePreviewInAllModes() throws {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         let original = "Please increase to 20000 credits until 2026-10-31."
         model.setSelectionContext(context(original), automaticallyCheck: false)
         model.acceptReview(try numericReview(original, "Please increase the limit to 20,000 credits until 2026-10-31."), generation: model.requestID)
@@ -1347,7 +1357,7 @@ final class InteractionRevisionTests: XCTestCase {
                        "formal": safe, "shorten": safe, "humanize": safe, "recommended": "fix"]
         let raw = String(data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
         let results = try AIClient().decodeCompleteReview(raw, original: original)
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context(original), automaticallyCheck: false)
         model.acceptReview(results, generation: model.requestID)
         for operation in RewriteOperation.allCases {
@@ -1368,7 +1378,7 @@ final class InteractionRevisionTests: XCTestCase {
         let candidate = "Good morning, dear teachers. Could I please book an appointment from 14:10 to 14:20 for Primary Parents’ Evening on Tuesday, 20 October 2026? Thank you."
         let results = try numericReview(original, candidate)
         XCTAssertTrue(results.allSatisfy { $0.validationError == nil })
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.prepareHotKeyPresentation(.rewrite)
         model.setSelectionContext(context(original), automaticallyCheck: false, preservePresentation: true)
         model.acceptReview(results, generation: model.requestID)
@@ -1435,7 +1445,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testInvalidVariantDoesNotBlockSafePreviewOrShowGreenCheck() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         model.setSelectionContext(context("See https://safe.example"), automaticallyCheck: false)
         model.acceptReview([
             OverlaySuggestion(operation: .fixGrammar, text: "", validationError: "Protected URL"),
@@ -1515,7 +1525,7 @@ final class InteractionRevisionTests: XCTestCase {
 
     @MainActor
     func testMovingSelectionDisablesOldContextBeforeNewResolution() {
-        let model = SelectionAssistantViewModel()
+        let model = SelectionAssistantViewModel(routingDefaults: legacyRoutingDefaults())
         let context = TextAccessService.FocusedTextContext(text: "Hello", frame: .zero,
             usesSelection: true, selectedRange: CFRange(location: 0, length: 5),
             targetElement: AXUIElementCreateSystemWide(), targetAppPID: 999, targetBundleID: "test")
